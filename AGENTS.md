@@ -35,6 +35,12 @@ of summaries, and the agent zooms into that tree when it needs detail.
 File names are lowercase. Multi-word names are written as one word
 (`askai.ts`, `openai.ts`).
 
+The exception is `ios/`, which follows Swift naming. Swift files and folders
+use UpperCamelCase, and a file is named after the main type it defines
+(`Site.swift` holds `Site`). Do not rename the names Xcode expects
+(`Assets.xcassets`, `Info.plist`). `src/computer.swift` is not part of the iOS
+app, so it follows the lowercase rule.
+
 ## The original concept
 
 The original design document is
