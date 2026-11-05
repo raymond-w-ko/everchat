@@ -189,12 +189,15 @@ export type Day = { date: string; what: string; usd: number };
 
 export const MAIN = "EverChat";
 
-// EverChat's turn, as a stop names it among the agents at work
+// EverChat's turn, as a stop names it among the agents at work. Not only
+// a label: it is saved in view.json (`work`, what a restart resumes) and
+// sent on the wire (a view's `stop`). Changing it needs a WIRE bump and a
+// conversion of saved `work`, or a cut turn won't resume after a restart
 export const TURN = "EverChat's turn";
 
 // the messages' version, in a view's query; one more for each change an
 // older view would misread
-export const WIRE = 2;
+export const WIRE = 3;
 
 // the Link's: the most a live socket hears nothing (ms); the wait to open
 // another; the server's tick; a terminal's close as it quits; the

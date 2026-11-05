@@ -99,3 +99,12 @@ test("a frame never passes its width, however long its title", () => {
   const rows = View.entry_rows(1, "echo", diff);
   expect(Paint.rows_lines(rows, 60).map((l) => Paint.text_width(l.map((r) => r.x).join("")))).toEqual([60, 60, 60, 60]);
 });
+
+// a kind this terminal doesn't know (a newer server's, or an old log's)
+// prints as a note, never throws
+test("a message of an unknown kind prints as a note", () => {
+  const lines = Paint.rows_lines(View.entry_rows(1, "unii" as any, "hello"), 40);
+  const word  = lines.flat().find((r) => r.x.includes("hello"));
+  expect(word?.s.d).toBe(true);
+  expect(word?.s.i).toBe(true);
+});

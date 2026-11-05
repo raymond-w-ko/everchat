@@ -222,7 +222,8 @@ function sum_lines(id: number, n: number, head: Line, text: string, w: number): 
 // its name over it; all at the left, the column's width; none framed
 // nor filled without text (images alone)
 function msg_lines(kind: Kind, who: string, body: Md.Block[], w: number): Line[] {
-  const look = Theme.KIND[kind];
+  // a kind this terminal doesn't know (a newer server's) looks like a note
+  const look = Theme.KIND[kind] ?? Theme.KIND.note;
   const ink  = { ...INK, d: look.dim, i: look.it };
   if (body.length === 0) {
     return [];
