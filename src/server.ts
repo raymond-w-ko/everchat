@@ -167,14 +167,14 @@ const LEAVE      = 500;
 const ENDED      = "the server process that ran it ended";
 // a turn's head, as a summary's is "Compaction:": one prompt serves both
 const HEAD       = "Turn: the user's new message:\n\n";
-// a goal's check (Chat.check): its own system prompt (Unii's, which says
+// a goal's check (Chat.check): its own system prompt (EverChat's, which says
 // a call is a turn or a compaction, made the model summarize the chat
 // instead of answering), asked after the chat (the view, its latest
 // messages whole) of its goal; unmet, the user's nudge
-const GOAL       = "You check a goal. Below is a chat between a user and Unii, an AI agent: its older messages as summary lines (id+n|text), then its latest messages whole, then the goal the user set with /goal. Answer yes if the chat shows the goal fully satisfied now, else no. Write that one word, nothing else.";
+const GOAL       = "You check a goal. Below is a chat between a user and EverChat, an AI agent: its older messages as summary lines (id+n|text), then its latest messages whole, then the goal the user set with /goal. Answer yes if the chat shows the goal fully satisfied now, else no. Write that one word, nothing else.";
 const GOAL_ASK   = "\nThe goal:\n\n";
 const GOAL_NO    = "The goal isn't satisfied yet: keep working.";
-const FULL       = "UniiChat's disk is full; try again soon.";
+const FULL       = "EverChat's disk is full; try again soon.";
 // an import running: its batch's file in the chat's dir (Chat.keep)
 const BATCH      = "/import.json";
 // under SPARE free, the disk takes no more (Chat.post)
@@ -251,7 +251,7 @@ const WEB: Record<string, string> = {
 // the email, and SIGNED. The hello's node is written with it, so no
 // compactor call summarizes the three (with an email of up to 254 bytes,
 // a node of at most 512 bytes) and a new account owes nothing.
-const HELLO_LINE = "unii: hello: UniiChat, one endless chat kept in a memory tree, recent days in more detail; build anything for years; recalls the past (ad2cat.py); a chatbot with a memory system; the user's terminal install; asks their email.";
+const HELLO_LINE = "everchat: hello: EverChat, one endless chat kept in a memory tree, recent days in more detail; build anything for years; recalls the past (ad2cat.py); a chatbot with a memory system; the user's terminal install; asks their email.";
 const SIGNED     = "You're in! What should we start with?";
 
 // Chat
@@ -309,7 +309,7 @@ export namespace Chat {
     mem.pay = tools.pay = wallet.pay;
     if (mem.count === 0) {
       const hello = HELLO + "\n\n" + email_ask(cloud.billing.github !== null);
-      Memory.push(mem, [{ kind: "unii", text: hello, line: HELLO_LINE }, { kind: "user", text: user.name }, { kind: "unii", text: SIGNED }]);
+      Memory.push(mem, [{ kind: "everchat", text: hello, line: HELLO_LINE }, { kind: "user", text: user.name }, { kind: "everchat", text: SIGNED }]);
     }
     chat.eye = Chat.eye(mem, Memory.turn(mem));
     mem.made = (l, i) => Chat.made(chat, l, i);
@@ -725,11 +725,11 @@ export namespace Chat {
     });
   }
 
-  // a turn's last message, Unii's reply or why there was none, to the
+  // a turn's last message, EverChat's reply or why there was none, to the
   // user's phones (Cloud.push)
   export function phone(chat: Chat): void {
     const last = Memory.message(chat.mem, chat.mem.count - 1);
-    if (last !== null && (last.kind === "unii" || last.kind === "note")) {
+    if (last !== null && (last.kind === "everchat" || last.kind === "note")) {
       Cloud.push(Chat.cloud, chat.acct.user, last.text);
     }
   }
@@ -760,7 +760,7 @@ export namespace Chat {
   // import, or past the credits
   export async function ingest(chat: Chat, id: string, body: Body): Promise<Answer> {
     if (chat.busy || chat.batch !== null) {
-      return { error: (chat.busy ? "Unii is answering" : "An import is under way") + ": import again once it ends." };
+      return { error: (chat.busy ? "EverChat is answering" : "An import is under way") + ": import again once it ends." };
     }
     const done = Chat.done(chat);
     const sizes: number[] = [];
@@ -884,7 +884,7 @@ export namespace Chat {
   // a message imported (a page); a line with no kind or no text refuses
   // the import whole (ingest reads every line before it logs one)
   export function imported(x: any): Log {
-    const kinds: Kind[] = ["user", "unii", "tool", "echo", "note"];
+    const kinds: Kind[] = ["user", "everchat", "tool", "echo", "note"];
     if (!kinds.includes(x?.kind)) {
       throw new Error("An import has no kind " + x?.kind + ".");
     }
@@ -964,7 +964,7 @@ export namespace Chat {
     }
   }
 
-  // the work a restart cut goes on, told so: each agent, and Unii's turn
+  // the work a restart cut goes on, told so: each agent, and EverChat's turn
   // by a note (none for a chat ended meanwhile)
   export async function resume(chat: Chat, work: string[]): Promise<void> {
     if (work.length === 0 || Chat.chats.get(chat.acct.user) !== chat) {
@@ -1023,12 +1023,12 @@ export namespace Chat {
     }
   }
 
-  // what runs: Unii's turn, the agents at work
+  // what runs: EverChat's turn, the agents at work
   export function running(chat: Chat): string[] {
     return [...(chat.busy ? [TURN] : []), ...Tools.working(chat.tools).map((a) => a.name)];
   }
 
-  // UniiChat's turn only, with the spawns and tells it waits on (for the
+  // EverChat's turn only, with the spawns and tells it waits on (for the
   // view: Tools.view, on chat.halt); agents go on. why: the note the turn's
   // end logs (Chat.turn), so after the reply the stop cut; null: none
   export function interrupt(chat: Chat, why: string | null): void {
@@ -1109,7 +1109,7 @@ export namespace Chat {
     const link = { send: (msg: object) => Chat.send(sock, msg), live: () => chat.socks.has(sock), computer, work };
     sock.data.device = Tools.attach(chat.tools, tab, host, sock.data.who, link);
     if (sock.data.device !== host) {
-      Chat.send(sock, { $: "note", text: host + " was taken: Unii calls this computer " + sock.data.device + "." });
+      Chat.send(sock, { $: "note", text: host + " was taken: EverChat calls this computer " + sock.data.device + "." });
     }
   }
 
@@ -1240,7 +1240,7 @@ export namespace Chat {
         return Chat.go(chat, msg.on === true || msg.on === "true");
       }
       case "guess": {
-        // a read: an import priced here, not by a unii older than PRICE
+        // a read: an import priced here, not by an everchat older than PRICE
         let sizes = "";
         for await (const data of msg.req?.body ?? []) {
           sizes += Buffer.from(data);
@@ -1460,7 +1460,7 @@ export namespace Main {
     const confirm = String((await req.json().catch(() => ({}))).confirm ?? "").trim().toLowerCase();
     if (user === null || confirm !== user.name.toLowerCase()) {
       const name = user === null ? "you are signed out." : "type \"" + user.name + "\".";
-      const error = "Deleting your account erases your chat and Unii's memory for good" + cloud.billing.closes + ". To confirm, " + name;
+      const error = "Deleting your account erases your chat and EverChat's memory for good" + cloud.billing.closes + ". To confirm, " + name;
       return Response.json({ error }, { status: 400 });
     }
     await Main.here(user.id);
@@ -1505,7 +1505,7 @@ export namespace Main {
         return new Response(Main.stream(Memory.page(mem)), { headers: { "content-type": "text/html; charset=utf-8" } });
       }
       case "/export": {
-        const name = "unii-memory-" + new Date().toISOString().slice(0, 10) + ".json";
+        const name = "everchat-memory-" + new Date().toISOString().slice(0, 10) + ".json";
         const json = { "content-type": "application/json", "content-disposition": 'attachment; filename="' + name + '"' };
         return new Response(Main.stream(Memory.dump(mem, await Cloud.data(Chat.cloud, user))), { headers: json });
       }
@@ -1582,7 +1582,7 @@ export namespace Main {
         }
         const q    = new URL(req.url).searchParams;
         const who  = Cloud.hash(Cloud.token(req));
-        const work = q.get("work") ?? "~/.unii/work";
+        const work = q.get("work") ?? "~/.everchat/work";
         const data = { user, who, tab: q.get("tab") ?? "", wire: q.get("wire"), host: q.get("device"), computer: q.get("computer") === "1", work, device: null, seen: new Set<string>() };
         return server.upgrade(req, { data }) ? undefined : new Response("upgrade failed", { status: 400 });
       }
@@ -1608,7 +1608,7 @@ export namespace Main {
     try {
       run();
     } catch (err: any) {
-      console.error("unii: " + what + " failed: " + (err?.stack ?? err));
+      console.error("everchat: " + what + " failed: " + (err?.stack ?? err));
       fail();
     }
   }
@@ -1694,7 +1694,7 @@ export namespace Main {
           Main.opened(ws.data.user.id, 1);
           Main.event("a socket of user " + ws.data.user.id, () => {
             if (ws.data.wire !== String(WIRE)) {
-              ws.send(JSON.stringify({ $: "error", text: "This page or unii is older than the server: reload or reopen it (`unii update` for the latest)." }));
+              ws.send(JSON.stringify({ $: "error", text: "This page or everchat is older than the server: reload or reopen it (`everchat update` for the latest)." }));
               return;
             }
             const chat = Chat.open(ws.data.user);
@@ -1742,7 +1742,7 @@ export namespace Main {
         Memory.stop(chat.mem);
       }
     });
-    console.log("unii: " + config.SITE + ", users in " + config.DIR + "/users, worker " + Main.index + " of " + Main.count + " on 127.0.0.1:" + port);
+    console.log("everchat: " + config.SITE + ", users in " + config.DIR + "/users, worker " + Main.index + " of " + Main.count + " on 127.0.0.1:" + port);
     send?.({ $: "ready" });
     Main.back?.send({ $: "go", tools: Tools.base() });
     Main.listen(hand);
@@ -1759,7 +1759,7 @@ export namespace Main {
   // it (a chat's note, a log line), so this is a bug, logged, never the
   // end of the worker and every chat it holds
   export function unowned(err: unknown): void {
-    console.error("unii: a failure no one owned: " + ((err as any)?.stack ?? err));
+    console.error("everchat: a failure no one owned: " + ((err as any)?.stack ?? err));
   }
 
   // a worker hears its supervisor
@@ -1867,7 +1867,7 @@ export namespace Main {
           peer.send({ $: "users", addr: Main.addr, users: [...Chat.chats.keys(), ...Main.coming.keys()] });
           [...Chat.chats.values()].forEach((chat) => Chat.give(chat, peer, msg.tools));
           Main.done();
-        }).catch((err) => console.error("unii: giving the chats failed: " + (err?.stack ?? err)));
+        }).catch((err) => console.error("everchat: giving the chats failed: " + (err?.stack ?? err)));
         return;
       }
       case "users": {
@@ -2087,8 +2087,8 @@ export namespace Main {
   }
 
   // the workers' supervisor (run: what starts one, on port+1+k,
-  // UNII_WORKER=k): holds the lock, starts again a worker that dies,
-  // answers each request with its worker's address (`x-unii-worker`:
+  // EVERCHAT_WORKER=k): holds the lock, starts again a worker that dies,
+  // answers each request with its worker's address (`x-everchat-worker`:
   // README; past its network's limit, NETS, 429), relays a worker's word
   // to all, sends their mail. A deploy (SIGHUP) starts each worker anew,
   // which takes the chats of the one before (Main.start); one that fails
@@ -2115,7 +2115,7 @@ export namespace Main {
       }
     };
     const start = (k: number) => {
-      const env = { ...config.config_env(), UNII_WORKER: String(k), BUN_CONFIG_MAX_HTTP_REQUESTS: String(FETCHES) };
+      const env = { ...config.config_env(), EVERCHAT_WORKER: String(k), BUN_CONFIG_MAX_HTTP_REQUESTS: String(FETCHES) };
       const ipc = (msg: any, proc: Bun.Subprocess) => hear(k, proc, msg);
       const proc = Bun.spawn([...run, String(port + 1 + k)], { env, ipc, stdio: ["ignore", "inherit", "inherit"] });
       all.add(proc);
@@ -2135,7 +2135,7 @@ export namespace Main {
         }
         const user = Cloud.who(cloud, req);
         const k = Main.shard(user?.id ?? Cloud.token(req));
-        return new Response(null, { headers: { "x-unii-worker": "127.0.0.1:" + (port + 1 + k) } });
+        return new Response(null, { headers: { "x-everchat-worker": "127.0.0.1:" + (port + 1 + k) } });
       },
     });
     const stop = () => {
@@ -2147,7 +2147,7 @@ export namespace Main {
       process.on(sig, stop);
     }
     process.on("SIGHUP", () => workers.forEach((_, k) => start(k)));
-    console.log("unii: " + config.SITE + ", " + config.WORKERS + " workers on 127.0.0.1:" + (port + 1) + "-" + (port + config.WORKERS) + ", routes on " + port);
+    console.log("everchat: " + config.SITE + ", " + config.WORKERS + " workers on 127.0.0.1:" + (port + 1) + "-" + (port + config.WORKERS) + ", routes on " + port);
   }
 
   // a worker ended (`now`: worker k's, the last that started): as the
@@ -2155,7 +2155,7 @@ export namespace Main {
   // k's again; one that never started (none is), the server ends
   export function died(k: number, code: number | null, now: Bun.Subprocess | undefined, proc: Bun.Subprocess, again: () => void): void {
     if (code !== 0) {
-      console.error("unii: worker " + k + " ended (" + code + ")");
+      console.error("everchat: worker " + k + " ended (" + code + ")");
     }
     if (Main.leaving || (now !== undefined && now !== proc)) {
       return;
@@ -2169,9 +2169,9 @@ export namespace Main {
 }
 
 // run: the command that starts this server again, to start a worker
-// (null: the server is one process: no workers, or `unii serve`)
+// (null: the server is one process: no workers, or `everchat serve`)
 export async function serve(port: number, run: string[] | null): Promise<void> {
-  const worker = process.env.UNII_WORKER;
+  const worker = process.env.EVERCHAT_WORKER;
   Main.count = run === null ? 1 : config.WORKERS;
   Main.index = Number(worker ?? 0);
   if (worker === undefined) {

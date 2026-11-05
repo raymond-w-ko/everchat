@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { Machine } from "./machine.ts";
 
-const DIR = fs.mkdtempSync(os.tmpdir() + "/unii-machine-");
+const DIR = fs.mkdtempSync(os.tmpdir() + "/everchat-machine-");
 
 test("a read past a file's end says so, never an empty range", () => {
   const file = DIR + "/three";

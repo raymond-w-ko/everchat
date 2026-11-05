@@ -3,8 +3,8 @@
 // The tools that touch a device: shell, read, write, edit (TOOLS) and
 // computer (computer.ts), run by a terminal (term.ts) as Jobs, each in
 // its agent's dir under the device's work dir. A stop kills the job's
-// shell and its process group. As this unii quits, end() kills every
-// shell's group (SHELLS), and any process marked UNII_RUN that left it.
+// shell and its process group. As this everchat quits, end() kills every
+// shell's group (SHELLS), and any process marked EVERCHAT_RUN that left it.
 // A file changed (write over one, edit) answers as a unified diff (Diff),
 // which both views draw as one (md.ts).
 // This side imports nothing of the server's (whose config.ts would take
@@ -40,7 +40,7 @@ type Box = [number, number, number, number];
 
 const SHELL = process.env.SHELL ?? "/bin/sh";
 
-// this unii's mark, set as UNII_RUN on every process its shells start
+// this everchat's mark, set as EVERCHAT_RUN on every process its shells start
 // (each child inherits it), and how to list this user's processes with
 // their environment, to find those that left their shell's group
 const RUN = crypto.randomUUID();
@@ -60,7 +60,7 @@ export const INT = { type: "integer" };
 const EDIT = { type: "object", properties: { path: STR, old: STR, new: STR, all: { type: "boolean" } }, required: ["path", "old", "new"] };
 
 export const TOOLS: Spec[] = [
-  spec("shell", "Run a command with the device's shell ($SHELL -c), stdout and stderr together, and return its output, then its exit code and time, as (exit 0 in 0.4 s); output past " + CAP + " characters keeps its head and tail. Each call is a new shell. The call waits until the command and everything holding its output end, so give background jobs their own output file. Background jobs live only while unii is open on the device: closing it kills every process the calls started.", { command: STR }, ["command"]),
+  spec("shell", "Run a command with the device's shell ($SHELL -c), stdout and stderr together, and return its output, then its exit code and time, as (exit 0 in 0.4 s); output past " + CAP + " characters keeps its head and tail. Each call is a new shell. The call waits until the command and everything holding its output end, so give background jobs their own output file. Background jobs live only while everchat is open on the device: closing it kills every process the calls started.", { command: STR }, ["command"]),
   spec("read", "Read a text file. offset: the first line to show (from 1); limit: how many lines; at: the character of the first line to start from. It ends saying the lines shown, as [lines 4-7 of 15]; output past " + CAP + " characters comes in pages, saying where to go on.", { path: STR, offset: INT, limit: INT, at: INT }, ["path"]),
   spec("write", "Write a whole file, making its directories. Answers a unified diff of what changed (a new file: all its lines added).", { path: STR, content: STR }, ["path", "content"]),
   spec("edit", "Replace text in files: the edits in order, each on its file as the edits before it left it. old must match exactly, whitespace included, and only once, unless all is true, which replaces every match. If any edit fails, no file is changed. Answers a unified diff of each file.", { edits: { type: "array", items: EDIT, minItems: 1 } }, ["edits"]),
@@ -154,7 +154,7 @@ export namespace Machine {
   }
 
   // runs a command, in its own process group (detached), every process
-  // marked UNII_RUN, its output decoded as one stream (a char split over
+  // marked EVERCHAT_RUN, its output decoded as one stream (a char split over
   // reads stays whole; a broken one at its end shows) and cut as it
   // comes. A stop kills the group and ends the wait at once, whatever
   // still holds its output
@@ -163,7 +163,7 @@ export namespace Machine {
     const start = performance.now();
     const proc = Bun.spawn([SHELL, "-c", "exec 2>&1\n" + command], {
       cwd      : cwd,
-      env      : { ...process.env, UNII_RUN: RUN },
+      env      : { ...process.env, EVERCHAT_RUN: RUN },
       stdin    : "ignore",
       stdout   : "pipe",
       stderr   : "ignore",
@@ -214,8 +214,8 @@ export namespace Machine {
     } catch {}
   }
 
-  // as this unii quits: kills every shell's process group (a job still in
-  // it dies), then any process that left its group (UNII_RUN), so none is
+  // as this everchat quits: kills every shell's process group (a job still in
+  // it dies), then any process that left its group (EVERCHAT_RUN), so none is
   // left orphaned
   export function end(): void {
     for (const proc of SHELLS) {
@@ -225,7 +225,7 @@ export namespace Machine {
     }
     const ps = Bun.spawnSync(PS).stdout.toString();
     for (const line of ps.split("\n")) {
-      if (line.includes("UNII_RUN=" + RUN)) {
+      if (line.includes("EVERCHAT_RUN=" + RUN)) {
         Machine.kill(Number(line.trim().split(" ")[0]));
       }
     }

@@ -29,9 +29,9 @@ type Use = { read: number; write: number; input: number; n: number };
 const LOOK  = 20;
 const TTL   = 300e3;
 const FIRST = 1500;
-const DIR   = fs.mkdtempSync(os.tmpdir() + "/unii-cache-");
+const DIR   = fs.mkdtempSync(os.tmpdir() + "/everchat-cache-");
 
-process.env.UNII_DIR = DIR;
+process.env.EVERCHAT_DIR = DIR;
 
 // a process reads Config once (maybe for another test): the fake key goes
 // in it, not in the environment
@@ -235,7 +235,7 @@ function synthetic(n: number): Log[] {
       say("tool", 80, 600, rand_span(2e3, 12e3));
       say("echo", 40, 8000, rand_span(1e3, 6e3));
     }
-    say("unii", 100, 2500, rand_span(2e3, 9e3));
+    say("everchat", 100, 2500, rand_span(2e3, 9e3));
   }
   return logs;
 }

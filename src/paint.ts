@@ -9,7 +9,7 @@
 // message's id (`#6840`, for /open); a tool call, its emoji and verb
 // bold, its device dimmed; its result its own fill. The user's words
 // framed, unnamed; an agent's report framed, its name on the top edge
-// (Theme.FRAMED); Unii's words bare. An open block
+// (Theme.FRAMED); EverChat's words bare. An open block
 // framed, its bar in the frame's top edge; code filled (a call's, framed
 // on the call's fill); a file's lines
 // (a read, a diff) framed, the file on the top edge, each numbered. Control
@@ -218,7 +218,7 @@ function sum_lines(id: number, n: number, head: Line, text: string, w: number): 
 // a message as its kind looks: a call filled; a result bare, its lines
 // framed as a file's (Md.md_output), the frame naming them; a person's
 // words (the user's, a report) framed in ink (the user's in blue),
-// Unii's and a note framed dim, each named on its top; thinking bare,
+// EverChat's and a note framed dim, each named on its top; thinking bare,
 // its name over it; all at the left, the column's width; none framed
 // nor filled without text (images alone)
 function msg_lines(kind: Kind, who: string, body: Md.Block[], w: number): Line[] {
@@ -414,7 +414,7 @@ export function rule_text(text: string, w: number): Line {
   return [Run("─".repeat(Math.max(0, w - text_width(tag) - 1)) + tag + "─", DIM)];
 }
 
-// the last line, w wide: a tab for UniiChat and each agent at work, the
+// the last line, w wide: a tab for EverChat and each agent at work, the
 // shown bold; with agents, the key that moves along them, if it fits
 export function tabs_line(v: View.View, w: number): Line {
   const tabs = View.view_tabs(v).map((tab) => Run(tab.text, tab.here ? { ...INK, b: true } : DIM));

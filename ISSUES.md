@@ -35,7 +35,13 @@ Remove an entry when the real fix lands.
     `UniiChat.app`, `UniiChat.xcarchive`). `ios/.gitignore` ignores
     `UniiChat.xcodeproj/`.
   - User-facing text: `"UniiChat"` in `ios/Share/Share.swift`
-    (`navigationTitle`), and three error messages in `ios/Shared/Site.swift`.
+    (`navigationTitle`), three error messages in `ios/Shared/Site.swift`, and
+    the microphone prompt ("Dictate your messages to Unii.") in
+    `ios/project.yml`.
+  - Associated domain: `applinks:uniichat.com` in `ios/project.yml`.
+  - The app struct is still `struct Unii: App` in `ios/App/Unii.swift`.
+- Already renamed: the page bridge (`messageHandlers.everchat`) and the session
+  cookie (`everchat`). Both must match `web/src/main.ts` and `src/cloud.ts`.
 - Why not fixed yet: we have not chosen our domain (raymondwko.com or
   raymondko.com) or the app's display name.
 - Real fix: point `UniiSite` at our server, and rename the display name,

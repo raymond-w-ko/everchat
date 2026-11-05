@@ -1,6 +1,6 @@
 // Agent
 // =====
-// claude-api and openai-api in Unii's own loop; a Wire (anthropic.ts,
+// claude-api and openai-api in EverChat's own loop; a Wire (anthropic.ts,
 // openai.ts) shapes requests and reads streams. Each step sends every
 // item and streams one output; tool calls run in order, a message sent
 // mid-run follows the next results, and the call ends at a step with no
@@ -202,7 +202,7 @@ export namespace Agent {
         return;
       }
       const says = run.sent.splice(0);
-      const replies = step.entries.filter((e) => e.kind === "unii");
+      const replies = step.entries.filter((e) => e.kind === "everchat");
       const text = replies.map((e) => e.text).join("\n\n");
       if (backs.length === 0 && says.length === 0) {
         end.ok   = true;

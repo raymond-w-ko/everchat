@@ -2,7 +2,7 @@
 // ========
 // The actions of the computer tool (machine.ts), Anthropic's computer use
 // tool in shape, run as jobs on a device. computer.swift, carried by the
-// executable and compiled into ~/.unii (swiftc) when missing or changed,
+// executable and compiled into ~/.everchat (swiftc) when missing or changed,
 // does the mouse and keyboard and tells the screenshot's size;
 // screencapture and sips take it as a JPEG. Every action answers with a
 // screenshot taken after it; zoom with its region. wait and hold_key wait
@@ -25,7 +25,7 @@ type Done = { w: number; h: number; scale: number; text: string };
 // Constants
 // =========
 
-const HOME  = os.homedir() + "/.unii";
+const HOME  = os.homedir() + "/.everchat";
 
 // how long the screen gets to show the last action before a screenshot,
 // in ms (Anthropic's reference computer use tool waits too)
@@ -96,7 +96,7 @@ export namespace Computer {
 
   // the screen (or the region `opts` gives), scaled to w by h, as a JPEG
   export async function shot(opts: string[], w: number, h: number): Promise<Out> {
-    const file = os.tmpdir() + "/unii-" + crypto.randomUUID() + ".jpg";
+    const file = os.tmpdir() + "/everchat-" + crypto.randomUUID() + ".jpg";
     try {
       await Computer.exec(["screencapture", "-x", "-t", "jpg", ...opts, file]);
       await Computer.exec(["sips", "-z", String(h), String(w), file]);

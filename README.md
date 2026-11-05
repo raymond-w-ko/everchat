@@ -1,4 +1,4 @@
-UniiChat
+EverChat
 ========
 
 [▶ Watch the announcement video](https://x.com/VictorTaelin/status/2108200878553588091)
@@ -6,7 +6,7 @@ UniiChat
 **This repo is vibe-coded.** AI agents wrote nearly all of it, and AI
 agents reviewed it. Read it, run it and fork it as such: expect bugs.
 
-UniiChat is an AI agent with one chat that never ends. There is no "new
+EverChat is an AI agent with one chat that never ends. There is no "new
 chat" button: you talk to the same agent for days, weeks, years, and it
 remembers. The hosted version is at https://uniichat.com. This is its
 source, to run your own server on your own API keys.
@@ -26,10 +26,10 @@ How it works
   (the compactor) as messages arrive. The view changes only at its end,
   so each call reads most of its input from the vendor's prompt cache.
 - **Every window is a view.** The server owns the chat. A browser tab, or
-  `unii` in a terminal, shows it live; any of them can send a message,
+  `everchat` in a terminal, shows it live; any of them can send a message,
   stop the work, or change the model.
 - **Agents and tools.** The agent runs a shell, reads and edits files,
-  and can drive a Mac's screen, on any computer where `unii` is open
+  and can drive a Mac's screen, on any computer where `everchat` is open
   (each is a device it can name). It can spawn subagents, which work in
   the background and report back as messages.
 - **Import.** Bring your past Claude and ChatGPT chats (Claude Code and
@@ -46,7 +46,7 @@ You need [Bun](https://bun.sh) and an Anthropic API key (or an OpenAI
 one, below).
 
     export ANTHROPIC_API_KEY=sk-ant-...
-    bun src/server.ts                # http://127.0.0.1:8788, data in ~/.unii
+    bun src/server.ts                # http://127.0.0.1:8788, data in ~/.everchat
 
 Then open http://127.0.0.1:8788 and type your email. With no mail key
 set, the server prints the sign-in link in its output: open it. Or chat
@@ -62,21 +62,21 @@ Other commands (the `just` ones need [just](https://github.com/casey/just)):
 
     just test                        # the tests, each file on its own
     just web                         # rebuilds web/app.js from web/src
-    bun build --compile src/term.ts --outfile unii
-                                     # one `unii` executable; `unii serve`
+    bun build --compile src/term.ts --outfile everchat
+                                     # one `everchat` executable; `everchat serve`
                                      # runs the server it carries
 
-Your chats live in ~/.unii/users/<id>, one JSON line per message
+Your chats live in ~/.everchat/users/<id>, one JSON line per message
 (main/) and per summary (tree/). They are the memory: back them up.
 
 Config
 ------
 
-`~/.unii/config.json` (optional; the dir is `$UNII_DIR`). Each key may
-also be set as the variable `UNII_<KEY>`:
+`~/.everchat/config.json` (optional; the dir is `$EVERCHAT_DIR`). Each key may
+also be set as the variable `EVERCHAT_<KEY>`:
 
 - `site`: the server's origin, for sign-in links (default
-  http://127.0.0.1:8788). Another port: `UNII_SITE=http://127.0.0.1:9000
+  http://127.0.0.1:8788). Another port: `EVERCHAT_SITE=http://127.0.0.1:9000
   bun src/server.ts 9000`.
 - `vendors`: what the server offers, comma-separated: `claude-api`
   (default), `openai-api`.
@@ -87,12 +87,12 @@ also be set as the variable `UNII_<KEY>`:
   `claude-api:haiku-5.5:high:slow`).
 - `agents`: what subagents run on (default: the chat's pick).
 - `work`: the agents' working dirs on each device (default
-  ~/.unii/work).
+  ~/.everchat/work).
 - `rules`: a file appended to every system prompt.
 - `after`: a shell command run after each turn.
 - `workers`: how many processes serve the users (default none: one
   process). With a number, `server.ts` only routes, behind a proxy that
-  honors its `x-unii-worker` header (server.ts explains).
+  honors its `x-everchat-worker` header (server.ts explains).
 - `apple`, `apns`: the iOS app's App ID and push key id (ios/).
 
 Keys are read from the environment: `ANTHROPIC_API_KEY`,
@@ -100,30 +100,30 @@ Keys are read from the environment: `ANTHROPIC_API_KEY`,
 print), `APNS_KEY`.
 
 With only an OpenAI key, set `vendors`, `pick` and `compactor` to
-`openai-api` models, e.g. `UNII_VENDORS=openai-api
-UNII_PICK=openai-api:gpt-6.1-sol:medium:slow
-UNII_COMPACTOR=openai-api:gpt-6-luna:high:slow`.
+`openai-api` models, e.g. `EVERCHAT_VENDORS=openai-api
+EVERCHAT_PICK=openai-api:gpt-6.1-sol:medium:slow
+EVERCHAT_COMPACTOR=openai-api:gpt-6-luna:high:slow`.
 
 A self-hosted server is free: it bills no one, shows no prices, and calls
 only the model vendors. billing.ts is the one place a hosted server
 plugs in its billing (uniichat.com sells credits; this repo has none).
 
-The `unii` terminal
+The `everchat` terminal
 -------------------
 
 `web/install.sh` (served at /install.sh) runs the official installer,
-which installs the released `unii` executable. `unii` alone opens
-uniichat.com; `unii <url>` opens any server. Run with
-`UNII_COMPUTER=1` on a Mac, the agent may use its screen (it compiles
+which installs the released `everchat` executable. `everchat` alone opens
+uniichat.com; `everchat <url>` opens any server. Run with
+`EVERCHAT_COMPUTER=1` on a Mac, the agent may use its screen (it compiles
 computer.swift with swiftc; macOS asks for Screen Recording and
 Accessibility).
 
-Telemetry: once a day the `unii` terminal asks bend-lang.com's /check
+Telemetry: once a day the `everchat` terminal asks bend-lang.com's /check
 for the latest version (term.ts update_check), sending its version, OS
 and CPU type, no account and no id; it also says whether this computer
-has ever self-hosted (set for good the first time it runs `unii serve`
+has ever self-hosted (set for good the first time it runs `everchat serve`
 or opens a server other than uniichat.com). It is the one call a
-self-hosted UniiChat makes to us. `UNII_NO_TELEMETRY=1` turns it off.
+self-hosted EverChat makes to us. `EVERCHAT_NO_TELEMETRY=1` turns it off.
 
 License
 -------

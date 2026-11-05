@@ -47,7 +47,7 @@ export type Cloud = {
 // Constants
 // =========
 
-const COOKIE = "unii";
+const COOKIE = "everchat";
 
 // a session cookie's attributes: Secure only on an https site, as Safari
 // drops a Secure cookie an http one (a server on 127.0.0.1) sets
@@ -462,7 +462,7 @@ export namespace Cloud {
     const safe = (s: string) => s.replace(/[<>&"]/g, "");
     const note = err === "" ? "" : `<p class="err">${err}</p>`;
     const body = `<h1>Finish signing in</h1><p>Enter the code shown in your terminal to sign in to <b>${safe(who)}</b>.</p>${note}<form method="post" action="/auth"><input type="hidden" name="t" value="${t}"><input type="hidden" name="github" value="${safe(github)}"><input name="code" inputmode="numeric" autocomplete="off" autofocus aria-label="code"><button type="submit">Confirm</button></form>`;
-    const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · UniiChat</title><link rel="stylesheet" href="/legal.css"></head><body><main>${body}</main></body></html>`;
+    const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · EverChat</title><link rel="stylesheet" href="/legal.css"></head><body><main>${body}</main></body></html>`;
     return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
 
@@ -471,11 +471,11 @@ export namespace Cloud {
       console.log("sign-in link for " + to + ": " + link);
       return;
     }
-    const ignore = terminal ? "This link signs a unii terminal into your account. If you didn't just start one, ignore this email." : "If you didn't ask for it, ignore this email.";
+    const ignore = terminal ? "This link signs an everchat terminal into your account. If you didn't just start one, ignore this email." : "If you didn't ask for it, ignore this email.";
     const { consent, ...reply } = cloud.billing.mail;
-    const text = ["Sign in to UniiChat:", link, consent, ignore].filter((p) => p !== "").join("\n\n");
-    const from = "UniiChat <noreply@" + new URL(config.SITE).hostname + ">";
-    const mail = { from, ...reply, to, subject: "Sign in to UniiChat", text };
+    const text = ["Sign in to EverChat:", link, consent, ignore].filter((p) => p !== "").join("\n\n");
+    const from = "EverChat <noreply@" + new URL(config.SITE).hostname + ">";
+    const mail = { from, ...reply, to, subject: "Sign in to EverChat", text };
     const err = await cloud.post(mail);
     if (err !== null) {
       throw new Error(err);

@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 
-process.env.UNII_DIR = fs.mkdtempSync(os.tmpdir() + "/unii-tools-");
+process.env.EVERCHAT_DIR = fs.mkdtempSync(os.tmpdir() + "/everchat-tools-");
 
 const { Tools } = await import("./tools.ts");
 

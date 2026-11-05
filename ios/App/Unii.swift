@@ -11,7 +11,7 @@
 // - Export Memory's download goes to the share sheet; the site's prompt()
 //   (Delete account asks the name) is an alert.
 // - Credit is bought through the App Store, the only payment it allows in
-//   an app: the page asks the bridge (`unii`, web/src/main.ts) for
+//   an app: the page asks the bridge (`everchat`, web/src/main.ts) for
 //   `credits.<dollars>`, StoreKit sells it for the account signed in
 //   (appAccountToken: its id), and its signed transaction goes to the
 //   server (/api/apple), which grants it once; it is finished only once
@@ -81,7 +81,7 @@ final class Page: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
     conf.allowsInlineMediaPlayback = true
     web = WKWebView(frame: .zero, configuration: conf)
     super.init()
-    web.configuration.userContentController.add(self, name: "unii")
+    web.configuration.userContentController.add(self, name: "everchat")
     web.navigationDelegate = self
     web.uiDelegate = self
     web.load(URLRequest(url: Site.url))
@@ -93,7 +93,7 @@ final class Page: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
   func webView(_ web: WKWebView, didFinish nav: WKNavigation!) {
     Task {
       let cookies = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
-      let session = cookies.first { $0.name == "unii" && $0.domain == Site.url.host }?.value
+      let session = cookies.first { $0.name == "everchat" && $0.domain == Site.url.host }?.value
       Site.group.set(session, forKey: "session")
       let center = UNUserNotificationCenter.current()
       if session != nil, (try? await center.requestAuthorization(options: [.alert, .sound])) == true {

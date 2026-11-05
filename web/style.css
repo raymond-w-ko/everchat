@@ -1,6 +1,6 @@
-/* UniiChat: black ink on white paper, as the terminal (Theme.ts): what
+/* EverChat: black ink on white paper, as the terminal (Theme.ts): what
    the machine wrote is filled (a block, a summary; a tool call, its
-   result hooked right under it), what a person or Unii said is framed,
+   result hooked right under it), what a person or EverChat said is framed,
    unfilled. Every color is the palette's below; each kind's look, put
    in the page at boot (Theme.ts theme_css), on .msg.<kind>: --fg, --it. */
 
@@ -23,7 +23,7 @@
   --edge   : #111111; /* a person's frame: the user's message, a report */
   --add    : #1a7f37; /* a diff's line added */
   --del    : #cf222e; /* a diff's line dropped */
-  --accent : #6d3fd8; /* the name UniiChat in a message */
+  --accent : #6d3fd8; /* the name EverChat in a message */
   --red    : #b42318; /* deleting the account */
   --veil   : rgb(0 0 0 / .3); /* the page behind a box over it */
   --shadow : 0 1px 2px rgba(0, 0, 0, .05), 0 6px 20px rgba(0, 0, 0, .05);
@@ -273,7 +273,7 @@ header > .imping { display: flex; flex-direction: column; justify-content: cente
 /* who said it, on the frame's top (View row.who) */
 .msg.work::before { content: attr(data-who); position: absolute; left: 14px; top: -.75em; padding: 0 6px; background: var(--paper); font: 600 12px/1.5 var(--sans); color: var(--mid); }
 .msg.note { color: var(--mid); }
-.msg.unii { font: 16px/1.55 var(--sans); }
+.msg.everchat { font: 16px/1.55 var(--sans); }
 .msg.user p, .msg.work p, .msg.echo p { white-space: pre-wrap; }
 .msg.tool, .msg.echo { font: 12.5px/1.5 var(--mono); }
 /* a call: its own fill; a result: its lines bare, framed by their pre

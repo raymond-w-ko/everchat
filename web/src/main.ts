@@ -1,4 +1,4 @@
-// UniiChat (the site)
+// EverChat (the site)
 // ===================
 // The page around view.ts's chat: the server's messages go to
 // View.view_hear, a click's `data-act` (html.ts) to View.view_act, and
@@ -29,7 +29,7 @@ type Read = { sessions: Import.Session[]; moved: number };
 // =========
 
 // the iOS app's bridge (ios/), in its web view only
-const APP = (window as any).webkit?.messageHandlers?.unii ?? null;
+const APP = (window as any).webkit?.messageHandlers?.everchat ?? null;
 
 // a page with a hover has a keyboard of its own; on a touch screen,
 // Enter types a new line (the arrow sends), and the page never focuses
@@ -51,12 +51,12 @@ const PAYING = "Waiting for your payment in the new tab…";
 
 // an import's payment, its tab back from checkout (?paid=tab), tells the
 // import's tab at once (a hidden tab's timers may wait a minute)
-const PAID = new BroadcastChannel("unii.paid");
+const PAID = new BroadcastChannel("everchat.paid");
 
 // the intro's scenes: two lines, then the logo above the name
 const SCENES = `
   <div class="scene"><p>Your entire life.</p><p>One single chat.</p></div>
-  <div class="scene"><i class="mark"></i><h1>UniiChat</h1></div>`;
+  <div class="scene"><i class="mark"></i><h1>EverChat</h1></div>`;
 
 // the chat
 const v = View.view_new();
@@ -98,7 +98,7 @@ function $<T extends HTMLElement>(sel: string): T {
 // reload or a top-up's trip to Stripe keeps it); "welcomed", offered the
 // import; "risked", the risk accepted
 function kept(fact: string): string {
-  return "unii." + fact + "." + P.id;
+  return "everchat." + fact + "." + P.id;
 }
 
 // Boot
@@ -113,13 +113,13 @@ async function boot(): Promise<void> {
     return;
   }
   if (q.has("deleted")) {
-    solo("Your account was deleted.", `Your chat and Unii's memory are erased. <a href="/">Back to UniiChat</a>`);
+    solo("Your account was deleted.", `Your chat and EverChat's memory are erased. <a href="/">Back to EverChat</a>`);
     return;
   }
   if (q.get("paid") === "tab") {
     PAID.postMessage(true);
     close();
-    solo("Payment received.", "Close this tab: your import starts in the UniiChat tab you came from.");
+    solo("Payment received.", "Close this tab: your import starts in the EverChat tab you came from.");
     return;
   }
   const me = await boot_me();
@@ -162,7 +162,7 @@ function solo(title: string, sub: string): void {
 
 // Guest
 // =====
-// UniiChat's hello, ending in its ask for an email; the answers come from
+// EverChat's hello, ending in its ask for an email; the answers come from
 // here, by no AI: an email gets the sign-in link, "@name" goes to
 // GitHub, anything else gets the server's why. All in v.live (unlogged).
 
@@ -198,7 +198,7 @@ async function guest_send(text: string): Promise<void> {
 }
 
 function guest_say(text: string): void {
-  v.live.push({ kind: "unii", text });
+  v.live.push({ kind: "everchat", text });
   draw(true);
 }
 
@@ -377,7 +377,7 @@ async function mic(): Promise<void> {
   }
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
   if (stream === null) {
-    toast("UniiChat can't use the microphone.");
+    toast("EverChat can't use the microphone.");
     return;
   }
   const mimeType = ["audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
@@ -1047,10 +1047,10 @@ function toast(text: string): void {
 
 function intro_play(): Promise<void> {
   const skip = new URLSearchParams(location.search).has("skip");
-  if (localStorage.getItem("unii.intro") !== null || skip) {
+  if (localStorage.getItem("everchat.intro") !== null || skip) {
     return Promise.resolve();
   }
-  localStorage.setItem("unii.intro", "1");
+  localStorage.setItem("everchat.intro", "1");
   const el = document.createElement("div");
   return new Promise((gone) => {
     function end(): void {

@@ -2,7 +2,7 @@
 // ====
 // A tool call as people read it. Logged as its tool's name, a space and its
 // input's JSON (`zoom {"id":6243,"n":1}`; an MCP client's prefix,
-// `mcp__unii__`, dropped), it shows on its device (its `device` field) as its
+// `mcp__everchat__`, dropped), it shows on its device (its `device` field) as its
 // emoji (Theme.TOOL), its name in bold and a head, as its tool reads (READS): a
 // command as itself; a file tool its path, read's lines after it, write's
 // content in a block, edit's files (the diff comes in its result); zoom and

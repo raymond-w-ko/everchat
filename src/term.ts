@@ -1,21 +1,21 @@
 #!/usr/bin/env bun
 // Term
 // ====
-// `unii`: a terminal view of the agent (server.ts) and, while open, a
+// `everchat`: a terminal view of the agent (server.ts) and, while open, a
 // device its tools reach (DEVICE). It feeds a View the server's messages
 // and the person's acts, and prints what it says (paint.ts, screen.ts)
 // into the terminal's own scrollback. Every act of the site is a command
 // here (COMMANDS, /help). The agent's jobs run here (machine.ts) until
-// done or halted; all they left running dies as this unii quits. From a
+// done or halted; all they left running dies as this everchat quits. From a
 // pipe, each line is a message.
 //
 // One executable per platform (the releases uniichat.com/install.sh
 // installs); once a day it asks bend-lang.com's /check (update_check) and
-// notes a newer one. `unii serve` runs the server it carries. The server:
-// the url given, else $UNII_URL, else uniichat.com; each server's session
+// notes a newer one. `everchat serve` runs the server it carries. The server:
+// the url given, else $EVERCHAT_URL, else uniichat.com; each server's session
 // is a file of its own (TOKEN).
 //
-// Usage: USAGE (`unii help` prints it).
+// Usage: USAGE (`everchat help` prints it).
 
 import * as child from "node:child_process";
 import * as fs from "node:fs";
@@ -32,7 +32,7 @@ import * as View from "./view.ts";
 // =====
 
 // the terminal: jobs running here; ended: input's; pending: commands at
-// work; last: UniiChat's message printed last (-1: none); wait: parts up
+// work; last: EverChat's message printed last (-1: none); wait: parts up
 // to it not printed (term_settle); out: lines to print; wipe: first;
 // due: a paint; settle: the page's print at a new size; imgs: for the
 // next message; flow: how much of each message streaming is printed
@@ -62,7 +62,7 @@ type Cmd = [use: string, keys: string, text: string, run: (t: Term, arg: string)
 // Constants
 // =========
 
-// this unii's version: each release ships one, a new one for every
+// this everchat's version: each release ships one, a new one for every
 // change to term.ts or what it imports
 const VERSION = "1.0.138";
 
@@ -76,31 +76,31 @@ const PORT   = SERVE ? ARGS.find((a) => /^\d+$/.test(a)) : undefined;
 const WORDS  = ["login", "help", "--help", "-h", "version", "update", "serve"];
 const WEB    = /^https?:\/\//;
 const ODD    = ARGS.find((a) => !WORDS.includes(a) && !WEB.test(a) && a !== PORT);
-const HOME   = process.env.UNII_HOME || os.homedir() + "/.unii";
+const HOME   = process.env.EVERCHAT_HOME || os.homedir() + "/.everchat";
 const OURS   = "https://uniichat.com";
-const SERVER = (ARGS.find((a) => WEB.test(a)) ?? process.env.UNII_URL ?? OURS).replace(/\/$/, "");
+const SERVER = (ARGS.find((a) => WEB.test(a)) ?? process.env.EVERCHAT_URL ?? OURS).replace(/\/$/, "");
 const TOKEN  = HOME + "/" + new URL(SERVER).host + "/token";
 
-const USAGE = `Usage: unii [url]           the chat (url: $UNII_URL, else https://uniichat.com)
-       unii login [url]     sign in
-       unii update [url]    install the latest unii (curl | sh, shown first)
-       unii version         this unii's version
-       unii serve [port]    your own UniiChat server, at http://127.0.0.1:8788
-                            (another port: set UNII_SITE to its address too),
+const USAGE = `Usage: everchat [url]   the chat (url: $EVERCHAT_URL, else https://uniichat.com)
+       everchat login [url] sign in
+       everchat update [url] install the latest everchat (curl | sh, shown first)
+       everchat version this everchat's version
+       everchat serve [port] your own EverChat server, at http://127.0.0.1:8788
+                            (another port: set EVERCHAT_SITE to its address too),
                             on your ANTHROPIC_API_KEY and OPENAI_API_KEY;
-                            chat with it: unii http://127.0.0.1:8788
-       unii help            this
-UNII_WORK: where the agent works on this computer (default
-~/.unii/work). UNII_COMPUTER=1: it may use the screen. UNII_HOME: where
-it keeps its sign-in (default ~/.unii).
-Once a day, unii asks bend-lang.com for the latest version, sending only
+                            chat with it: everchat http://127.0.0.1:8788
+       everchat help        this
+EVERCHAT_WORK: where the agent works on this computer (default
+~/.everchat/work). EVERCHAT_COMPUTER=1: it may use the screen. EVERCHAT_HOME: where
+it keeps its sign-in (default ~/.everchat).
+Once a day, everchat asks bend-lang.com for the latest version, sending only
 its version, OS and CPU type, and whether this computer ever ran its own
-server. UNII_NO_TELEMETRY=1 turns that off.
+server. EVERCHAT_NO_TELEMETRY=1 turns that off.
 In the chat, /help lists every command and key.`;
 
 // the daily version check: what it asks, its cache, and the self-host
 // flag: a file made once this computer serves or opens a server not OURS
-const CHECK   = "https://bend-lang.com/check?p=unii&v=" + VERSION + "&os=" + process.platform + "&arch=" + process.arch;
+const CHECK   = "https://bend-lang.com/check?p=everchat&v=" + VERSION + "&os=" + process.platform + "&arch=" + process.arch;
 const CHECKED = HOME + "/check.json";
 const SELF    = HOME + "/self";
 const DAY     = 86400000;
@@ -112,10 +112,10 @@ const DEVICE = LOCAL || os.hostname();
 
 // where the agent's tools work on this device: in WORK/main (the agent)
 // and WORK/<name> (each subagent)
-const WORK = process.env.UNII_WORK || "~/.unii/work";
+const WORK = process.env.EVERCHAT_WORK || "~/.everchat/work";
 
 // whether the agent may use this device's screen, mouse and keyboard
-const COMPUTER = process.env.UNII_COMPUTER === "1";
+const COMPUTER = process.env.EVERCHAT_COMPUTER === "1";
 
 // the margin left of each line
 const MARGIN = 2;
@@ -158,17 +158,17 @@ function term_groups(v: View.View): [group: string, cmds: Cmd[]][] {
   const topup: Cmd[] = v.bills ? [["/topup <usd>", "", "add Bend Credits, paid in the browser", term_topup]] : [];
   return [
     ["Chat", [
-      ["",                  "Enter",                   "send; on an empty input, interrupt UniiChat",    term_enter],
-      ["",                  "Esc",                     "interrupt UniiChat's turn; agents go on",        (t) => term_act(t, { $: "Send", text: "" })],
+      ["",                  "Enter",                   "send; on an empty input, interrupt EverChat",    term_enter],
+      ["",                  "Esc",                     "interrupt EverChat's turn; agents go on",        (t) => term_act(t, { $: "Send", text: "" })],
       ["",                  "Ctrl+C, Ctrl+D",          "clear; on an empty input, interrupt, quit",      term_clear],
-      ["/goal <message>",   "",                        "send a message as the goal: at each turn's end, UniiChat asks itself if it is met, and goes on till it is", (t, a) => term_act(t, { $: "Send", text: "/goal " + a })],
+      ["/goal <message>",   "",                        "send a message as the goal: at each turn's end, EverChat asks itself if it is met, and goes on till it is", (t, a) => term_act(t, { $: "Send", text: "/goal " + a })],
       ["/halt",             "",                        "drop the goal; the turn running ends as it would", (t) => term_act(t, { $: "Send", text: "/halt" })],
       ["/image <path>",     "",                        "attach an image to the next message",            term_image],
       ["/open #id",         "",                        "open block #id, as it shows, and keep it open",  (t, a) => term_block(t, a, true)],
       ["/close #id",        "",                        "close block #id and keep it closed",             (t, a) => term_block(t, a, false)],
       ["/fold",             "Ctrl+F",                  "the chat in the fewest blocks; again: unfold (Ctrl+F eaten? type /fold)", term_fold],
       ["/import [...]",     "",                        "import your Claude and ChatGPT chats (alone: options, costs)", term_import],
-      ["/export",           "",                        "save memory and account as ./unii-memory.json",  term_export],
+      ["/export",           "",                        "save memory and account as ./everchat-memory.json", term_export],
       ["/tree",             "",                        "the whole memory, in the browser (its link prints too)", (t) => term_browse(t, "The memory tree", t.url + "/tree")],
       ["",                  "Ctrl+Z",                  "suspend; fg brings it back",                     (t) => Screen.screen_suspend(t.scr)],
       ["/quit",             "",                        "leave: the chat goes on without this terminal",  term_quit],
@@ -252,7 +252,7 @@ function term_connect(t: Term): void {
 async function term_lost(t: Term, up: boolean): Promise<boolean> {
   term_draw(t);
   if (!up && !await term_signed(t.url)) {
-    term_note(t, "This terminal is signed out: run unii again to sign in.");
+    term_note(t, "This terminal is signed out: run everchat again to sign in.");
     process.exitCode = 1;
     term_quit(t);
     return false;
@@ -366,7 +366,7 @@ function term_enter(t: Term): void {
     return;
   }
   if (!View.view_typing(t.v)) {
-    term_note(t, "Messages go to UniiChat: Tab or /tab goes back.");
+    term_note(t, "Messages go to EverChat: Tab or /tab goes back.");
   } else if (term_act(t, { $: "Send", text, images: t.imgs }).length > 0) {
     t.imgs = [];
     return;
@@ -375,7 +375,7 @@ function term_enter(t: Term): void {
 }
 
 // Ctrl+C or Ctrl+D: clears the input; on an empty one, Ctrl+C interrupts
-// UniiChat's turn (never quits: that kills the jobs here), Ctrl+D quits
+// EverChat's turn (never quits: that kills the jobs here), Ctrl+D quits
 function term_clear(t: Term, key: string): void {
   if (t.scr.ed.text !== "") {
     Screen.ed_take(t.scr.ed);
@@ -510,7 +510,7 @@ function term_fold(t: Term): void {
   }
 }
 
-// shows an agent's chat, by the start of its name, or UniiChat's; no
+// shows an agent's chat, by the start of its name, or EverChat's; no
 // name lists the tabs
 function term_tab(t: Term, arg: string): void {
   const main = arg.toLowerCase() === View.MAIN.toLowerCase();
@@ -540,7 +540,7 @@ function term_pick(t: Term, move: Move, arg: string): void {
 
 async function term_export(t: Term): Promise<void> {
   const res  = await term_get(t, "/export", "export");
-  const file = process.cwd() + "/unii-memory.json";
+  const file = process.cwd() + "/everchat-memory.json";
   if (res !== null) {
     await Bun.write(file, res);
     term_note(t, "Your data is in " + file + ".");
@@ -572,7 +572,7 @@ async function term_import(t: Term, arg: string): Promise<void> {
     return;
   }
   const sessions = read.flat().filter((s) => apps.length === 0 || apps.includes(s.app));
-  const done  = await term_get(t, "/api/imported", "read what Unii has");
+  const done  = await term_get(t, "/api/imported", "read what EverChat has");
   if (done === null) {
     return;
   }
@@ -651,7 +651,7 @@ async function term_delete(t: Term, arg: string): Promise<void> {
 async function term_logout(t: Term): Promise<void> {
   await term_post(t, "/api/logout", {});
   fs.rmSync(TOKEN, { force: true });
-  term_note(t, "Signed out. Run unii to sign in again.");
+  term_note(t, "Signed out. Run everchat to sign in again.");
   term_quit(t);
 }
 
@@ -984,7 +984,7 @@ async function login_run(url: string): Promise<void> {
     const done = await fetch(url + "/api/wait", wait).catch(() => null);
     const ans  = await done?.json().catch(() => ({})) ?? {};
     if (done?.status === 410) {
-      login_fail("the link expired: run unii again");
+      login_fail("the link expired: run everchat again");
     }
     if (done?.ok && ans.ok) {
       break;
@@ -1030,7 +1030,7 @@ function login_line(): Promise<string> {
 }
 
 function login_fail(why: string): never {
-  console.error("unii: " + why);
+  console.error("everchat: " + why);
   process.exit(1);
 }
 
@@ -1047,7 +1047,7 @@ function self_mark(): void {
 // cached in CHECKED (stamped before the request: one a day); a cached
 // ver newer than this one is a note. It never delays nor fails the chat
 async function update_check(t: Term): Promise<void> {
-  if (process.env.UNII_NO_TELEMETRY) {
+  if (process.env.EVERCHAT_NO_TELEMETRY) {
     return;
   }
   let last = { t: 0, ver: VERSION, notice: "" };
@@ -1066,18 +1066,18 @@ async function update_check(t: Term): Promise<void> {
   } catch {}
   if (update_newer(last.ver)) {
     const notice = last.notice.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
-    term_note(t, "unii " + last.ver + " is available: run unii update" + (notice === "" ? "" : ". " + notice));
+    term_note(t, "everchat " + last.ver + " is available: run everchat update" + (notice === "" ? "" : ". " + notice));
   }
 }
 
-// whether ver (major.minor.patch) is newer than this unii
+// whether ver (major.minor.patch) is newer than this everchat
 function update_newer(ver: string): boolean {
   const a = ver.split(".").map(Number);
   const b = VERSION.split(".").map(Number);
   return a.length === 3 && a.every(Number.isInteger) && (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
 }
 
-// runs the installer again: the one way unii changes. The command prints
+// runs the installer again: the one way everchat changes. The command prints
 // first, so one can run it alone.
 function update_run(url: string): void {
   const cmd = "curl -fsSL " + url + "/install.sh | sh";
@@ -1114,7 +1114,7 @@ if (HELP || ODD !== undefined) {
   }
   console.log(USAGE);
 } else if (ASKVER) {
-  console.log("unii " + VERSION);
+  console.log("everchat " + VERSION);
 } else if (UPDATE) {
   update_run(SERVER);
 } else if (SERVE) {

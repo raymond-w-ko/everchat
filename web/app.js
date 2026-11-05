@@ -40,10 +40,10 @@ var NODE = 512;
 var LINE = 480;
 var PRICE = { base: 187, byte: 735, depth: 628 };
 var PART = 2 ** 20;
-var OLD = "Nothing new: these chats are in Unii's memory already.";
+var OLD = "Nothing new: these chats are in EverChat's memory already.";
 var NOT_EXPORT = "Not a Claude or ChatGPT export.";
-var MIDWAY = "Meanwhile, UniiChat can answer with a partial tree.";
-var DONE = "Your past chats are in Unii's memory: ask about them any time.";
+var MIDWAY = "Meanwhile, EverChat can answer with a partial tree.";
+var DONE = "Your past chats are in EverChat's memory: ask about them any time.";
 var DAY = new Intl.DateTimeFormat("en-US", { month: "short", day: "2-digit", year: "numeric" });
 var COUNT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 0 });
 var EXPORTS = { Claude: "Settings › Privacy › Export data", ChatGPT: "Settings › Data controls › Export data" };
@@ -85,7 +85,7 @@ function line_msgs(s, line, last) {
 }
 function import_pick(sessions, want, done) {
   const old = [...sessions].sort((a, b) => a.start.localeCompare(b.start));
-  const keep = (m, last) => (want.tools || m.kind === "user" || m.kind === "unii") && m.date >= want.since && import_new(m, last);
+  const keep = (m, last) => (want.tools || m.kind === "user" || m.kind === "everchat") && m.date >= want.since && import_new(m, last);
   const kept = (s, last) => s.heads.filter((m) => keep(m, last));
   return old.map((s) => ({ ...s, heads: kept(s, done[import_id(s)]) })).filter((s) => s.heads.length > 0);
 }
@@ -211,7 +211,7 @@ function chat_openai(chat) {
   return nodes.flatMap((m) => {
     const role = m?.author?.role;
     const type = String(m?.content?.content_type);
-    const kind = role === "user" ? "user" : role === "assistant" ? m.recipient === "all" ? "unii" : "tool" : role === "tool" ? "echo" : null;
+    const kind = role === "user" ? "user" : role === "assistant" ? m.recipient === "all" ? "everchat" : "tool" : role === "tool" ? "echo" : null;
     const skip = kind === null || m.metadata?.is_visually_hidden_from_conversation === true || type === "thoughts" || type === "reasoning_recap";
     date = import_date(m?.create_time, date);
     return skip ? [] : msgs_of(kind, (kind === "tool" ? m.recipient + " " : "") + parts_text(m.content.parts ?? [m.content.text]), date);
@@ -221,7 +221,7 @@ function chat_claude(chat) {
   let date = import_date(chat.created_at, "");
   return (chat.chat_messages ?? []).flatMap((m) => {
     date = import_date(m.created_at, date);
-    const kind = m.sender === "human" ? "user" : "unii";
+    const kind = m.sender === "human" ? "user" : "everchat";
     const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.text ?? "") }];
     const files = [...m.attachments ?? [], ...m.files ?? []].map((f) => ({ type: "text", text: "[file " + f.file_name + "]" }));
     return blocks_msgs(kind, [...blocks, ...files], date);
@@ -275,7 +275,7 @@ function line_claude(s, j, last) {
   if (j.type === "attachment" && j.attachment?.type === "queued_command") {
     return msgs_of("user", String(j.attachment.prompt ?? ""), date);
   }
-  return blocks_msgs(j.type === "user" ? "user" : "unii", blocks, date);
+  return blocks_msgs(j.type === "user" ? "user" : "everchat", blocks, date);
 }
 function blocks_msgs(kind, blocks, date) {
   const say = blocks.filter((b) => b.type === "image" || b.type === "text" && !SKIP.test(b.text));
@@ -293,7 +293,7 @@ function line_codex(s, j, last) {
 function item_codex(p, date) {
   switch (p.type) {
     case "message": {
-      const kind = p.role === "user" ? "user" : p.role === "assistant" ? "unii" : null;
+      const kind = p.role === "user" ? "user" : p.role === "assistant" ? "everchat" : null;
       const parts = (p.content ?? []).filter((c) => !INJECTED.test(c.text ?? ""));
       return kind === null ? [] : msgs_of(kind, parts_text(parts), date);
     }
@@ -335,7 +335,7 @@ var WHO = { work: "Report", note: "Note" };
 var KIND = {
   user: { dim: false, it: false },
   work: { dim: false, it: false },
-  unii: { dim: false, it: false },
+  everchat: { dim: false, it: false },
   tool: { dim: true, it: false },
   echo: { dim: true, it: false },
   note: { dim: true, it: true },
@@ -875,16 +875,16 @@ var PACE = 0.0001;
 var email_ask = (github) => "First, what's your email" + (github ? " or @github" : "") + "? I'll send you a quick sign-up link.";
 var OPENING = 3;
 var SUMMARIES = "summaries";
-var MAIN = "UniiChat";
-var TURN = "Unii's turn";
+var MAIN = "EverChat";
+var TURN = "EverChat's turn";
 var WIRE = 2;
 var PING = 1e4;
 var RETRY = 1000;
 var TICK = "+";
 var MOVE = 4001;
 var FRAME = 2 ** 22;
-var HINT = "Message UniiChat";
-var AI = "Unii is an AI, not a person, and can make mistakes.";
+var HINT = "Message EverChat";
+var AI = "EverChat is an AI, not a person, and can make mistakes.";
 var NOTICE = 3 * 60 * 60 * 1000;
 var WAIT = "compressing…";
 var SUMS = "compressing earlier messages…";
@@ -1276,7 +1276,7 @@ function part_rows(v, id, n, t, talk) {
     const after = minds.flatMap((x) => entry_rows(null, "mind", x));
     return [...whole_rows(id, entry), ...after];
   }
-  const open2 = talk && n === 1 && ["user", "unii"].includes(entry?.kind ?? "");
+  const open2 = talk && n === 1 && ["user", "everchat"].includes(entry?.kind ?? "");
   if (!(v.open.get(key) ?? open2)) {
     return sum_rows(id, n, v.nodes.get(key));
   }
@@ -1549,7 +1549,7 @@ function spans_html(spans) {
 function span_html(s) {
   switch (s.$) {
     case "Text": {
-      return esc(s.x).replaceAll("UniiChat", `<span class="brand">UniiChat</span>`);
+      return esc(s.x).replaceAll("EverChat", `<span class="brand">EverChat</span>`);
     }
     case "Code": {
       return `<code>${esc(s.x)}</code>`;
@@ -1570,17 +1570,17 @@ function span_html(s) {
 }
 
 // web/src/main.ts
-var APP = window.webkit?.messageHandlers?.unii ?? null;
+var APP = window.webkit?.messageHandlers?.everchat ?? null;
 var DESK = matchMedia("(hover: hover)");
 var EXPIRED = "That sign-in link expired. What's your email? I'll send you a new one.";
 var GUEST_AI = `By signing in, you accept the <a href="/terms.html" target="_blank">terms</a> and <a href="/privacy.html" target="_blank">privacy policy</a>, and that Anthropic's and OpenAI's models answer you.`;
 var SENT = (email) => `Thanks! I sent a link to ${email}. Open it, and we'll go on from here.`;
 var NONE = "No Claude or ChatGPT chats in that folder. Choose ~/.claude or ~/.codex.";
 var PAYING = "Waiting for your payment in the new tab…";
-var PAID = new BroadcastChannel("unii.paid");
+var PAID = new BroadcastChannel("everchat.paid");
 var SCENES = `
   <div class="scene"><p>Your entire life.</p><p>One single chat.</p></div>
-  <div class="scene"><i class="mark"></i><h1>UniiChat</h1></div>`;
+  <div class="scene"><i class="mark"></i><h1>EverChat</h1></div>`;
 var v = view_new();
 var BOX = $("textarea");
 var BACK = $("#import [name=back]");
@@ -1604,7 +1604,7 @@ function $(sel) {
   return document.querySelector(sel);
 }
 function kept(fact) {
-  return "unii." + fact + "." + P.id;
+  return "everchat." + fact + "." + P.id;
 }
 async function boot() {
   document.head.insertAdjacentHTML("beforeend", `<style>${theme_css()}</style>`);
@@ -1615,13 +1615,13 @@ async function boot() {
     return;
   }
   if (q.has("deleted")) {
-    solo("Your account was deleted.", `Your chat and Unii's memory are erased. <a href="/">Back to UniiChat</a>`);
+    solo("Your account was deleted.", `Your chat and EverChat's memory are erased. <a href="/">Back to EverChat</a>`);
     return;
   }
   if (q.get("paid") === "tab") {
     PAID.postMessage(true);
     close();
-    solo("Payment received.", "Close this tab: your import starts in the UniiChat tab you came from.");
+    solo("Payment received.", "Close this tab: your import starts in the EverChat tab you came from.");
     return;
   }
   const me = await boot_me();
@@ -1684,7 +1684,7 @@ async function guest_send(text) {
   guest_say(res.error ?? SENT(res.who));
 }
 function guest_say(text) {
-  v.live.push({ kind: "unii", text });
+  v.live.push({ kind: "everchat", text });
   draw(true);
 }
 function chat() {
@@ -1831,7 +1831,7 @@ async function mic() {
   }
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
   if (stream === null) {
-    toast("UniiChat can't use the microphone.");
+    toast("EverChat can't use the microphone.");
     return;
   }
   const mimeType = ["audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
@@ -2363,10 +2363,10 @@ function toast(text) {
 }
 function intro_play() {
   const skip = new URLSearchParams(location.search).has("skip");
-  if (localStorage.getItem("unii.intro") !== null || skip) {
+  if (localStorage.getItem("everchat.intro") !== null || skip) {
     return Promise.resolve();
   }
-  localStorage.setItem("unii.intro", "1");
+  localStorage.setItem("everchat.intro", "1");
   const el = document.createElement("div");
   return new Promise((gone) => {
     function end() {

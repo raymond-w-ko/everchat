@@ -12,10 +12,10 @@ import * as os from "node:os";
 // `./server.ts <port>` on a fresh dir, with `env`: its answer to `path`,
 // read whole, once it answers
 async function server_get(port: number, env: Record<string, string>, path: string): Promise<Response> {
-  const dir = fs.mkdtempSync(os.tmpdir() + "/unii-server-");
+  const dir = fs.mkdtempSync(os.tmpdir() + "/everchat-server-");
   const site = "http://127.0.0.1:" + port;
   const proc = Bun.spawn([process.execPath, import.meta.dir + "/server.ts", String(port)], {
-    env    : { ...process.env, UNII_DIR: dir, UNII_SITE: site, ...env },
+    env    : { ...process.env, EVERCHAT_DIR: dir, EVERCHAT_SITE: site, ...env },
     stdout : "ignore",
     stderr : "inherit",
   });
@@ -41,8 +41,8 @@ test("server.ts alone serves the page", async () => {
 });
 
 test("with workers, server.ts routes to them", async () => {
-  const res = await server_get(9471, { UNII_WORKERS: "2" }, "/");
-  expect(res.headers.get("x-unii-worker")).toMatch(/^127\.0\.0\.1:947[23]$/);
+  const res = await server_get(9471, { EVERCHAT_WORKERS: "2" }, "/");
+  expect(res.headers.get("x-everchat-worker")).toMatch(/^127\.0\.0\.1:947[23]$/);
   expect(await res.text()).toBe("");
 });
 
@@ -75,9 +75,9 @@ process.exit(0);
 `;
 
 test("a turn's wait names the model it runs on, not one picked since", async () => {
-  const dir = fs.mkdtempSync(os.tmpdir() + "/unii-server-");
+  const dir = fs.mkdtempSync(os.tmpdir() + "/everchat-server-");
   fs.writeFileSync(dir + "/turn.ts", TURN);
-  const proc = Bun.spawn([process.execPath, dir + "/turn.ts"], { env: { ...process.env, UNII_DIR: dir }, stdout: "pipe", stderr: "inherit" });
+  const proc = Bun.spawn([process.execPath, dir + "/turn.ts"], { env: { ...process.env, EVERCHAT_DIR: dir }, stdout: "pipe", stderr: "inherit" });
   const out = JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "{}");
   expect(out.model).toMatch(/\w/);
   expect(out.to).not.toBe(out.model);

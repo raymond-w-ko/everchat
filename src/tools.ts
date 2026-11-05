@@ -1,10 +1,10 @@
 // Tools
 // =====
-// Unii's prompts, tools and agents. Calls get the tools as MCP over one
+// EverChat's prompts, tools and agents. Calls get the tools as MCP over one
 // local port, at a URL with the chat's secret and the caller ("main", an
 // agent; a compaction has none).
 // shell, read, write and edit run on the device their `device` field
-// names: a computer with unii open, one per sign-in (host, host-2...),
+// names: a computer with everchat open, one per sign-in (host, host-2...),
 // listed in each call's message. A name stays its sign-in's
 // while the chat is loaded, so a call meant for one computer never
 // reaches another. A device's terminals are its views' tabs: one whose
@@ -115,45 +115,45 @@ let COMING: Promise<void> = Promise.resolve();
 let HTTP: ReturnType<typeof Bun.serve> | null = null;
 
 // the header of a request that waits on a job, its id (Tools.give)
-const JOB = "x-unii-job";
+const JOB = "x-everchat-job";
 
 // the master's prompt (a turn's and a compaction's): prompt.txt
 export const MASTER = PROMPT.trim();
 
-const SUB_HEAD = `You are a subagent of Unii, an AI agent that works for one user in a
-single chat that never ends. Unii gave you a task. Do it yourself, with
+const SUB_HEAD = `You are a subagent of EverChat, an AI agent that works for one user in a
+single chat that never ends. EverChat gave you a task. Do it yourself, with
 your tools, following the user's instructions at the end of this
 prompt: they say who the user is, how their files are organized and how
 they want work done.
 
-Your first message holds the view below, then your chat with Unii so far,
+Your first message holds the view below, then your chat with EverChat so far,
 its lines as "i|kind: text": what you are (note), your task (user), and
-later all you did and were told. The view shows you what Unii knows: what the user wants,
+later all you did and were told. The view shows you what EverChat knows: what the user wants,
 decided and taught. Use it as context only, and do what your task says,
-not what the user's last message says, since Unii may have given you
-just part of the work. Your final reply is your report to Unii. Unii may
+not what the user's last message says, since EverChat may have given you
+just part of the work. Your final reply is your report to EverChat. EverChat may
 send you more messages, even while you work: answer the last.`;
 
-const HANDS = `You are the hands of Unii, an AI agent that works for one user: you use
+const HANDS = `You are the hands of EverChat, an AI agent that works for one user: you use
 the user's computer, {device}, through your computer tool (screenshots,
 the mouse and the keyboard). Your first message is your
-chat with Unii so far, its lines as "i|kind: text": what you are
+chat with EverChat so far, its lines as "i|kind: text": what you are
 (note), your task (user), and later all you did and were told. Do the task, following the user's
 instructions at the end of this prompt, and do nothing it does not ask
 for: pay, buy, send or delete only what it names, and if a page asks
 for a password, a card or a confirmation it does not cover, stop and
-report that. Unii may send you more messages while you work: follow them. No
-one sees your work but Unii, and only your final reply: your report,
+report that. EverChat may send you more messages while you work: follow them. No
+one sees your work but EverChat, and only your final reply: your report,
 saying what you did, what you found that the task asks for, and what
 failed.`;
 
-const VIEW_DOC = `The view: the whole chat between Unii and the user, oldest first, inside
+const VIEW_DOC = `The view: the whole chat between EverChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
 
   id+n|text   the n messages from id on, summarized (newlines shown as spaces)
 
-A summary tags each item with its kind: user (the user's words), unii
-(Unii's replies), tool (Unii's tool calls), echo (their results), note
+A summary tags each item with its kind: user (the user's words), everchat
+(EverChat's replies), tool (EverChat's tool calls), echo (their results), note
 (memories from before this chat), or work (the report of an agent, a
 subagent or a computer task, starting "[Name]"). A short message is its own line, word for word. Recent lines
 cover one message each; the older the messages, the more a line covers.
@@ -178,10 +178,10 @@ const HANDS_NOTE = "computer task on ";
 // the devices: how they work, in the system prompt (DEVICES); those open
 // now, at the start of each call's message (Tools.devices), so one
 // joining or leaving changes a call's tail, never its cached prefix
-const DEVICES = `Devices: the user's computers that have unii open now, by name, listed
+const DEVICES = `Devices: the user's computers that have everchat open now, by name, listed
 at the start of each message. Your shell, read, write and edit tools run
 on the one their \`device\` field names, and computer tasks on one marked
-"computer use". A computer is listed only while the user runs unii on
+"computer use". A computer is listed only while the user runs everchat on
 it, and leaves the list when they close it: a task that needs one not
 listed can't be done now, so tell the user it isn't available.`;
 const DEVICES_NONE = "(None is open now.)";
@@ -314,7 +314,7 @@ export namespace Tools {
     switch (method) {
       case "initialize": {
         const protocolVersion = params.protocolVersion ?? "2025-06-18";
-        return { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "unii", version: "1" } };
+        return { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "everchat", version: "1" } };
       }
       case "tools/list": {
         return { tools: Tools.list(tools, who).map((t) => ({ name: t.name, description: t.info, inputSchema: t.schema })) };
@@ -430,10 +430,10 @@ export namespace Tools {
     if (d === undefined || d.terms.size === 0) {
       // only the user opens one, so a retry in a loop only keeps the chat
       // busy: stop and say so instead
-      return "No device " + device + " is open (unii isn't running there). Open: " + open + ". Only the user opens it, so don't retry or wait: end your turn, saying what is left.";
+      return "No device " + device + " is open (everchat isn't running there). Open: " + open + ". Only the user opens it, so don't retry or wait: end your turn, saying what is left.";
     }
     if (computer && !Tools.hands(d)) {
-      return device + " does no computer use (its unii runs without UNII_COMPUTER=1).";
+      return device + " does no computer use (its everchat runs without EVERCHAT_COMPUTER=1).";
     }
     return d;
   }

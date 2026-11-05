@@ -36,7 +36,7 @@ import type { Usage } from "./price.ts";
 // the user's, an agent's report ("[Name]\n...", a user turn to the
 // model), a thought (shown, never logged), a reply, a tool call, its
 // result, a note from before the chat (imported)
-export type Kind = "user" | "work" | "mind" | "unii" | "tool" | "echo" | "note";
+export type Kind = "user" | "work" | "mind" | "everchat" | "tool" | "echo" | "note";
 
 export type Vendor = "claude-api" | "openai-api";
 

@@ -6,18 +6,18 @@
 import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 
-process.env.UNII_DIR = fs.mkdtempSync("/tmp/cloud-test-");
-process.env.UNII_SITE = "http://127.0.0.1";
+process.env.EVERCHAT_DIR = fs.mkdtempSync("/tmp/cloud-test-");
+process.env.EVERCHAT_SITE = "http://127.0.0.1";
 const { Cloud } = await import("./cloud.ts");
 
 // accounts in a dir made anew; the last test's goes after all
 function cloud_new() {
-  fs.rmSync(process.env.UNII_DIR ?? "", { recursive: true, force: true });
-  fs.mkdirSync(process.env.UNII_DIR ?? "", { recursive: true });
+  fs.rmSync(process.env.EVERCHAT_DIR ?? "", { recursive: true, force: true });
+  fs.mkdirSync(process.env.EVERCHAT_DIR ?? "", { recursive: true });
   return Cloud.open(() => {}, () => {}, async () => null);
 }
 
-afterAll(() => fs.rmSync(process.env.UNII_DIR ?? "", { recursive: true, force: true }));
+afterAll(() => fs.rmSync(process.env.EVERCHAT_DIR ?? "", { recursive: true, force: true }));
 
 test("Cloud.net: IPv4 whole, IPv6 by its /48", () => {
   expect(Cloud.net("1.2.3.4")).toBe("1.2.3.4");
