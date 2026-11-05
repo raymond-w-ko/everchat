@@ -251,7 +251,7 @@ const WEB: Record<string, string> = {
 // the email, and SIGNED. The hello's node is written with it, so no
 // compactor call summarizes the three (with an email of up to 254 bytes,
 // a node of at most 512 bytes) and a new account owes nothing.
-const HELLO_LINE = "everchat: hello: EverChat, one endless chat kept in a memory tree, recent days in more detail; build anything for years; recalls the past (ad2cat.py); a chatbot with a memory system; the user's terminal install; asks their email.";
+const HELLO_LINE = "ever: hello: EverChat, one endless chat kept in a memory tree, recent days in more detail; build anything for years; recalls the past (ad2cat.py); a chatbot with a memory system; the user's terminal install; asks their email.";
 const SIGNED     = "You're in! What should we start with?";
 
 // Chat
@@ -309,7 +309,7 @@ export namespace Chat {
     mem.pay = tools.pay = wallet.pay;
     if (mem.count === 0) {
       const hello = HELLO + "\n\n" + email_ask(cloud.billing.github !== null);
-      Memory.push(mem, [{ kind: "everchat", text: hello, line: HELLO_LINE }, { kind: "user", text: user.name }, { kind: "everchat", text: SIGNED }]);
+      Memory.push(mem, [{ kind: "ever", text: hello, line: HELLO_LINE }, { kind: "user", text: user.name }, { kind: "ever", text: SIGNED }]);
     }
     chat.eye = Chat.eye(mem, Memory.turn(mem));
     mem.made = (l, i) => Chat.made(chat, l, i);
@@ -729,7 +729,7 @@ export namespace Chat {
   // user's phones (Cloud.push)
   export function phone(chat: Chat): void {
     const last = Memory.message(chat.mem, chat.mem.count - 1);
-    if (last !== null && (last.kind === "everchat" || last.kind === "note")) {
+    if (last !== null && (last.kind === "ever" || last.kind === "note")) {
       Cloud.push(Chat.cloud, chat.acct.user, last.text);
     }
   }
@@ -884,7 +884,7 @@ export namespace Chat {
   // a message imported (a page); a line with no kind or no text refuses
   // the import whole (ingest reads every line before it logs one)
   export function imported(x: any): Log {
-    const kinds: Kind[] = ["user", "everchat", "tool", "echo", "note"];
+    const kinds: Kind[] = ["user", "ever", "tool", "echo", "note"];
     if (!kinds.includes(x?.kind)) {
       throw new Error("An import has no kind " + x?.kind + ".");
     }

@@ -152,7 +152,7 @@ const VIEW_DOC = `The view: the whole chat between EverChat and the user, oldest
 
   id+n|text   the n messages from id on, summarized (newlines shown as spaces)
 
-A summary tags each item with its kind: user (the user's words), everchat
+A summary tags each item with its kind: user (the user's words), ever
 (EverChat's replies), tool (EverChat's tool calls), echo (their results), note
 (memories from before this chat), or work (the report of an agent, a
 subagent or a computer task, starting "[Name]"). A short message is its own line, word for word. Recent lines

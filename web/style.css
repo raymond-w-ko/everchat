@@ -273,7 +273,7 @@ header > .imping { display: flex; flex-direction: column; justify-content: cente
 /* who said it, on the frame's top (View row.who) */
 .msg.work::before { content: attr(data-who); position: absolute; left: 14px; top: -.75em; padding: 0 6px; background: var(--paper); font: 600 12px/1.5 var(--sans); color: var(--mid); }
 .msg.note { color: var(--mid); }
-.msg.everchat { font: 16px/1.55 var(--sans); }
+.msg.ever { font: 16px/1.55 var(--sans); }
 .msg.user p, .msg.work p, .msg.echo p { white-space: pre-wrap; }
 .msg.tool, .msg.echo { font: 12.5px/1.5 var(--mono); }
 /* a call: its own fill; a result: its lines bare, framed by their pre

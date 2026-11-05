@@ -84,7 +84,7 @@ export namespace OpenAI {
   export function read(st: State, ev: any, on: Emit): boolean {
     switch (ev.type) {
       case "response.output_text.delta": {
-        on("everchat", ev.delta);
+        on("ever", ev.delta);
         return false;
       }
       case "response.output_item.added": {
@@ -182,7 +182,7 @@ export namespace OpenAI {
         const text = content.map((c: any) => c.text ?? "").join("").trim();
         const urls = content.flatMap((c: any) => c.annotations ?? []).filter((a: any) => a.type === "url_citation");
         const cited = [...new Set(urls.map((a: any) => a.title + " " + a.url))];
-        const reply: Entry[] = text ? [{ kind: "everchat", text }] : [];
+        const reply: Entry[] = text ? [{ kind: "ever", text }] : [];
         const sources: Entry[] = cited.length > 0 ? [{ kind: "echo", text: "sources:\n" + cited.join("\n") }] : [];
         return [...reply, ...sources];
       }

@@ -235,7 +235,7 @@ function synthetic(n: number): Log[] {
       say("tool", 80, 600, rand_span(2e3, 12e3));
       say("echo", 40, 8000, rand_span(1e3, 6e3));
     }
-    say("everchat", 100, 2500, rand_span(2e3, 9e3));
+    say("ever", 100, 2500, rand_span(2e3, 9e3));
   }
   return logs;
 }

@@ -39,13 +39,13 @@ export const ANSI = { block: "7", ink: "0", add: "2", del: "1", you: "4" };
 export const WHO: Record<string, string> = { work: "Report", note: "Note" };
 
 export const KIND: Record<Kind, Look> = {
-  user     : { dim: false, it: false },
-  work     : { dim: false, it: false },
-  everchat : { dim: false, it: false },
-  tool     : { dim: true, it: false },
-  echo     : { dim: true, it: false },
-  note     : { dim: true, it: true },
-  mind     : { dim: true, it: true },
+  user : { dim: false, it: false },
+  work : { dim: false, it: false },
+  ever : { dim: false, it: false },
+  tool : { dim: true, it: false },
+  echo : { dim: true, it: false },
+  note : { dim: true, it: true },
+  mind : { dim: true, it: true },
 };
 
 // the kinds filled (the machine's); framed (the user's, an agent's); the

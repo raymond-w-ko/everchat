@@ -202,7 +202,7 @@ export namespace Agent {
         return;
       }
       const says = run.sent.splice(0);
-      const replies = step.entries.filter((e) => e.kind === "everchat");
+      const replies = step.entries.filter((e) => e.kind === "ever");
       const text = replies.map((e) => e.text).join("\n\n");
       if (backs.length === 0 && says.length === 0) {
         end.ok   = true;

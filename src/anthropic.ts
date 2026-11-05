@@ -203,7 +203,7 @@ export namespace Anthropic {
       on("mind", delta.thinking);
     }
     if (delta.type === "text_delta") {
-      on("everchat", delta.text);
+      on("ever", delta.text);
     }
     if (delta.type === "input_json_delta") {
       on("tool", delta.partial_json);
@@ -251,7 +251,7 @@ export namespace Anthropic {
     for (const b of out) {
       const entry = Anthropic.entry(b);
       const top = entries[entries.length - 1];
-      if (entry?.kind === "everchat" && top?.kind === "everchat") {
+      if (entry?.kind === "ever" && top?.kind === "ever") {
         top.text += entry.text;
       } else if (entry !== null) {
         entries.push(entry);
@@ -265,7 +265,7 @@ export namespace Anthropic {
     const c = b.content;
     switch (b.type) {
       case "text": {
-        return { kind: "everchat", text: b.text };
+        return { kind: "ever", text: b.text };
       }
       case "thinking": {
         return { kind: "mind", text: b.thinking };

@@ -11,7 +11,7 @@ EverChat's memory: the whole chat between EverChat and the user, oldest first, i
 
 Each message has a kind:
 - user: the user's words
-- everchat: EverChat's replies
+- ever: EverChat's replies
 - tool: EverChat's tool calls
 - echo: tool results
 - work: an agent's report, starting "[Name]"

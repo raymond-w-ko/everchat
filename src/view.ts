@@ -722,7 +722,7 @@ function part_rows(v: View, id: number, n: number, t: number, talk: boolean): Ro
     const after = minds.flatMap((x) => entry_rows(null, "mind", x));
     return [...whole_rows(id, entry), ...after];
   }
-  const open  = talk && n === 1 && ["user", "everchat"].includes(entry?.kind ?? "");
+  const open  = talk && n === 1 && ["user", "ever"].includes(entry?.kind ?? "");
   if (!(v.open.get(key) ?? open)) {
     return sum_rows(id, n, v.nodes.get(key));
   }

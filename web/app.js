@@ -85,7 +85,7 @@ function line_msgs(s, line, last) {
 }
 function import_pick(sessions, want, done) {
   const old = [...sessions].sort((a, b) => a.start.localeCompare(b.start));
-  const keep = (m, last) => (want.tools || m.kind === "user" || m.kind === "everchat") && m.date >= want.since && import_new(m, last);
+  const keep = (m, last) => (want.tools || m.kind === "user" || m.kind === "ever") && m.date >= want.since && import_new(m, last);
   const kept = (s, last) => s.heads.filter((m) => keep(m, last));
   return old.map((s) => ({ ...s, heads: kept(s, done[import_id(s)]) })).filter((s) => s.heads.length > 0);
 }
@@ -211,7 +211,7 @@ function chat_openai(chat) {
   return nodes.flatMap((m) => {
     const role = m?.author?.role;
     const type = String(m?.content?.content_type);
-    const kind = role === "user" ? "user" : role === "assistant" ? m.recipient === "all" ? "everchat" : "tool" : role === "tool" ? "echo" : null;
+    const kind = role === "user" ? "user" : role === "assistant" ? m.recipient === "all" ? "ever" : "tool" : role === "tool" ? "echo" : null;
     const skip = kind === null || m.metadata?.is_visually_hidden_from_conversation === true || type === "thoughts" || type === "reasoning_recap";
     date = import_date(m?.create_time, date);
     return skip ? [] : msgs_of(kind, (kind === "tool" ? m.recipient + " " : "") + parts_text(m.content.parts ?? [m.content.text]), date);
@@ -221,7 +221,7 @@ function chat_claude(chat) {
   let date = import_date(chat.created_at, "");
   return (chat.chat_messages ?? []).flatMap((m) => {
     date = import_date(m.created_at, date);
-    const kind = m.sender === "human" ? "user" : "everchat";
+    const kind = m.sender === "human" ? "user" : "ever";
     const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.text ?? "") }];
     const files = [...m.attachments ?? [], ...m.files ?? []].map((f) => ({ type: "text", text: "[file " + f.file_name + "]" }));
     return blocks_msgs(kind, [...blocks, ...files], date);
@@ -275,7 +275,7 @@ function line_claude(s, j, last) {
   if (j.type === "attachment" && j.attachment?.type === "queued_command") {
     return msgs_of("user", String(j.attachment.prompt ?? ""), date);
   }
-  return blocks_msgs(j.type === "user" ? "user" : "everchat", blocks, date);
+  return blocks_msgs(j.type === "user" ? "user" : "ever", blocks, date);
 }
 function blocks_msgs(kind, blocks, date) {
   const say = blocks.filter((b) => b.type === "image" || b.type === "text" && !SKIP.test(b.text));
@@ -293,7 +293,7 @@ function line_codex(s, j, last) {
 function item_codex(p, date) {
   switch (p.type) {
     case "message": {
-      const kind = p.role === "user" ? "user" : p.role === "assistant" ? "everchat" : null;
+      const kind = p.role === "user" ? "user" : p.role === "assistant" ? "ever" : null;
       const parts = (p.content ?? []).filter((c) => !INJECTED.test(c.text ?? ""));
       return kind === null ? [] : msgs_of(kind, parts_text(parts), date);
     }
@@ -335,7 +335,7 @@ var WHO = { work: "Report", note: "Note" };
 var KIND = {
   user: { dim: false, it: false },
   work: { dim: false, it: false },
-  everchat: { dim: false, it: false },
+  ever: { dim: false, it: false },
   tool: { dim: true, it: false },
   echo: { dim: true, it: false },
   note: { dim: true, it: true },
@@ -1276,7 +1276,7 @@ function part_rows(v, id, n, t, talk) {
     const after = minds.flatMap((x) => entry_rows(null, "mind", x));
     return [...whole_rows(id, entry), ...after];
   }
-  const open2 = talk && n === 1 && ["user", "everchat"].includes(entry?.kind ?? "");
+  const open2 = talk && n === 1 && ["user", "ever"].includes(entry?.kind ?? "");
   if (!(v.open.get(key) ?? open2)) {
     return sum_rows(id, n, v.nodes.get(key));
   }
@@ -1684,7 +1684,7 @@ async function guest_send(text) {
   guest_say(res.error ?? SENT(res.who));
 }
 function guest_say(text) {
-  v.live.push({ kind: "everchat", text });
+  v.live.push({ kind: "ever", text });
   draw(true);
 }
 function chat() {

@@ -64,5 +64,5 @@ function zip64(name: string, data: Uint8Array): Blob {
 // an imported chat's AI, its say and calls, reads as "ai", never EverChat
 test("an import's AI is not EverChat", () => {
   const show = (kind: any, imported?: boolean) => Memory.show(Memory.root(0, { kind, text: "", imported }));
-  expect([show("everchat", true), show("tool", true), show("user", true), show("everchat")]).toEqual(["ai: ", "ai: ", "user: ", "everchat: "]);
+  expect([show("ever", true), show("tool", true), show("user", true), show("ever")]).toEqual(["ai: ", "ai: ", "user: ", "ever: "]);
 });
