@@ -161,7 +161,10 @@ export namespace Machine {
   export async function shell(cwd: string, command: string, signal: AbortSignal): Promise<Out> {
     SHELLS.forEach((p) => Machine.group(p) || SHELLS.delete(p));
     const start = performance.now();
-    const proc = Bun.spawn([SHELL, "-c", "exec 2>&1\n" + command], {
+    // sh merges stderr into stdout, then becomes $SHELL (same process, so
+    // the same group): a shell that isn't POSIX (fish) never sees the
+    // `exec 2>&1`, which it would read as a bare exec and print its help
+    const proc = Bun.spawn(["/bin/sh", "-c", 'exec 2>&1; exec "$0" -c "$1"', SHELL, command], {
       cwd      : cwd,
       env      : { ...process.env, EVERCHAT_RUN: RUN },
       stdin    : "ignore",

@@ -24,3 +24,18 @@ test("a shell's output is decoded whole: a char split over writes, a broken one 
   const broken = await Machine.shell(DIR, "printf 'ab\\303'", live);
   expect(broken.text).toStartWith("ab�\n(exit 0 in ");
 });
+
+// a $SHELL that isn't POSIX (fish: a bare `exec` prints its help) still
+// runs the command alone, its stderr in its output. The shell is read as
+// machine.ts loads, so this runs in a process of its own with a fake one:
+// it refuses a command that starts with a bare exec, and runs any other
+test("a shell's output is merged and clean when $SHELL isn't POSIX", async () => {
+  const fake = DIR + "/fakeshell";
+  fs.writeFileSync(fake, '#!/bin/sh\ncase "$2" in "exec 2>&1"*) echo "fake: exec needs a command"; exit 1;; esac\nexec /bin/sh -c "$2"\n', { mode: 0o755 });
+  const run = DIR + "/run.ts";
+  fs.writeFileSync(run, `const { Machine } = await import(${JSON.stringify(import.meta.dir + "/machine.ts")});
+console.log(JSON.stringify(await Machine.shell(${JSON.stringify(DIR)}, "echo out; echo err >&2", new AbortController().signal)));`);
+  const proc = Bun.spawn([process.execPath, run], { env: { ...process.env, SHELL: fake }, stdout: "pipe", stderr: "inherit" });
+  const out  = JSON.parse(await new Response(proc.stdout).text());
+  expect(out.text).toStartWith("out\nerr\n(exit 0 in ");
+});
