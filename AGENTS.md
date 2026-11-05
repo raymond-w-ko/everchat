@@ -15,6 +15,13 @@ EverChat is an LLM agent harness. Its core idea: the chat itself is the memory.
 There is one chat that never ends. A cheap model compresses the log into a tree
 of summaries, and the agent zooms into that tree when it needs detail.
 
+## Tools
+
+- [Bun](https://bun.sh) is the runtime, package manager, test runner, and
+  bundler. Do not use Node, npm, yarn, or pnpm.
+- [just](https://github.com/casey/just) is the command runner. Put common
+  tasks in the `justfile` as recipes.
+
 ## The original concept
 
 The original design document is
