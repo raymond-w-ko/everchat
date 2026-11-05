@@ -42,6 +42,10 @@ Remove an entry when the real fix lands.
   - The app struct is still `struct Unii: App` in `ios/App/Unii.swift`.
 - Already renamed: the page bridge (`messageHandlers.everchat`) and the session
   cookie (`everchat`). Both must match `web/src/main.ts` and `src/cloud.ts`.
+- Broken until fixed: the app registers the `everchat` bridge, but it loads
+  uniichat.com, whose page asks for the `unii` bridge. So a top-up on that page
+  never reaches the app's purchase code (`Store.buy`). Change `UniiSite` to our
+  server; then the page and the app agree again.
 - Why not fixed yet: we have not chosen our domain (raymondwko.com or
   raymondko.com) or the app's display name.
 - Real fix: point `UniiSite` at our server, and rename the display name,
