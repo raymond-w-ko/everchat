@@ -58,10 +58,10 @@ It asks for your email, the server prints a link, and the page it opens
 asks for the code the terminal shows. `bun src/term.ts help` lists the
 rest.
 
-Other commands:
+Other commands (the `just` ones need [just](https://github.com/casey/just)):
 
-    bun run test                     # the tests, each file on its own
-    bun run web                      # rebuilds web/app.js from web/src
+    just test                        # the tests, each file on its own
+    just web                         # rebuilds web/app.js from web/src
     bun build --compile src/term.ts --outfile unii
                                      # one `unii` executable; `unii serve`
                                      # runs the server it carries
