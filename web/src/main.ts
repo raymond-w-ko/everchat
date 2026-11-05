@@ -1,7 +1,7 @@
 // UniiChat (the site)
 // ===================
-// The page around View.ts's chat: the server's messages go to
-// View.view_hear, a click's `data-act` (Html.ts) to View.view_act, and
+// The page around view.ts's chat: the server's messages go to
+// View.view_hear, a click's `data-act` (html.ts) to View.view_act, and
 // both answer what to send back. The page is drawn once a frame, keeping
 // the first row in sight in place, or the bottom while the page is at it;
 // the log's rows only once a message (but a stream's piece) or an act
@@ -13,10 +13,10 @@
 // credit is bought through the App Store (APP), and sign-in is by email
 // only (another company's would need Sign in with Apple).
 
-import * as Import from "../../Import.ts";
-import { theme_css } from "../../Theme.ts";
-import * as View from "../../View.ts";
-import * as Html from "./Html.ts";
+import * as Import from "../../src/import.ts";
+import { theme_css } from "../../src/theme.ts";
+import * as View from "../../src/view.ts";
+import * as Html from "./html.ts";
 
 // Types
 // =====
@@ -40,7 +40,7 @@ const DESK = matchMedia("(hover: hover)");
 // again (a link expired), the link sent
 const EXPIRED = "That sign-in link expired. What's your email? I'll send you a new one.";
 // the line under a guest's box, where the server bills: signing in is
-// the consent (Billing.ts CONSENT says it in full); its links open a tab,
+// the consent (billing.ts CONSENT says it in full); its links open a tab,
 // as the menu's do, so the chat stays
 const GUEST_AI = 'By signing in, you accept the <a href="/terms.html" target="_blank">terms</a> and <a href="/privacy.html" target="_blank">privacy policy</a>, and that Anthropic\'s and OpenAI\'s models answer you.';
 const SENT    = (email: string) => `Thanks! I sent a link to ${email}. Open it, and we'll go on from here.`;
@@ -330,7 +330,7 @@ function act(a: View.Act): void {
 }
 
 // a click on a View.Act, a Copy button, a page (go) or credit to buy
-// (Html.ts), unless it ends a selection dragged in
+// (html.ts), unless it ends a selection dragged in
 // its element
 function click(ev: MouseEvent): void {
   const el = (ev.target as HTMLElement).closest<HTMLElement>("[data-act], [data-copy], [data-go], [data-usd]");

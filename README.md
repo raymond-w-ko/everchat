@@ -35,9 +35,9 @@ How it works
 - **Import.** Bring your past Claude and ChatGPT chats (Claude Code and
   Codex folders, or the websites' exports); they join the tree.
 
-The design is in the header comment of each file. Start with Memory.ts
-(the tree and the view), Server.ts (the chat, turns, workers) and
-AskAI.ts (model calls and the cache).
+The design is in the header comment of each file in src/. Start with memory.ts
+(the tree and the view), server.ts (the chat, turns, workers) and
+askai.ts (model calls and the cache).
 
 Run it
 ------
@@ -46,22 +46,23 @@ You need [Bun](https://bun.sh) and an Anthropic API key (or an OpenAI
 one, below).
 
     export ANTHROPIC_API_KEY=sk-ant-...
-    bun Server.ts                    # http://127.0.0.1:8788, data in ~/.unii
+    bun src/server.ts                # http://127.0.0.1:8788, data in ~/.unii
 
 Then open http://127.0.0.1:8788 and type your email. With no mail key
 set, the server prints the sign-in link in its output: open it. Or chat
 from a terminal:
 
-    bun Term.ts http://127.0.0.1:8788
+    bun src/term.ts http://127.0.0.1:8788
 
 It asks for your email, the server prints a link, and the page it opens
-asks for the code the terminal shows. `bun Term.ts help` lists the rest.
+asks for the code the terminal shows. `bun src/term.ts help` lists the
+rest.
 
 Other commands:
 
     bun run test                     # the tests, each file on its own
     bun run web                      # rebuilds web/app.js from web/src
-    bun build --compile Term.ts --outfile unii
+    bun build --compile src/term.ts --outfile unii
                                      # one `unii` executable; `unii serve`
                                      # runs the server it carries
 
@@ -76,10 +77,10 @@ also be set as the variable `UNII_<KEY>`:
 
 - `site`: the server's origin, for sign-in links (default
   http://127.0.0.1:8788). Another port: `UNII_SITE=http://127.0.0.1:9000
-  bun Server.ts 9000`.
+  bun src/server.ts 9000`.
 - `vendors`: what the server offers, comma-separated: `claude-api`
   (default), `openai-api`.
-- `models`: the models offered, by label (Pick.ts; default all).
+- `models`: the models offered, by label (pick.ts; default all).
 - `pick`: what a chat runs on until it picks another,
   `vendor:model:effort:speed` (default `claude-api:sonnet-5.5:medium:slow`).
 - `compactor`: what writes the summaries (default
@@ -90,8 +91,8 @@ also be set as the variable `UNII_<KEY>`:
 - `rules`: a file appended to every system prompt.
 - `after`: a shell command run after each turn.
 - `workers`: how many processes serve the users (default none: one
-  process). With a number, `Server.ts` only routes, behind a proxy that
-  honors its `x-unii-worker` header (Server.ts explains).
+  process). With a number, `server.ts` only routes, behind a proxy that
+  honors its `x-unii-worker` header (server.ts explains).
 - `apple`, `apns`: the iOS app's App ID and push key id (ios/).
 
 Keys are read from the environment: `ANTHROPIC_API_KEY`,
@@ -104,7 +105,7 @@ UNII_PICK=openai-api:gpt-6.1-sol:medium:slow
 UNII_COMPACTOR=openai-api:gpt-6-luna:high:slow`.
 
 A self-hosted server is free: it bills no one, shows no prices, and calls
-only the model vendors. Billing.ts is the one place a hosted server
+only the model vendors. billing.ts is the one place a hosted server
 plugs in its billing (uniichat.com sells credits; this repo has none).
 
 The `unii` terminal
@@ -114,11 +115,11 @@ The `unii` terminal
 which installs the released `unii` executable. `unii` alone opens
 uniichat.com; `unii <url>` opens any server. Run with
 `UNII_COMPUTER=1` on a Mac, the agent may use its screen (it compiles
-Computer.swift with swiftc; macOS asks for Screen Recording and
+computer.swift with swiftc; macOS asks for Screen Recording and
 Accessibility).
 
 Telemetry: once a day the `unii` terminal asks bend-lang.com's /check
-for the latest version (Term.ts update_check), sending its version, OS
+for the latest version (term.ts update_check), sending its version, OS
 and CPU type, no account and no id; it also says whether this computer
 has ever self-hosted (set for good the first time it runs `unii serve`
 or opens a server other than uniichat.com). It is the one call a

@@ -22,6 +22,19 @@ of summaries, and the agent zooms into that tree when it needs detail.
 - [just](https://github.com/casey/just) is the command runner. Put common
   tasks in the `justfile` as recipes.
 
+## Layout
+
+- `src/`: all TypeScript modules, flat, plus the files they import
+  (`computer.swift`, `prompt.txt`, `hello.md`).
+- `src/x.test.ts`: the tests of one module sit next to it (`x.ts`).
+- `tests/`: tests that cover many modules at once.
+- `web/`: the site's static files. `web/src/` is the browser code, built into
+  `web/app.js` (`just web`).
+- `ios/`: the iOS app.
+
+File names are lowercase. Multi-word names are written as one word
+(`askai.ts`, `openai.ts`).
+
 ## The original concept
 
 The original design document is
