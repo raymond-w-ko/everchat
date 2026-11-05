@@ -50,6 +50,11 @@ upstream. Read it before you make design changes.
 Treat it as the starting point, not as a spec we must follow. When our design
 differs from it, write down the difference and the reason.
 
+When the upstream code and this document disagree, the code is canonical. The
+code came later, and the upstream author uses it every day. So treat the
+document as a guide to the intent, and the code as the truth about the
+behavior.
+
 ## Why we forked
 
 We hard fork because upstream is unlikely to change. The upstream author is
