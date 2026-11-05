@@ -56,3 +56,28 @@ Remove an entry when the real fix lands.
 - Why not fixed yet: we have not chosen our contact address.
 - Real fix: change the address in `web/src/html.ts`, then run `just web` to
   rebuild `web/app.js`.
+
+## No release or update path
+
+- Where: `web/install.sh`, `src/hello.md`, `src/term.ts`.
+- Problem: upstream shipped a release installer, an `update` command, and a
+  daily version check. All three talked to upstream (uniichat.com and
+  bend-lang.com), so we removed them. We have nothing in their place:
+  - `web/install.sh` (served at `/install.sh`) installs nothing. It prints how
+    to build from source and exits 1.
+  - `src/hello.md`, the first message of every new chat, still tells the user
+    to run `curl -fsSL <site>/install.sh | sh`. That command now fails.
+  - `everchat update` is gone, and nothing tells a user that a newer version
+    exists.
+- Real fix: publish builds (for example, GitHub releases), make
+  `web/install.sh` download them, and then decide whether to bring back an
+  update command. Change `src/hello.md` to match.
+
+## Site metadata points at uniichat.com
+
+- Where: `web/index.html`.
+- Problem: `og:url` is `https://uniichat.com/` and `og:image` is
+  `https://uniichat.com/og.png`. A link preview of our site would show
+  upstream's page and image.
+- Why not fixed yet: we have not chosen our domain.
+- Real fix: set both to our domain, or remove them until we have one.

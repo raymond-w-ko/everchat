@@ -9,11 +9,10 @@
 // done or halted; all they left running dies as this everchat quits. From a
 // pipe, each line is a message.
 //
-// One executable per platform (the releases uniichat.com/install.sh
-// installs); once a day it asks bend-lang.com's /check (update_check) and
-// notes a newer one. `everchat serve` runs the server it carries. The server:
-// the url given, else $EVERCHAT_URL, else uniichat.com; each server's session
-// is a file of its own (TOKEN).
+// One executable per platform. `everchat serve` runs the server it
+// carries. The server: the url given, else $EVERCHAT_URL; there is no
+// default, so it never reaches a server no one named. Each server's
+// session is a file of its own (TOKEN).
 //
 // Usage: USAGE (`everchat help` prints it).
 
@@ -70,40 +69,28 @@ const ARGS   = process.argv.slice(2);
 const LOGIN  = ARGS.includes("login");
 const HELP   = ARGS.some((a) => ["help", "--help", "-h"].includes(a));
 const ASKVER = ARGS.includes("version");
-const UPDATE = ARGS.includes("update");
 const SERVE  = ARGS.includes("serve");
 const PORT   = SERVE ? ARGS.find((a) => /^\d+$/.test(a)) : undefined;
-const WORDS  = ["login", "help", "--help", "-h", "version", "update", "serve"];
+const WORDS  = ["login", "help", "--help", "-h", "version", "serve"];
 const WEB    = /^https?:\/\//;
 const ODD    = ARGS.find((a) => !WORDS.includes(a) && !WEB.test(a) && a !== PORT);
 const HOME   = process.env.EVERCHAT_HOME || os.homedir() + "/.everchat";
-const OURS   = "https://uniichat.com";
-const SERVER = (ARGS.find((a) => WEB.test(a)) ?? process.env.EVERCHAT_URL ?? OURS).replace(/\/$/, "");
-const TOKEN  = HOME + "/" + new URL(SERVER).host + "/token";
+// the server to chat with ("": none named; only login and the chat need one)
+const SERVER = (ARGS.find((a) => WEB.test(a)) ?? process.env.EVERCHAT_URL ?? "").replace(/\/$/, "");
+const TOKEN  = SERVER === "" ? "" : HOME + "/" + new URL(SERVER).host + "/token";
 
-const USAGE = `Usage: everchat [url]   the chat (url: $EVERCHAT_URL, else https://uniichat.com)
-       everchat login [url] sign in
-       everchat update [url] install the latest everchat (curl | sh, shown first)
-       everchat version this everchat's version
-       everchat serve [port] your own EverChat server, at http://127.0.0.1:8788
-                            (another port: set EVERCHAT_SITE to its address too),
-                            on your ANTHROPIC_API_KEY and OPENAI_API_KEY;
-                            chat with it: everchat http://127.0.0.1:8788
-       everchat help        this
+const USAGE = `Usage: everchat <url>          the chat (or set EVERCHAT_URL)
+       everchat login <url>    sign in
+       everchat version        this everchat's version
+       everchat serve [port]   your own EverChat server, at http://127.0.0.1:8788
+                               (another port: set EVERCHAT_SITE to its address too),
+                               on your ANTHROPIC_API_KEY and OPENAI_API_KEY;
+                               chat with it: everchat http://127.0.0.1:8788
+       everchat help           this
 EVERCHAT_WORK: where the agent works on this computer (default
-~/.everchat/work). EVERCHAT_COMPUTER=1: it may use the screen. EVERCHAT_HOME: where
-it keeps its sign-in (default ~/.everchat).
-Once a day, everchat asks bend-lang.com for the latest version, sending only
-its version, OS and CPU type, and whether this computer ever ran its own
-server. EVERCHAT_NO_TELEMETRY=1 turns that off.
+~/.everchat/work). EVERCHAT_COMPUTER=1: it may use the screen.
+EVERCHAT_HOME: where it keeps its sign-in (default ~/.everchat).
 In the chat, /help lists every command and key.`;
-
-// the daily version check: what it asks, its cache, and the self-host
-// flag: a file made once this computer serves or opens a server not OURS
-const CHECK   = "https://bend-lang.com/check?p=everchat&v=" + VERSION + "&os=" + process.platform + "&arch=" + process.arch;
-const CHECKED = HOME + "/check.json";
-const SELF    = HOME + "/self";
-const DAY     = 86400000;
 
 // this device's name, as the agent sees it: on macOS its local host name
 // (Bonjour's, unique on its network), else the host's
@@ -291,7 +278,6 @@ function term_hear(t: Term, msg: View.Server): void {
   term_print(t, msg);
   if (first) {
     term_history(t);
-    update_check(t);
   }
   term_draw(t);
   if (msg.$ === "state") {
@@ -1034,57 +1020,6 @@ function login_fail(why: string): never {
   process.exit(1);
 }
 
-// Update
-// ======
-
-// marks this computer as one that self-hosted (SELF), for good
-function self_mark(): void {
-  fs.writeFileSync(SELF, "");
-}
-
-// update_check is the whole telemetry: once a day, a GET of CHECK (plus
-// &self=1 once SELF exists; no account, no id), its answer {ver, notice}
-// cached in CHECKED (stamped before the request: one a day); a cached
-// ver newer than this one is a note. It never delays nor fails the chat
-async function update_check(t: Term): Promise<void> {
-  if (process.env.EVERCHAT_NO_TELEMETRY) {
-    return;
-  }
-  let last = { t: 0, ver: VERSION, notice: "" };
-  try {
-    last = { ...last, ...JSON.parse(fs.readFileSync(CHECKED, "utf8")) };
-  } catch {}
-  try {
-    if (Date.now() - last.t > DAY) {
-      last.t = Date.now();
-      fs.writeFileSync(CHECKED, JSON.stringify(last) + "\n");
-      const got = await (await fetch(CHECK + (fs.existsSync(SELF) ? "&self=1" : ""), { signal: AbortSignal.timeout(3000) })).json() as { ver?: unknown; notice?: unknown };
-      last.ver = typeof got.ver === "string" ? got.ver : VERSION;
-      last.notice = typeof got.notice === "string" ? got.notice : "";
-      fs.writeFileSync(CHECKED, JSON.stringify(last) + "\n");
-    }
-  } catch {}
-  if (update_newer(last.ver)) {
-    const notice = last.notice.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
-    term_note(t, "everchat " + last.ver + " is available: run everchat update" + (notice === "" ? "" : ". " + notice));
-  }
-}
-
-// whether ver (major.minor.patch) is newer than this everchat
-function update_newer(ver: string): boolean {
-  const a = ver.split(".").map(Number);
-  const b = VERSION.split(".").map(Number);
-  return a.length === 3 && a.every(Number.isInteger) && (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
-}
-
-// runs the installer again: the one way everchat changes. The command prints
-// first, so one can run it alone.
-function update_run(url: string): void {
-  const cmd = "curl -fsSL " + url + "/install.sh | sh";
-  console.error(cmd);
-  process.exitCode = child.spawnSync("sh", ["-c", cmd], { stdio: "inherit" }).status ?? 1;
-}
-
 // Main
 // ====
 
@@ -1106,8 +1041,6 @@ async function term_signed(url: string): Promise<boolean> {
   return res === null || res.status !== 401;
 }
 
-fs.mkdirSync(TOKEN.slice(0, -"/token".length), { recursive: true, mode: 0o700 });
-
 if (HELP || ODD !== undefined) {
   if (ODD !== undefined) {
     login_fail("no argument " + ODD + ".\n\n" + USAGE);
@@ -1115,19 +1048,17 @@ if (HELP || ODD !== undefined) {
   console.log(USAGE);
 } else if (ASKVER) {
   console.log("everchat " + VERSION);
-} else if (UPDATE) {
-  update_run(SERVER);
 } else if (SERVE) {
-  self_mark();
   await (await import("./server.ts")).serve(Number(PORT ?? 8788), null);
+} else if (SERVER === "") {
+  login_fail("no server: give its url, or set EVERCHAT_URL.\n\n" + USAGE);
 } else if (LOGIN) {
+  fs.mkdirSync(TOKEN.slice(0, -"/token".length), { recursive: true, mode: 0o700 });
   await login_run(SERVER);
 } else {
+  fs.mkdirSync(TOKEN.slice(0, -"/token".length), { recursive: true, mode: 0o700 });
   if (!await term_signed(SERVER)) {
     await login_run(SERVER);
-  }
-  if (SERVER !== OURS) {
-    self_mark();
   }
   const t = term_new(SERVER);
   term_connect(t);

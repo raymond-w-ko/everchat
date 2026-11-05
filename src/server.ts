@@ -1694,7 +1694,7 @@ export namespace Main {
           Main.opened(ws.data.user.id, 1);
           Main.event("a socket of user " + ws.data.user.id, () => {
             if (ws.data.wire !== String(WIRE)) {
-              ws.send(JSON.stringify({ $: "error", text: "This page or everchat is older than the server: reload or reopen it (`everchat update` for the latest)." }));
+              ws.send(JSON.stringify({ $: "error", text: "This page or everchat is older than the server: reload it, or rebuild and reopen everchat." }));
               return;
             }
             const chat = Chat.open(ws.data.user);

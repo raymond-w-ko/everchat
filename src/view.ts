@@ -366,8 +366,8 @@ export function view_hear(v: View, msg: Server): Client[] {
       return [];
     }
     default: {
-      // a kind newer than this view: an everchat runs the release it was
-      // installed with (term.ts), behind the server's
+      // a kind newer than this view: an everchat runs the build it was
+      // made from (term.ts), behind the server's
       return [];
     }
   }

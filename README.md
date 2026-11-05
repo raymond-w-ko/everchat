@@ -1,15 +1,16 @@
 EverChat
 ========
 
-[▶ Watch the announcement video](https://x.com/VictorTaelin/status/2108200878553588091)
+EverChat is a hard fork of [UniiChat](https://github.com/VictorTaelin/uniichat)
+([▶ upstream's announcement video](https://x.com/VictorTaelin/status/2108200878553588091)).
 
 **This repo is vibe-coded.** AI agents wrote nearly all of it, and AI
 agents reviewed it. Read it, run it and fork it as such: expect bugs.
 
 EverChat is an AI agent with one chat that never ends. There is no "new
 chat" button: you talk to the same agent for days, weeks, years, and it
-remembers. The hosted version is at https://uniichat.com. This is its
-source, to run your own server on your own API keys.
+remembers. There is no hosted version yet: run your own server on your
+own API keys.
 
 How it works
 ------------
@@ -106,24 +107,25 @@ EVERCHAT_COMPACTOR=openai-api:gpt-6-luna:high:slow`.
 
 A self-hosted server is free: it bills no one, shows no prices, and calls
 only the model vendors. billing.ts is the one place a hosted server
-plugs in its billing (uniichat.com sells credits; this repo has none).
+plugs in its billing (a hosted server would sell credits; this repo has
+none).
 
 The `everchat` terminal
--------------------
+-----------------------
 
-`web/install.sh` (served at /install.sh) runs the official installer,
-which installs the released `everchat` executable. `everchat` alone opens
-uniichat.com; `everchat <url>` opens any server. Run with
-`EVERCHAT_COMPUTER=1` on a Mac, the agent may use its screen (it compiles
-computer.swift with swiftc; macOS asks for Screen Recording and
+There is no released `everchat` executable yet. Build it from source
+(`bun build --compile src/term.ts --outfile everchat`). `web/install.sh`
+(served at /install.sh) only says so.
+
+`everchat <url>` opens the server at that url, or at `$EVERCHAT_URL`.
+There is no default server: with neither, it stops and says why. Run
+with `EVERCHAT_COMPUTER=1` on a Mac, the agent may use its screen (it
+compiles computer.swift with swiftc; macOS asks for Screen Recording and
 Accessibility).
 
-Telemetry: once a day the `everchat` terminal asks bend-lang.com's /check
-for the latest version (term.ts update_check), sending its version, OS
-and CPU type, no account and no id; it also says whether this computer
-has ever self-hosted (set for good the first time it runs `everchat serve`
-or opens a server other than uniichat.com). It is the one call a
-self-hosted EverChat makes to us. `EVERCHAT_NO_TELEMETRY=1` turns it off.
+No telemetry: the terminal talks only to the server you name. The server
+talks only to the model vendors, and to Apple push and the mail service
+when those are set up.
 
 License
 -------
