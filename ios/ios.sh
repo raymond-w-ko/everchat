@@ -27,7 +27,7 @@ case "$1" in
       xcrun simctl bootstatus "$dev" > /dev/null
       xcrun simctl status_bar "$dev" override --time 9:41 --batteryState charged --batteryLevel 100
       xcrun simctl install "$dev" build/Build/Products/Debug-iphonesimulator/UniiChat.app
-      xcrun simctl launch "$dev" com.higherorderco.uniichat
+      xcrun simctl launch "$dev" com.raymondwko.everchat
       for t in $(seq 1 20); do
         sleep 0.5
         xcrun simctl io "$dev" screenshot "$2/${name// /_}-$t.png" > /dev/null

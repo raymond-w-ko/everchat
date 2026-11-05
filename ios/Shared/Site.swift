@@ -10,7 +10,7 @@ import Foundation
 enum Site {
 
   static let url = URL(string: Bundle.main.object(forInfoDictionaryKey: "UniiSite") as! String)!
-  static let group = UserDefaults(suiteName: "group.com.higherorderco.uniichat")!
+  static let group = UserDefaults(suiteName: "group.com.raymondwko.everchat")!
 
   // a GET (body nil) or POST of `body`
   static func call(_ path: String, _ body: Data?) async -> [String: Any] {

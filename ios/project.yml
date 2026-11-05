@@ -24,7 +24,7 @@ targets:
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.higherorderco.uniichat
+        PRODUCT_BUNDLE_IDENTIFIER: com.raymondwko.everchat
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: App/Info.plist
@@ -52,14 +52,14 @@ targets:
       properties:
         aps-environment: development
         com.apple.developer.associated-domains: [applinks:uniichat.com]
-        com.apple.security.application-groups: [group.com.higherorderco.uniichat]
+        com.apple.security.application-groups: [group.com.raymondwko.everchat]
   Share:
     type: app-extension
     platform: iOS
     sources: [Share, Shared]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.higherorderco.uniichat.share
+        PRODUCT_BUNDLE_IDENTIFIER: com.raymondwko.everchat.share
     info:
       path: Share/Info.plist
       properties:
@@ -78,4 +78,4 @@ targets:
     entitlements:
       path: Share/Share.entitlements
       properties:
-        com.apple.security.application-groups: [group.com.higherorderco.uniichat]
+        com.apple.security.application-groups: [group.com.raymondwko.everchat]
