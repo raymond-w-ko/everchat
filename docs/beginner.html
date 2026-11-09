@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverChat Source Map</title>
+<style>
+:root {
+  --bg: #fbfaf7; --fg: #1f1d1a; --muted: #6b665e; --line: #e4e0d8; --card: #ffffff;
+  --edge: #cfc9bd; --focus: #1f1d1a;
+  --uses: #c2410c; --usedby: #1d4ed8;
+  --core: #f4e3c9;   --core-b: #b7791f;
+  --store: #dfecdf;  --store-b: #4d7c4d;
+  --server: #e3e1f3; --server-b: #5b52a3;
+  --device: #f3dfe0; --device-b: #a3474f;
+  --view: #dcebf1;   --view-b: #3b7590;
+  --todo: #b45309;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17161a; --fg: #ece9e3; --muted: #a29d94; --line: #2e2c31; --card: #1f1e23;
+    --edge: #47444c; --focus: #ece9e3;
+    --uses: #fb923c; --usedby: #60a5fa;
+    --core: #3a2f1f;   --core-b: #e0a54a;
+    --store: #233227;  --store-b: #86b886;
+    --server: #2a2840; --server-b: #a59cf0;
+    --device: #3a2427; --device-b: #e08a92;
+    --view: #1f3139;   --view-b: #7fbcd6;
+    --todo: #f59e0b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17161a; --fg: #ece9e3; --muted: #a29d94; --line: #2e2c31; --card: #1f1e23;
+  --edge: #47444c; --focus: #ece9e3;
+  --uses: #fb923c; --usedby: #60a5fa;
+  --core: #3a2f1f;   --core-b: #e0a54a;
+  --store: #233227;  --store-b: #86b886;
+  --server: #2a2840; --server-b: #a59cf0;
+  --device: #3a2427; --device-b: #e08a92;
+  --view: #1f3139;   --view-b: #7fbcd6;
+  --todo: #f59e0b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 40px 0 8px; }
+p { margin: 8px 0; max-width: 72ch; }
+.lede { color: var(--muted); }
+code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 16px 0 10px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid; display: inline-block; }
+.ln { width: 26px; height: 0; border-top: 2px solid var(--edge); display: inline-block; }
+.ln.t { border-top-style: dashed; } .ln.z { border-top-style: dotted; }
+.ln.u { border-color: var(--uses); } .ln.b { border-color: var(--usedby); }
+.board { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+svg { display: block; }
+.col-label { font-size: 11px; fill: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.col-sub { font-size: 11px; fill: var(--muted); }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.2; opacity: 0.55; transition: opacity .12s; }
+.edge.t { stroke-dasharray: 4 3; }
+.edge.z { stroke-dasharray: 1.5 3; }
+.edge.dim { opacity: 0.07; }
+.edge.uses { stroke: var(--uses); opacity: 1; stroke-width: 2; }
+.edge.usedby { stroke: var(--usedby); opacity: 1; stroke-width: 2; }
+.grp { fill: none; stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; opacity: .7; }
+.grp-label { font-size: 10px; fill: var(--muted); }
+.node { cursor: pointer; outline: none; }
+.node rect.box { stroke-width: 1.5; transition: opacity .12s; }
+.node text { font-size: 13px; fill: var(--fg); pointer-events: none; }
+.node text.n { font-weight: 600; }
+.node text.s { font-size: 11px; fill: var(--muted); }
+.node .dot { fill: var(--todo); }
+.node.dim rect.box, .node.dim text { opacity: .28; }
+.node.sel rect.box { stroke-width: 3; stroke: var(--focus) !important; }
+.node.uses rect.box { stroke: var(--uses) !important; stroke-width: 2.5; }
+.node.usedby rect.box { stroke: var(--usedby) !important; stroke-width: 2.5; }
+.node:focus-visible rect.box { stroke: var(--focus) !important; stroke-width: 3; }
+.panel { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 16px; min-height: 96px; }
+.panel h3 { margin: 0 0 2px; font-size: 18px; }
+.panel .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+.panel h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.panel ul { margin: 0; padding-left: 18px; }
+.panel li { margin: 2px 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; background: none; color: var(--fg); cursor: pointer; }
+.chip.t { border-style: dashed; color: var(--muted); }
+.chip:hover { border-color: var(--fg); }
+.todo { color: var(--todo); }
+.empty { color: var(--muted); font-size: 14px; }
+ol.path { padding-left: 22px; }
+ol.path li { margin: 6px 0; max-width: 80ch; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.tablewrap { overflow-x: auto; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.f { white-space: nowrap; }
+td.f button { font: 600 13px ui-monospace, Menlo, monospace; background: none; border: 0; color: var(--fg); cursor: pointer; padding: 0; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.tag { display: inline-block; font-size: 11px; padding: 0 7px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>EverChat source map</h1>
+  <p class="lede">A short summary of each module in <code>src/</code> (tests not included), and a map of who imports whom. Use it to choose what to read, and what to improve, first.</p>
+
+  <h2>How to read the map</h2>
+  <p>Each box is one file. An arrow from A to B means A imports B. Columns go from left to right. The left column imports nothing of ours that runs, so you can read those files alone. Each column to the right builds on the columns before it. So read from left to right.</p>
+  <p>Click a box (or press Tab and Enter) to see its summary. Its imports turn <span style="color:var(--uses)">orange</span>, and the files that import it turn <span style="color:var(--usedby)">blue</span>. A dot on a box means it has known work to do.</p>
+
+  <div class="legend" id="legend"></div>
+  <div class="board">
+    <div class="scroll"><svg id="map" role="img" aria-label="Import graph of src modules"></svg></div>
+    <aside class="panel" id="panel" aria-live="polite"><p class="empty">Click a box to see what the file does.</p></aside>
+  </div>
+
+  <h2>Where to start</h2>
+  <ol class="path">
+    <li><strong>Warm up with the small files that stand alone.</strong> <code>names</code>, <code>price</code>, <code>clip</code>, <code>theme</code>, and <code>pick</code>. Each is under 150 lines and imports nothing that runs.</li>
+    <li><strong>Learn the core idea, in this order.</strong> Read <code>docs/references/optchat.md</code> first. Then <code>clip</code> (text sizes), <code>config</code> and <code>disk</code> (settings and durable writes), <code>askai</code> (model calls and the prompt cache), <code>agent</code> (the call loop), <code>memory</code> (the tree and the view), and <code>tools</code> (the prompts). Skim <code>anthropic</code> and <code>openai</code>, which are vendor formats.</li>
+    <li><strong>Read <code>server</code> last.</strong> It joins everything, and it is 2190 lines. Read one section at a time, starting with turns (<code>Chat.take</code>).</li>
+    <li><strong>Good first improvements</strong>, from <code>docs/upstream-issues-and-prs.md</code>. Each one is small and has a clear test.
+      <ul>
+        <li><code>machine</code>: the abort-listener leak in <code>Machine.nap</code>.</li>
+        <li><code>agent</code>: the abort-listener leak in <code>Agent.yielded</code>.</li>
+        <li><code>md</code>: numbered lists and sub-lists (upstream #16, PR #22).</li>
+        <li><code>openai</code>: check how a stream error event is read (from PR #33).</li>
+      </ul>
+    </li>
+    <li><strong>The first change to the core</strong>: a separate system prompt for compactions (upstream PR #37). It touches <code>tools</code>, <code>memory</code>, <code>server</code>, and <code>src/prompt.txt</code>. Do it after step 2.</li>
+  </ol>
+
+  <h2>All modules</h2>
+  <div class="tablewrap"><table id="table"></table></div>
+
+  <footer>
+    <p>The map is built from the <code>import</code> lines of <code>src/*.ts</code> as of 2026-11-05 (commit fe1742d). It does not update itself, so it goes out of date when the imports change. Only value imports decide the columns. A type-only import (dashed) brings in only types, so it can point right or form a cycle without changing the reading order. A dotted line is a lazy import (<code>await import</code>), loaded only when needed. The browser code in <code>web/src/</code> also uses <code>call</code>, <code>import</code>, <code>md</code>, <code>theme</code>, and <code>view</code>. It is not on the map.</p>
+  </footer>
+</main>
+
+<script>
+const MODS = [{"name":"agent","lines":517,"deps":[{"to":"askai","type":false,"lazy":false},{"to":"anthropic","type":false,"lazy":false},{"to":"openai","type":false,"lazy":false},{"to":"price","type":false,"lazy":false},{"to":"view","type":false,"lazy":false},{"to":"machine","type":false,"lazy":false},{"to":"config","type":false,"lazy":false}],"area":"core","sum":"The model-call loop. It sends a request, streams the answer, runs tool calls in order, and retries on a busy error (8 tries at most). A Wire (anthropic.ts or openai.ts) handles each vendor's format.","todo":["Abort-listener leak in Agent.yielded (from upstream PR #29).","Gives up after about 4 minutes of usage-limit errors, so subagent tabs vanish (upstream #15)."]},{"name":"anthropic","lines":316,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"agent","type":false,"lazy":false},{"to":"price","type":false,"lazy":false}],"area":"core","sum":"The Wire for Anthropic's Messages API. It builds the request, puts the cache marks, and reads the stream.","todo":[]},{"name":"askai","lines":297,"deps":[{"to":"agent","type":false,"lazy":false},{"to":"clip","type":false,"lazy":false},{"to":"machine","type":false,"lazy":false},{"to":"pick","type":true,"lazy":false},{"to":"price","type":true,"lazy":false}],"area":"core","sum":"The one way to call a model. It holds the prompt-cache rule: one call writes a cached prefix and the others wait for it (single flight). A summary call retries until it gets an answer. It also defines shared types such as Kind, which is why 14 files import it.","todo":[]},{"name":"billing","lines":118,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"cloud","type":true,"lazy":false},{"to":"memory","type":true,"lazy":false},{"to":"view","type":true,"lazy":false}],"area":"server","sum":"Everything about money, behind one boundary. This build is free: no prices, no payer, nothing owed. A hosted server would plug in a billing of its own.","todo":[]},{"name":"call","lines":184,"deps":[{"to":"md","type":true,"lazy":false}],"area":"view","sum":"Turns a logged tool call (zoom {\"id\":6243}) into what people see: an emoji, a name, and a short head. It also reads a subagent's report.","todo":[]},{"name":"clip","lines":90,"deps":[],"area":"core","sum":"The size limit for one piece of text (CAP characters), and helpers that clip text or split it into pages. It imports nothing, so the device side and the browser can use it too.","todo":[]},{"name":"cloud","lines":486,"deps":[{"to":"billing","type":false,"lazy":false},{"to":"config","type":false,"lazy":false},{"to":"disk","type":false,"lazy":false}],"area":"server","sum":"Accounts, in one SQLite file: sign-in by email link, sessions, terminal sign-in, and iOS push.","todo":[]},{"name":"computer","lines":122,"deps":[{"to":"agent","type":true,"lazy":false},{"to":"machine","type":false,"lazy":false}],"area":"device","sum":"The computer-use tool on macOS: mouse, keyboard, and screenshots, through computer.swift.","todo":[]},{"name":"config","lines":95,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"pick","type":false,"lazy":false}],"area":"store","sum":"The server's settings, from config.json or EVERCHAT_* variables. It takes the API keys out of the environment, so programs an agent runs never inherit them.","todo":[]},{"name":"disk","lines":121,"deps":[{"to":"config","type":false,"lazy":false}],"area":"store","sum":"Durable writes by group commit. A write goes to the OS cache at once; one flush at a time makes earlier writes durable. An action is answered only after its flush.","todo":[]},{"name":"import","lines":517,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"clip","type":false,"lazy":false}],"area":"server","sum":"Reads a person's past Claude and ChatGPT chats (local logs or export zips) into their chat, and estimates the cost first.","todo":[]},{"name":"machine","lines":461,"deps":[{"to":"agent","type":true,"lazy":false},{"to":"clip","type":false,"lazy":false},{"to":"computer","type":false,"lazy":false}],"area":"device","sum":"The device tools: shell, read, write, edit, and computer. It runs them as jobs and kills a job's process group on a stop.","todo":["Abort-listener leak in Machine.nap (from upstream PR #29).","Image read is a candidate feature (upstream #44, PR #47)."]},{"name":"mail","lines":90,"deps":[],"area":"server","sum":"Sends sign-in emails through Resend, in batches. A refused batch goes again in halves, so one bad address fails only itself.","todo":[]},{"name":"md","lines":305,"deps":[{"to":"names","type":false,"lazy":false}],"area":"view","sum":"The small Markdown parser both views use: code, headings, lists, tables, quotes, and inline marks.","todo":["Numbered lists and sub-lists render wrong (upstream #16; fix in PR #22)."]},{"name":"memory","lines":1195,"deps":[{"to":"askai","type":false,"lazy":false},{"to":"clip","type":false,"lazy":false},{"to":"config","type":false,"lazy":false},{"to":"disk","type":false,"lazy":false},{"to":"pick","type":false,"lazy":false},{"to":"names","type":false,"lazy":false},{"to":"view","type":false,"lazy":false}],"area":"core","sum":"The heart of the design. It logs every message, grows the binary tree of summary lines (compactions), and builds the view that each call sees. Read docs/references/optchat.md before this file.","todo":["Compactions share the turns' system prompt (upstream PR #37; also touches tools.ts and prompt.txt)."]},{"name":"names","lines":51,"deps":[],"area":"view","sum":"Agent names: a common adjective and a noun, joined (FireAnt).","todo":[]},{"name":"openai","lines":231,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"agent","type":false,"lazy":false},{"to":"price","type":false,"lazy":false},{"to":"config","type":false,"lazy":false}],"area":"core","sum":"The Wire for OpenAI's Responses API, plus voice transcription.","todo":["Check the error-event unwrap (from upstream PR #33)."]},{"name":"paint","lines":426,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"call","type":false,"lazy":false},{"to":"md","type":true,"lazy":false},{"to":"theme","type":false,"lazy":false},{"to":"view","type":false,"lazy":false}],"area":"view","sum":"Turns View rows into styled terminal lines and ANSI codes.","todo":[]},{"name":"pick","lines":140,"deps":[{"to":"askai","type":true,"lazy":false}],"area":"store","sum":"What a chat runs on (vendor, model, effort, speed), and how a move steps through the options.","todo":[]},{"name":"price","lines":77,"deps":[],"area":"store","sum":"What a call costs, in micro-USD, from its token usage and the list prices.","todo":[]},{"name":"screen","lines":418,"deps":[{"to":"paint","type":false,"lazy":false},{"to":"theme","type":false,"lazy":false}],"area":"view","sum":"The terminal screen: raw input, keys, paste, the input editor, and the footer it redraws.","todo":[]},{"name":"server","lines":2190,"deps":[{"to":"agent","type":false,"lazy":false},{"to":"askai","type":false,"lazy":false},{"to":"billing","type":true,"lazy":false},{"to":"clip","type":false,"lazy":false},{"to":"cloud","type":false,"lazy":false},{"to":"disk","type":false,"lazy":false},{"to":"mail","type":false,"lazy":false},{"to":"import","type":false,"lazy":false},{"to":"memory","type":false,"lazy":false},{"to":"openai","type":false,"lazy":false},{"to":"pick","type":false,"lazy":false},{"to":"price","type":false,"lazy":false},{"to":"tools","type":false,"lazy":false},{"to":"view","type":false,"lazy":false},{"to":"config","type":false,"lazy":false}],"area":"server","sum":"The agent server: chats, turns (one at a time), WebSockets, workers, and the deploy handover. The biggest file. Read it last, one section at a time.","todo":[]},{"name":"term","lines":1066,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"import","type":false,"lazy":false},{"to":"machine","type":false,"lazy":false},{"to":"paint","type":false,"lazy":false},{"to":"pick","type":false,"lazy":false},{"to":"screen","type":false,"lazy":false},{"to":"view","type":false,"lazy":false},{"to":"server","type":false,"lazy":true}],"area":"device","sum":"The everchat terminal: a view of the chat, and a device that the agent's tools reach while it is open.","todo":[]},{"name":"theme","lines":94,"deps":[{"to":"askai","type":true,"lazy":false}],"area":"view","sum":"The colors and glyphs that the terminal and the web share.","todo":[]},{"name":"tools","lines":664,"deps":[{"to":"askai","type":false,"lazy":false},{"to":"agent","type":true,"lazy":false},{"to":"call","type":false,"lazy":false},{"to":"clip","type":false,"lazy":false},{"to":"config","type":false,"lazy":false},{"to":"machine","type":false,"lazy":false},{"to":"memory","type":false,"lazy":false},{"to":"pick","type":false,"lazy":false},{"to":"view","type":true,"lazy":false}],"area":"core","sum":"The prompts, the MCP tools, subagents, and devices. Every call's system prompt is built here.","todo":["A separate compaction prompt would land here (upstream PR #37)."]},{"name":"view","lines":895,"deps":[{"to":"askai","type":true,"lazy":false},{"to":"import","type":false,"lazy":false},{"to":"call","type":false,"lazy":false},{"to":"md","type":false,"lazy":false},{"to":"pick","type":false,"lazy":false},{"to":"price","type":false,"lazy":false},{"to":"theme","type":false,"lazy":false}],"area":"view","sum":"What a view of the chat holds and draws, shared by the web and the terminal, with no DOM. It also holds WIRE (the protocol version) and TURN.","todo":[]}];
+const AREAS = {
+  core:   ["Core: memory and model calls", "--core"],
+  store:  ["Settings, storage, prices", "--store"],
+  server: ["Server and accounts", "--server"],
+  device: ["Device and terminal", "--device"],
+  view:   ["Views and rendering", "--view"],
+};
+const byName = Object.fromEntries(MODS.map((m) => [m.name, m]));
+const val = (m) => m.deps.filter((d) => !d.type && !d.lazy).map((d) => d.to);
+
+// Strongly connected groups of value imports (Tarjan), then layers by longest path.
+const comp = {}, groups = [];
+{
+  let i = 0; const ix = {}, low = {}, st = [], on = new Set();
+  const visit = (v) => {
+    ix[v] = low[v] = i++; st.push(v); on.add(v);
+    for (const w of val(byName[v])) {
+      if (ix[w] === undefined) { visit(w); low[v] = Math.min(low[v], low[w]); }
+      else if (on.has(w)) low[v] = Math.min(low[v], ix[w]);
+    }
+    if (low[v] === ix[v]) { const g = []; let w; do { w = st.pop(); on.delete(w); comp[w] = groups.length; g.push(w); } while (w !== v); groups.push(g); }
+  };
+  MODS.forEach((m) => ix[m.name] === undefined && visit(m.name));
+}
+const glayer = [];
+const layerOf = (g) => {
+  if (glayer[g] !== undefined) return glayer[g];
+  glayer[g] = 0; let d = 0;
+  for (const v of groups[g]) for (const w of val(byName[v])) if (comp[w] !== g) d = Math.max(d, layerOf(comp[w]) + 1);
+  return (glayer[g] = d);
+};
+groups.forEach((_, g) => layerOf(g));
+MODS.forEach((m) => { m.layer = glayer[comp[m.name]]; m.usedBy = MODS.filter((o) => o.deps.some((d) => d.to === m.name)).map((o) => o.name); });
+const nLayers = Math.max(...glayer) + 1;
+
+// Order groups inside each column to cut crossings (barycenter sweeps).
+const cols = Array.from({ length: nLayers }, () => []);
+groups.forEach((g, k) => { g.sort((a, b) => byName[b].usedBy.length - byName[a].usedBy.length || a.localeCompare(b)); cols[glayer[k]].push(k); });
+const AREA_ORDER = Object.keys(AREAS);
+cols.forEach((c) => c.sort((a, b) => AREA_ORDER.indexOf(byName[groups[a][0]].area) - AREA_ORDER.indexOf(byName[groups[b][0]].area) || groups[a][0].localeCompare(groups[b][0])));
+const pos = {};
+const index = () => cols.forEach((c) => { let y = 0; c.forEach((g) => groups[g].forEach((v) => (pos[v] = y++))); });
+index();
+const near = (v) => [...val(byName[v]), ...byName[v].usedBy].filter((w) => comp[w] !== comp[v]);
+for (let s = 0; s < 6; s++) {
+  for (const c of cols) {
+    const bary = (g) => { const ns = groups[g].flatMap(near); return ns.length ? ns.reduce((a, w) => a + pos[w], 0) / ns.length : pos[groups[g][0]]; };
+    const b = Object.fromEntries(c.map((g) => [g, bary(g)]));
+    c.sort((x, y) => b[x] - b[y]);
+    index();
+  }
+}
+
+// Geometry.
+const W = 136, H = 44, GAP = 12, COL = 172, TOP = 56, LEFT = 20, GPAD = 8;
+const xy = {};
+let maxY = 0;
+cols.forEach((c, l) => {
+  let y = TOP;
+  c.forEach((g) => {
+    if (groups[g].length > 1) y += GPAD + 12;
+    groups[g].forEach((v) => { xy[v] = { x: LEFT + l * COL, y }; y += H + GAP; });
+    if (groups[g].length > 1) y += GPAD;
+    y += 4;
+  });
+  maxY = Math.max(maxY, y);
+});
+const SVGW = LEFT * 2 + (nLayers - 1) * COL + W, SVGH = maxY + 16;
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; };
+const svg = document.getElementById("map");
+svg.setAttribute("viewBox", `0 0 ${SVGW} ${SVGH}`);
+svg.setAttribute("width", SVGW); svg.setAttribute("height", SVGH);
+
+for (let l = 0; l < nLayers; l++) {
+  el("text", { x: LEFT + l * COL, y: 22, class: "col-label" }, svg).textContent = "Layer " + l;
+  const sub = l === 0 ? "read first" : l === nLayers - 1 ? "read last" : "";
+  if (sub) el("text", { x: LEFT + l * COL, y: 38, class: "col-sub" }, svg).textContent = sub;
+}
+const gEdges = el("g", {}, svg), gGroups = el("g", {}, svg), gNodes = el("g", {}, svg);
+
+groups.forEach((g) => {
+  if (g.length < 2) return;
+  const ys = g.map((v) => xy[v].y), x = xy[g[0]].x;
+  const y0 = Math.min(...ys) - GPAD - 12, y1 = Math.max(...ys) + H + GPAD;
+  el("rect", { x: x - GPAD, y: y0, width: W + GPAD * 2, height: y1 - y0, rx: 12, class: "grp" }, gGroups);
+  el("text", { x: x - GPAD + 8, y: y0 + 13, class: "grp-label" }, gGroups).textContent = "import each other";
+});
+
+const edges = [];
+MODS.forEach((m) => m.deps.forEach((d) => {
+  if (comp[d.to] === comp[m.name] && !d.type) return; // inside a group: the dashed box says it
+  const a = xy[m.name], b = xy[d.to];
+  let x1, x2;
+  if (b.x < a.x) { x1 = a.x; x2 = b.x + W; } else if (b.x > a.x) { x1 = a.x + W; x2 = b.x; } else { x1 = a.x + W; x2 = b.x + W; }
+  const y1 = a.y + H / 2, y2 = b.y + H / 2;
+  const bend = b.x === a.x ? 40 : Math.max(30, Math.abs(x2 - x1) * 0.45);
+  const c1 = x1 + (b.x < a.x ? -bend : bend), c2 = x2 + (b.x < a.x ? bend : b.x === a.x ? bend : -bend);
+  const p = el("path", { d: `M${x1},${y1} C${c1},${y1} ${c2},${y2} ${x2},${y2}`, class: "edge" + (d.type ? " t" : d.lazy ? " z" : "") }, gEdges);
+  edges.push({ from: m.name, to: d.to, el: p });
+}));
+
+const nodes = {};
+MODS.forEach((m) => {
+  const { x, y } = xy[m.name];
+  const g = el("g", { class: "node", tabindex: 0, role: "button", "aria-label": m.name + ".ts, " + m.lines + " lines" }, gNodes);
+  const [, tok] = AREAS[m.area];
+  el("rect", { class: "box", x, y, width: W, height: H, rx: 8, fill: `var(${tok})`, stroke: `var(${tok}-b)` }, g);
+  el("text", { x: x + 10, y: y + 18, class: "n" }, g).textContent = m.name;
+  el("text", { x: x + 10, y: y + 34, class: "s" }, g).textContent = m.lines + " lines · used by " + m.usedBy.length;
+  if (m.todo.length) el("circle", { cx: x + W - 11, cy: y + 11, r: 4.5, class: "dot" }, g);
+  g.addEventListener("click", () => select(m.name));
+  g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(m.name); } });
+  g.addEventListener("mouseenter", () => !picked && light(m.name));
+  g.addEventListener("mouseleave", () => !picked && light(null));
+  nodes[m.name] = g;
+});
+
+let picked = null;
+function light(name) {
+  const uses = new Set(name ? byName[name].deps.map((d) => d.to) : []);
+  const usedBy = new Set(name ? byName[name].usedBy : []);
+  for (const n in nodes) {
+    const c = nodes[n].classList;
+    c.toggle("sel", n === name); c.toggle("uses", uses.has(n)); c.toggle("usedby", usedBy.has(n) && !uses.has(n));
+    c.toggle("dim", !!name && n !== name && !uses.has(n) && !usedBy.has(n));
+  }
+  for (const e of edges) {
+    const c = e.el.classList;
+    c.toggle("uses", e.from === name); c.toggle("usedby", e.to === name);
+    c.toggle("dim", !!name && e.from !== name && e.to !== name);
+    if (e.from === name || e.to === name) gEdges.appendChild(e.el);
+  }
+}
+const chip = (n, t) => `<button class="chip${t ? " t" : ""}" data-go="${n}" title="${t ? "type-only import" : ""}">${n}</button>`;
+function select(name) {
+  picked = picked === name ? null : name;
+  light(picked);
+  const panel = document.getElementById("panel");
+  if (!picked) { panel.innerHTML = '<p class="empty">Click a box to see what the file does.</p>'; return; }
+  const m = byName[picked];
+  const grp = groups[comp[m.name]];
+  panel.innerHTML = `
+    <h3><code>src/${m.name}.ts</code></h3>
+    <div class="meta">${m.lines} lines · layer ${m.layer} · ${AREAS[m.area][0]}</div>
+    <p>${m.sum}</p>
+    ${grp.length > 1 ? `<p class="meta">Imports and is imported by: ${grp.filter((v) => v !== m.name).join(", ")}. Read these together.</p>` : ""}
+    <h4>Imports (${m.deps.length})</h4>
+    <div class="chips">${m.deps.length ? m.deps.map((d) => chip(d.to, d.type)).join("") : '<span class="empty">nothing of ours</span>'}</div>
+    <h4>Imported by (${m.usedBy.length})</h4>
+    <div class="chips">${m.usedBy.length ? m.usedBy.map((n) => chip(n, byName[n].deps.find((d) => d.to === m.name).type)).join("") : '<span class="empty">no other module</span>'}</div>
+    ${m.todo.length ? `<h4>Known work</h4><ul>${m.todo.map((t) => `<li class="todo">${t}</li>`).join("")}</ul>` : ""}`;
+  panel.querySelectorAll("[data-go]").forEach((b) => b.addEventListener("click", () => { picked = null; select(b.dataset.go); nodes[b.dataset.go].focus(); }));
+}
+
+document.getElementById("legend").innerHTML =
+  Object.values(AREAS).map(([label, tok]) => `<span><i class="sw" style="background:var(${tok});border-color:var(${tok}-b)"></i>${label}</span>`).join("") +
+  `<span><i class="ln"></i>imports</span><span><i class="ln t"></i>type-only</span><span><i class="ln z"></i>lazy</span>` +
+  `<span><i class="ln u"></i>its imports</span><span><i class="ln b"></i>imported by it</span>` +
+  `<span><svg width="10" height="10"><circle cx="5" cy="5" r="4.5" fill="var(--todo)"/></svg>known work</span>`;
+
+const rows = [...MODS].sort((a, b) => a.layer - b.layer || a.lines - b.lines);
+document.getElementById("table").innerHTML =
+  `<thead><tr><th>File</th><th>Layer</th><th>Lines</th><th>Used by</th><th>Area</th><th>What it does</th></tr></thead><tbody>` +
+  rows.map((m) => `<tr><td class="f"><button data-go="${m.name}">${m.name}.ts</button></td><td class="num">${m.layer}</td><td class="num">${m.lines}</td><td class="num">${m.usedBy.length}</td>` +
+    `<td><span class="tag" style="background:var(${AREAS[m.area][1]});border-color:var(${AREAS[m.area][1]}-b)">${m.area}</span></td>` +
+    `<td>${m.sum}${m.todo.length ? `<div class="todo">${m.todo.join(" ")}</div>` : ""}</td></tr>`).join("") + `</tbody>`;
+document.querySelectorAll("#table [data-go]").forEach((b) => b.addEventListener("click", () => {
+  picked = null; select(b.dataset.go); document.querySelector(".board").scrollIntoView({ behavior: "smooth", block: "start" });
+}));
+// a module named in the URL (beginner.html#memory) opens selected
+const start = decodeURIComponent(location.hash.slice(1));
+if (byName[start]) select(start);
+</script>
+</body>
+</html>
