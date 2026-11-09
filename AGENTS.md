@@ -21,6 +21,19 @@ of summaries, and the agent zooms into that tree when it needs detail.
   bundler. Do not use Node, npm, yarn, or pnpm.
 - [just](https://github.com/casey/just) is the command runner. Put common
   tasks in the `justfile` as recipes.
+- [Effect](https://effect.website) (the `effect` package, version 4) is the
+  library we write the program with. See "Use Effect as much as possible"
+  below.
+
+## Learning more about Effect
+
+This repository uses the Effect Typescript library.
+
+Before writing any Effect code, first read `node_modules/effect/AGENTS.md`
+**completely**, and follow the links in the file when required.
+
+If you need to learn more about particular Effect apis and concepts that the
+guide doesn't cover, search through the source code in `node_modules/effect/src`.
 
 ## Layout
 
