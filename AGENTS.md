@@ -205,6 +205,24 @@ refactor the old code step by step.
 We support both vendors. We do OpenAI first, because a person can use an
 OpenAI subscription from a third-party harness such as EverChat.
 
+### Model access through the author's inference gateway
+
+For now, every request to a model goes through the author's inference gateway, with an
+API key,
+for both vendors. The program reads the inference gateway's address and key from its
+environment. When they are not there, it reads `$HOME/.config/ai/proxy.json`
+(this path on Windows too). That file has two keys, `base_url` and `api_key`.
+
+The values are secrets. Do not print them, do not log them, and do not put
+them in the database. To learn the file's shape, read its key names only.
+
+Signing in with a ChatGPT plan comes later. Its tokens will then go in the
+database, because the program writes them.
+
+Tests use fake vendors. Do not call a real model on your own, to test or to
+probe, even though the inference gateway's key is on the machine. A real call to
+Anthropic (Claude) needs the owner's explicit approval each time.
+
 ### All state in one SQLite file
 
 Almost all state lives in one SQLite database. This gives two things:
