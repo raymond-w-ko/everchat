@@ -63,6 +63,9 @@ File names are lowercase. Multi-word names are written as one word
 The rest:
 
 - `docs/`: the design documents.
+- `tools/`: scripts that are not part of the program, of the type check, or
+  of the tests. `tools/golden.ts` makes `tests/golden.json` from the old
+  code.
 - `ref/`: the old code, for reading only. See "A rewrite, in place". It has
   the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
   (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
@@ -231,6 +234,10 @@ refactor the old code step by step.
   needs it, we delete `ref/` in one commit.
 - The old code still runs from inside `ref/`. `cd ref && just test` runs its
   tests. Use this to compare the port with the old behavior.
+- One file outside `ref/` imports from it: `tools/golden.ts`. It runs the old
+  memory on a fixed chat and writes what it made to `tests/golden.json`. The
+  golden test (`tests/golden.test.ts`) runs the new memory on the same chat
+  and compares. The file goes away when `ref/` does.
 - The documents in `docs/` that describe the old code cite its files without
   `ref/` (for example `src/memory.ts`). Read such a path as a path in `ref/`.
   The line numbers stay exact, because `ref/` does not change.
