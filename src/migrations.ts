@@ -277,6 +277,14 @@ const run = (statements: ReadonlyArray<string>) =>
     }
   })
 
+// What a request should have read from the prompt cache, in tokens, by our
+// own count (cache.ts). Null: no watch judged it. A request with
+// `expected >= 1024 and cache_read = 0` missed the cache.
+const usageExpected: ReadonlyArray<string> = [
+  `alter table usage add column expected integer`
+]
+
 export const migrations = {
-  "0001_schema": run(schema)
+  "0001_schema": run(schema),
+  "0002_usage_expected": run(usageExpected)
 }

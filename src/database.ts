@@ -26,15 +26,18 @@ import { migrations } from "./migrations.ts"
 // The name of the database in a home.
 export const FILE = "everchat.db"
 
-const ready = Layer.effectDiscard(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient.SqlClient
-    yield* sql.unsafe("pragma synchronous = full")
-    yield* sql.unsafe("pragma foreign_keys = on")
-    yield* SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(migrations) })
-  })
-)
+const ready = (all: Parameters<typeof SqliteMigrator.fromRecord>[0]) =>
+  Layer.effectDiscard(
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe("pragma synchronous = full")
+      yield* sql.unsafe("pragma foreign_keys = on")
+      yield* SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(all) })
+    })
+  )
 
 // The layer for the database in the file `filename`. It makes the file when
-// it is not there.
-export const layer = (filename: string) => ready.pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+// it is not there. `all`: the migrations to run (a test gives fewer, to make
+// a database as an older version of the program left it).
+export const layer = (filename: string, all: Parameters<typeof SqliteMigrator.fromRecord>[0] = migrations) =>
+  ready(all).pipe(Layer.provideMerge(SqliteClient.layer({ filename })))

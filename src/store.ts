@@ -161,6 +161,8 @@ export interface NewUsage {
   readonly output: number
   readonly searches?: number | undefined
   readonly micros?: number | null | undefined
+  // Tokens that the request should have read from the cache (cache.ts).
+  readonly expected?: number | null | undefined
 }
 
 // Errors
@@ -589,6 +591,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
           output: usage.output,
           searches: usage.searches ?? 0,
           micros: usage.micros ?? null,
+          expected: usage.expected ?? null,
           created: yield* now
         })
       }`

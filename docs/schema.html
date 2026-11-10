@@ -539,6 +539,7 @@ create trigger agent_msg_no_delete before delete on agent_msg
 <div class="card">
 <h3><code>usage</code></h3>
 <p>What each model request used (item 27). The factory reads token use from it (its requirement R26), and the cache findings in docs/api-audit.md can be measured only with it.</p>
+<p><strong>Cache misses.</strong> <code>expected</code> is our own count of the tokens that a request should have read from the vendor's prompt cache (<code>src/cache.ts</code>). The vendor's own diagnosis does not come through the author's inference gateway, so we compare each request with the ones sent before it. A request with <code>expected &gt;= 1024 and cache_read = 0</code> missed the cache.</p>
 <pre><code>create table usage (
   id          integer primary key,
   served      text    not null check (served in ('turn', 'compaction', 'goal')),
@@ -553,7 +554,8 @@ create trigger agent_msg_no_delete before delete on agent_msg
   output      integer not null,
   searches    integer not null default 0,
   micros      integer,                      -- cost in micro-USD at that day's prices
-  created     integer not null
+  created     integer not null,
+  expected    integer                       -- tokens it should have read from the cache; null: not judged (migration 2)
 ) strict;
 create trigger usage_no_update before update on usage
   begin select raise(abort, 'usage is append only'); end;</code></pre>

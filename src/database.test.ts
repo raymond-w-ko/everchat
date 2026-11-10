@@ -8,7 +8,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, rows } from "../tests/help.ts"
 import * as Database from "./database.ts"
-import { KINDS } from "./migrations.ts"
+import { KINDS, migrations } from "./migrations.ts"
 import { Kind } from "./store.ts"
 
 const withDatabase = <A, E>(file: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
@@ -57,7 +57,8 @@ test("a new file gets the whole schema", async () => {
   expect(names("index")).toEqual(["call_parent", "call_running", "call_vendor", "launch_live", "turn_running"])
   expect(names("view")).toEqual(["msg_read"])
   expect(rows(file, "select migration_id, name from effect_sql_migrations")).toEqual([
-    { migration_id: 1, name: "schema" }
+    { migration_id: 1, name: "schema" },
+    { migration_id: 2, name: "usage_expected" }
   ])
 })
 
@@ -94,7 +95,7 @@ test("a second open runs no migration and keeps the data", async () => {
   })
   await withDatabase(file, insert)
   await withDatabase(file, Effect.void)
-  expect(rows(file, "select count(*) as n from effect_sql_migrations")).toEqual([{ n: 1 }])
+  expect(rows(file, "select count(*) as n from effect_sql_migrations")).toEqual([{ n: 2 }])
   expect(rows(file, "select vendor from pick")).toEqual([{ vendor: "v" }])
 })
 
@@ -112,6 +113,29 @@ test("the kinds in the table are the kinds in the code", async () => {
   expect(table.map((row) => row.name)).toEqual([...Kind.literals])
   // The kind counts toward a node's 512 bytes, so every kind has 4 letters.
   expect(table.every((row) => row.name.length === 4)).toBe(true)
+})
+
+test("migration 2 adds usage.expected to a database of migration 1, and keeps its rows", async () => {
+  const file = newFile()
+  const first = { "0001_schema": migrations["0001_schema"] }
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`insert into pick (id, vendor, model, effort, speed, created) values (1, 'v', 'm', 'e', 's', 1)`
+      yield* sql`insert into usage (served, pick, input, cache_read, cache_write, output, created) values ('turn', 1, 10, 0, 0, 1, 1)`
+    }).pipe(Effect.provide(Database.layer(file, first)))
+  )
+  expect(rows<{ name: string }>(file, "select name from pragma_table_info('usage')").map((row) => row.name)).not.toContain("expected")
+  await withDatabase(
+    file,
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`insert into usage (served, pick, input, cache_read, cache_write, output, expected, created) values ('turn', 1, 10, 0, 0, 1, 9000, 2)`
+    })
+  )
+  expect(rows(file, "select input, expected from usage order by id")).toEqual([{ input: 10, expected: null }, { input: 10, expected: 9000 }])
+  // The query that finds a miss: something to read was expected, and nothing was read.
+  expect(rows(file, "select id from usage where expected >= 1024 and cache_read = 0")).toEqual([{ id: 2 }])
 })
 
 // Rows that the refused writes below build on. Each one is valid.

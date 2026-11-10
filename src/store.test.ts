@@ -359,14 +359,14 @@ test("a usage row points to its pick, and equal picks are one row", async () => 
     yield* store.putNodes([{ l: 0, i: 0, text: "a line" }])
     const usage = { served: "compaction" as const, pick: cheap, input: 100, cacheRead: 9000, cacheWrite: 50, output: 40 }
     yield* store.addUsage({ ...usage, node: [0, 0], request: "req_1" })
-    yield* store.addUsage({ ...usage, node: [0, 1], micros: 1234 })
+    yield* store.addUsage({ ...usage, node: [0, 1], micros: 1234, expected: 9100 })
   }))
   expect(rows(file, "select count(*) as n from pick")).toEqual([{ n: 2 }])
   expect(rows(file, `
-    select u.served, u.node_l, u.node_i, p.model, u.request, u.input, u.cache_read, u.cache_write, u.output, u.searches, u.micros
+    select u.served, u.node_l, u.node_i, p.model, u.request, u.input, u.cache_read, u.cache_write, u.output, u.searches, u.micros, u.expected
     from usage u join pick p on p.id = u.pick order by u.id`)).toEqual([
-    { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_1", input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: null },
-    { served: "compaction", node_l: 0, node_i: 1, model: "small", request: null, input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: 1234 }
+    { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_1", input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: null, expected: null },
+    { served: "compaction", node_l: 0, node_i: 1, model: "small", request: null, input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: 1234, expected: 9100 }
   ])
 })
 
