@@ -383,3 +383,146 @@ EverChat's requests use their plan.
   another open-source project", and use SIWC tokens "only through OpenAI's
   supported sign-in flow". So we must not reuse the Codex CLI's client ID or
   its `originator` header, as some harnesses do. We use SIWC.
+
+## Measured through the inference gateway (2026-11-10)
+
+These are results of real requests, sent with the new wire (`src/openai.ts`)
+through the author's inference gateway by `tools/probe.ts`. The model was `gpt-6-luna` unless
+another is named. About 90 requests were sent, each of 5,000 to 18,000 input
+tokens with a reply of one word.
+
+What the inference gateway needs:
+
+- **A session id.** A request with no stable session id is refused with a
+  400 before it reaches the vendor. The header
+  `X-Session-ID` is accepted. The wire sends the chat's id.
+
+What decides a cache hit:
+
+- **The cache key.** The same request sent 5 times, 5 s apart:
+
+  | Form of the request | Cached tokens of the 5 replies |
+  | --- | --- |
+  | explicit marks, no `prompt_cache_key` | 0, 0, 0, 0, 0 |
+  | no marks, no key | 0, 0, 0, 0, 13440 |
+  | explicit marks, with a key | 0, 13440, 13440, 13440, 13440 |
+  | no marks, with a key | 0, 13440, 13440, 13440, 13440 |
+
+  OpenAI's documents say that newer models do not need the key for routing.
+  Through the author's inference gateway they do. The wire now sends the chat's id as the key.
+- **Time.** With a key, requests 4 to 5 s apart read the entry of the one
+  before each time. At about 3 s apart, the second of three did not. So an
+  entry is readable some seconds after its request, not when the reply
+  begins. This answers O9 in part, and it matters for single flight: to wait
+  for the leader's first byte is not enough here.
+
+How the cache behaves on this route:
+
+- **It matches any common prefix, in steps of 128 tokens.** A request that
+  adds one block reads the whole earlier request. One block that grows is
+  read too: the documents' rule that the old end must be a marked block end
+  does not hold here.
+- **The head is read on its own.** A request with the same head and another
+  view read 2,560 tokens, which is the head. So the worry in O1 that the
+  system prompt's entry is never written does not apply on this route.
+- **Writes are not reported.** `cache_write_tokens` was 0 in every reply.
+- **The vendor's diagnosis is not there.** `prompt_cache_diagnostics` was
+  absent in every reply, also with a `comparison_response_id`. So we count
+  what each request should read ourselves (`src/cache.ts`, and the column
+  `usage.expected`).
+- **The usage has an `attribution` object**, which gives the cached tokens of
+  each item and each content part. The wire does not read it yet. It would
+  show exactly where a cache read ended.
+
+What the vendor accepts:
+
+- **A program sent back as received.** The `custom_tool_call` item comes with
+  `status: "completed"`, and a request that sends it back whole, with its
+  `custom_tool_call_output`, is accepted (`gpt-6-luna` and `gpt-6.1-sol`).
+- **`reasoning.context: "all_turns"`** is accepted on both models, and the
+  reply repeats it.
+
+Not measured: a reasoning item sent back (the probes ran at low effort and
+got none), the fast speed, and a rate of requests above a few a minute.
+
+
+## Measured through OpenRouter (2026-11-10)
+
+The same probes, sent to `openai/gpt-6-luna` through OpenRouter
+(`PROBE=openrouter bun tools/probe.ts ...`), with the key from the file
+`.env`. About 30 requests. OpenRouter passes the request to OpenAI's plain
+API, so this is how the documented API behaves. **It behaves as the
+documents say. The author's inference gateway's route does not.**
+
+| | OpenRouter (the plain API) | The author's inference gateway |
+| --- | --- | --- |
+| The same request again, with no `prompt_cache_key` | read from the second request on | read almost never |
+| Cache writes in the usage | reported (`cache_write_tokens`) | always 0 |
+| Cached tokens | exact (13,629 of 13,639) | in steps of 128 (13,440) |
+| One block that grows | not reused: only the head is read | reused |
+| Explicit marks | decide where entries are written and read | no visible effect |
+| A session id | not needed | needed (`X-Session-ID`) |
+| `prompt_cache_diagnostics` | absent | absent |
+
+So the route behind the author's inference gateway is not the plain API. It behaves like the
+older automatic cache: any common prefix, in steps of 128 tokens, found only
+with a cache key.
+
+What the plain API showed about marks (this settles O1):
+
+- **With a mark on every block, the head is never written.** A request with
+  13 marks wrote its entries at its latest four. A later request with the
+  same head and another view read 0 tokens and wrote all 13,356 again.
+- **With at most four marks, the head is written.** A request with the system
+  prompt's mark and two blocks, then one with another view: it read 2,706
+  tokens, the head.
+- **The rule that the wire now follows:** a mark on the system prompt, and on
+  the last three blocks up to the one that the memory marked. Tested: a
+  request that adds one block read the whole earlier prefix (13,631), and a
+  request with another view read the head (2,700).
+- **A block that grows is not reused.** Its old end is inside the block. Only
+  the head was read (2,698 of 14,603). This is the documents' rule, and it
+  is why each block of the view is its own content part.
+
+The wire sends the marks and the cache key on both routes. The marks do the
+work on the plain API, and the key does it on the author's inference gateway.
+
+## A turn with thinking, on both routes (2026-11-10)
+
+A probe ran one turn of three steps at high effort
+(`PROBE_EFFORT=high bun tools/probe.ts reason <model>`): the model thinks and
+runs a program, gets a result of about 2,700 tokens, thinks and runs a second
+program, gets a second result, and answers. Each step sends back every item
+that the model gave before, as received.
+
+| Step | OpenRouter: input, read, written | Inference gateway: input, read |
+| --- | --- | --- |
+| 1 | 6,476 / 0 / 6,389 | 6,472 / 0 |
+| 2 | 9,233 / 6,389 / 2,841 | 9,256 / 6,272 |
+| 3 | 12,049 / 9,230 / 2,816 | 12,047 / 9,088 |
+
+What it shows, on both routes:
+
+- **The items are accepted as received**: the reasoning item with its
+  encrypted content, the program, and the result.
+- **The reasoning is kept.** The input of each step grows by what the model
+  wrote in the step before, its reasoning tokens too. If something dropped
+  the reasoning item, the input would not grow by them.
+- **The turn's own items are a stable prefix.** Step 3 reads the cache
+  through the result of step 1, which lies after the reasoning item and the
+  program of step 1.
+
+What it changed in the wire:
+
+- **Inside a turn, marks must be on the results.** A first run had marks on
+  the view only. Through OpenRouter the cached count then stayed at 6,386 for
+  all three steps: nothing of the turn was cached. The wire now marks the
+  last three places where the stable part can end, and such a place is a
+  block of the view or the last result of a step. The table above is with
+  this rule.
+- **A result is always sent in its list form.** Its bytes then stay the same
+  when its mark moves to a newer result.
+
+OpenRouter changes the ids of some items (a program's id had 19 characters,
+and 54 through the inference gateway). The wire sends back what it got, so this does
+no harm.
