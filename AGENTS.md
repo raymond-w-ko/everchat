@@ -31,6 +31,8 @@ that we do not use.
 - [Effect](https://effect.website) (the `effect` package, version 4) is the
   library we write the program with. See "Use Effect as much as possible"
   below.
+- TypeScript (`tsc`) checks the types. Bun runs the code without a check, so
+  `just check` is a separate step.
 
 ## Learning more about Effect
 
@@ -48,9 +50,12 @@ The new code:
 
 - `src/`: all TypeScript modules, flat, plus the files they import.
 - `src/x.test.ts`: the tests of one module sit next to it (`x.ts`).
-- `tests/`: tests that cover many modules at once.
+- `tests/`: tests that cover many modules at once, or that need a second
+  process. `tests/help.ts` holds what the tests share, and `tests/child.ts`
+  is the program that such a test starts.
 
-`src/` and `tests/` do not exist until the first new code is written.
+Run `just test` and `just check` (the type check) before you say that a
+change is done.
 
 File names are lowercase. Multi-word names are written as one word
 (`askai.ts`, `openai.ts`).
