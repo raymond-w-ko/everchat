@@ -44,22 +44,24 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 
 ## Layout
 
-- `src/`: all TypeScript modules, flat, plus the files they import
-  (`computer.swift`, `prompt.txt`, `hello.md`).
+The new code:
+
+- `src/`: all TypeScript modules, flat, plus the files they import.
 - `src/x.test.ts`: the tests of one module sit next to it (`x.ts`).
 - `tests/`: tests that cover many modules at once.
-- `web/`: the site's static files. `web/src/` is the browser code, built into
-  `web/app.js` (`just web`).
-- `ios/`: the iOS app.
+
+`src/` and `tests/` do not exist until the first new code is written.
 
 File names are lowercase. Multi-word names are written as one word
 (`askai.ts`, `openai.ts`).
 
-The exception is `ios/`, which follows Swift naming. Swift files and folders
-use UpperCamelCase, and a file is named after the main type it defines
-(`Site.swift` holds `Site`). Do not rename the names Xcode expects
-(`Assets.xcassets`, `Info.plist`). `src/computer.swift` is not part of the iOS
-app, so it follows the lowercase rule.
+The rest:
+
+- `docs/`: the design documents.
+- `ref/`: the old code, for reading only. See "A rewrite, in place". It has
+  the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
+  (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
+  the old `README.md`, `ISSUES.md`, and `justfile`.
 
 ## The original concept
 
@@ -201,7 +203,7 @@ take control that the memory needs:
 
 Keep what is EverChat's own idea: the memory (the log, the tree of summaries,
 and the view that each request shows the model), and the prompt-cache rule in
-`askai.ts`.
+`ref/src/askai.ts`.
 When a library replaces code that these depend on, make sure the behavior
 stays the same, and test it.
 
@@ -209,18 +211,24 @@ stays the same, and test it.
 
 Each part must have a clear boundary, so that we can test it alone and replace
 it. In particular, the core (the memory and the agent loop) must not depend on
-the server, the web, accounts, or billing. Today the chat logic lives in
-`src/server.ts`, so this is a large change.
+the server, the web, accounts, or billing. In the old code the chat logic
+lives in `ref/src/server.ts`, so this is a large change.
 
 ### A rewrite, in place
 
 We write a new, clean, modular implementation in this repository. We do not
 refactor the old code step by step.
 
-- The old code moves to `ref/`, and a git tag marks the last commit before
-  the move. `ref/` is for reading only: do not edit it, and do not import from
-  it. Keep it out of the build, the type check, and the tests. When the new
-  code no longer needs it, we delete `ref/` in one commit.
+- The old code is in `ref/`. The git tag `before-rewrite` marks the last
+  commit before the move. `ref/` is for reading only: do not edit it, and do
+  not import from it. Keep it out of the build, the type check, and the tests
+  (`bunfig.toml` keeps it out of `just test`). When the new code no longer
+  needs it, we delete `ref/` in one commit.
+- The old code still runs from inside `ref/`. `cd ref && just test` runs its
+  tests. Use this to compare the port with the old behavior.
+- The documents in `docs/` that describe the old code cite its files without
+  `ref/` (for example `src/memory.ts`). Read such a path as a path in `ref/`.
+  The line numbers stay exact, because `ref/` does not change.
 - This is greenfield. There are no existing chats to keep, so we do not read
   the old file formats and we do not write a migration from them.
 - Importing the sessions of other harnesses (Claude Code, Codex) is out of

@@ -152,7 +152,7 @@ instead.
 | Term | Part of speech | Meaning |
 | --- | --- | --- |
 | upstream | noun | UniiChat, the project that EverChat is a hard fork of. |
-| old code | noun | The code before the rewrite. It moves to `ref/`, for reading only. |
+| old code | noun | The code before the rewrite. It is in `ref/`, for reading only. The git tag `before-rewrite` marks the last commit before it moved there. |
 | port | verb | To write a part of the old code again in the new design, with the same behavior. The memory is ported, not invented again. |
 | greenfield | adjective | With no old data to keep. EverChat reads no old file format. |
 
