@@ -124,6 +124,8 @@ instead.
 | home | noun | The directory of one chat. The variable `EVERCHAT_HOME` names it. It holds the database, the config file, the hooks file, the skills, and the transcripts. |
 | database | noun | The one SQLite file that holds almost all state of a chat. |
 | state | noun | Data that the program writes and needs again later. State lives in the database, and nowhere else. |
+| store | noun | The part of the program that reads and writes the database. No other part uses SQL. |
+| migration | noun | One change of the database's tables, with a number. At each launch, the program runs the migrations that the database has not run yet. |
 | config file | noun | The file of settings that a person writes by hand. The program only reads it. |
 | launch | noun | One start of the program, until it ends or crashes. Table `launch`. At most one launch of a chat is live. |
 | run tag | noun | A marker that a launch puts in the environment of each shell it starts. The next launch uses it to find and stop shells that a crash left behind. |
