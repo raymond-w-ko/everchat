@@ -195,6 +195,8 @@ refactor the old code step by step.
   code no longer needs it, we delete `ref/` in one commit.
 - This is greenfield. There are no existing chats to keep, so we do not read
   the old file formats and we do not write a migration from them.
+- Importing the sessions of other harnesses (Claude Code, Codex) is out of
+  scope. Do not port the old import code.
 - Port the memory algorithm (the tree, the views, the merge order, the
   retries, the cache marks), do not reinvent it. Its invariant tests and its
   golden test move with it. They show that the port did not change what the
@@ -224,6 +226,10 @@ probe, even though the inference gateway's key is on the machine. A real call to
 Anthropic (Claude) needs the owner's explicit approval each time.
 
 ### All state in one SQLite file
+
+One chat is one database, in one home directory that the variable
+`EVERCHAT_HOME` names. A second, independent chat is a second home. Do not put
+two chats in one database.
 
 Almost all state lives in one SQLite database. This gives two things:
 
