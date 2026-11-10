@@ -1,0 +1,4 @@
+# `ref/` holds the old code, for reading only. Keep its tests out of the test
+# run of the new code. To run them: `cd ref && just test`.
+[test]
+pathIgnorePatterns = ["ref/**"]
