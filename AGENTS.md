@@ -65,7 +65,8 @@ The rest:
 - `docs/`: the design documents.
 - `tools/`: scripts that are not part of the program, of the type check, or
   of the tests. `tools/golden.ts` makes `tests/golden.json` from the old
-  code.
+  code. `tools/probe.ts` sends real requests to a vendor (see "Model access
+  through the author's inference gateway").
 - `ref/`: the old code, for reading only. See "A rewrite, in place". It has
   the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
   (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
@@ -264,19 +265,41 @@ OpenAI subscription from a third-party harness such as EverChat.
 
 For now, every request to a model goes through the author's inference gateway, with an
 API key, for both vendors. The program reads the inference gateway's address and key
-from its environment. When they are not there, it reads
-`$HOME/.config/ai/proxy.json` (this path on Windows too). That file has two
-keys, `base_url` and `api_key`.
+from its environment (`EVERCHAT_GATEWAY_URL`, `EVERCHAT_GATEWAY_KEY`). When
+they are not there, it reads `$HOME/.config/ai/proxy.json` (this path on
+Windows too). That file has two keys, `base_url` and `api_key`.
 
 The values are secrets. Do not print them, do not log them, and do not put
 them in the database. To learn the file's shape, read its key names only.
+The same holds for the file `.env` in this repository, which holds the keys
+of other services for probes (`OPENROUTER_API_KEY`). Git ignores it. Bun
+reads it into the environment of every `bun` command.
 
 Signing in with a ChatGPT plan comes later. Its tokens will then go in the
 database, because the program writes them.
 
-Tests use fake vendors. Do not send a request to a real model on your own, to
-test or to probe, even though the inference gateway's key is on the machine. A real
-request to Anthropic (Claude) needs the owner's explicit approval each time.
+Each request carries the chat's id (`chat.uuid`): as the header
+`X-Session-ID`, which the inference gateway needs, and as the vendor's cache key. Without
+the cache key, requests read almost nothing from the prompt cache.
+
+Tests use fake vendors: `just test` sends nothing to a real model. Real
+requests are for probes only (`tools/probe.ts`), to learn how a vendor
+behaves where its documents are silent:
+
+- OpenAI: allowed, within reason. Keep a probe small, use a cheap model, and
+  write down what it showed (`docs/api-audit.md`). A probe can go through
+  the author's inference gateway, or through OpenRouter (`PROBE=openrouter`), which reaches
+  OpenAI's plain API. The two routes do not behave the same.
+- Anthropic (Claude): needs the owner's explicit approval each time.
+
+Which route is for what:
+
+- Day to day, EverChat runs through the author's inference gateway. That
+  route removes the cache marks, and its cache finds a request by the cache
+  key. The wire may carry code for what this route needs.
+- The cache design is tested through OpenRouter, because the plain API
+  respects every cache mark and reports cache writes. A change to where the
+  marks go needs a probe there.
 
 ### All state in one SQLite file
 
