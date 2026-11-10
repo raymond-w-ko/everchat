@@ -37,6 +37,7 @@
 
 import { Context, Deferred, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
 import { page, pages } from "./pages.ts"
+import type { Block } from "./request.ts"
 import { type Kind, type Message, type NewMessage, type NewUsage, Store, type StoreError } from "./store.ts"
 
 // Constants
@@ -75,17 +76,12 @@ of them from there too.
 // Data
 // ----
 
+export type { Block } from "./request.ts"
+
 // Node (l, i), as a line of a view.
 export interface Part {
   readonly l: number
   readonly i: number
-}
-
-// One piece of a request. `mark`: the vendor may store the prefix that ends
-// here.
-export interface Block {
-  readonly text: string
-  readonly mark: boolean
 }
 
 // A message to log. A long text becomes pages.
