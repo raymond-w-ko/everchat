@@ -146,6 +146,26 @@ Code mode is the only primary tool that EverChat gives the model. The other
 tools (shell, read, write, edit, and the memory tools) become functions that
 the program can call.
 
+### One system prompt for every kind of call
+
+The chat's turns, its compactions, and its subagents all send the same system
+prompt and the same tool list. The system prompt names each kind of call and
+holds its rules. A block after the view says which kind this call is (for
+example, one that starts `Subagent task:`).
+
+The reason is the prompt cache: a request can read another request's cache
+only when both start with the same bytes. With one prompt, a subagent reads
+the view that the chat already sent, and does not pay for it again.
+
+Two rules follow:
+
+- Do not give a role its own system prompt. Add a section to the shared one.
+- The prompt does not enforce what a role may do. The code does: a function
+  that a subagent may not use returns an error.
+
+A computer task is the exception. It has no view and another tool, so it
+keeps its own prompt.
+
 ### Our own vendor wires
 
 We write and keep our own code for each model vendor's API (a "wire": it
