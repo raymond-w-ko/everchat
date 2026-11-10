@@ -93,7 +93,17 @@ toward it still needs its own design.
 ### How EverChat will be used
 
 EverChat will run in our software factory, next to the `claude` (Claude Code)
-and `codex` harnesses. The factory uses all three in the same way:
+and `codex` harnesses. Its role there is a chief of staff: one agent with a
+long memory that hands coding work to the mature harnesses, and does not do
+all of that work itself. So do not build what those harnesses already do well
+(for example, background shells) before the core is solid.
+
+EverChat must also work alone, with no factory, for example as a person's
+main assistant. There it has no other harness to hand work to, so it uses its
+own subagents a lot. Keep both uses in mind: subagents must be cheap and
+solid, and nothing in the core may need the factory.
+
+The factory uses all three in the same way:
 
 - It runs each harness interactively, in a real PTY (pseudo-terminal: the
   operating system's stand-in for a terminal). A Ghostty terminal, compiled to
@@ -112,6 +122,20 @@ So EverChat must:
 
 The terminal is the primary interface. The web and iOS clients are secondary.
 Keep them working where it is cheap, but do not let them shape the design.
+
+The factory (the `everturn` repository) has written down what it needs from a
+harness. Read these before you design a part that the factory touches (the
+launch, the hooks, the shell, the transcript):
+
+- `~/src/everturn/docs/decisions/0186-harness-interface.md`: the decision
+  (ADR 0186).
+- `~/src/everturn/packages/bridge/src/runtime/types.ts`: the interface,
+  `SeatRuntime`.
+- `~/src/everturn/docs/references/seat-runtime.md`: the requirements, R1 to
+  R34.
+
+EverChat must be able to meet this interface. It must also stay a good program
+when it runs alone, with no factory.
 
 ### Code mode is the only primary tool
 
