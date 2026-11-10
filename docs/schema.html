@@ -183,7 +183,7 @@ a { color: var(--accent); }
 <h3><code>launch</code></h3>
 <p>One row for each start of the program (items 31, 60). It does four jobs:</p>
 <ul>
-  <li><strong>Owner.</strong> A launch with no <code>ended</code> is live, or it crashed. The index below lets at most one such row exist. A new start checks whether that process still runs. If it does, the new start stops. If not, it closes the old row with <code>why = 'crash'</code> and adds its own, in one transaction.</li>
+  <li><strong>Owner.</strong> A launch with no <code>ended</code> is live, or it crashed. The index below lets at most one such row exist. A new start checks whether that process still runs. If it does, the new start stops. If not, it closes the old row with <code>why = 'crash'</code> and adds its own, in one transaction. A launch that ends in order writes its own <code>why</code>: <code>exit</code>, <code>signal</code> (it was interrupted), or <code>error</code> (it failed, and still closed the file).</li>
   <li><strong>Leftover shells.</strong> Each shell gets the launch's <code>run_tag</code> in its environment. The next start stops each process that still carries an old tag.</li>
   <li><strong>Where.</strong> Other rows point to the launch that wrote them. That gives the host, the directory and the program's version for every message, without three columns on each row.</li>
   <li><strong>The factory's session record.</strong> ADR 0186 keeps one record per launch of a continuous chat. This table is that record.</li>
@@ -198,7 +198,7 @@ a { color: var(--accent); }
   pick    integer references pick (id),     -- given on the command line, or null
   created integer not null,                 -- when it started
   ended   integer,                          -- null: it runs, or it crashed
-  why     text                              -- exit, signal, crash
+  why     text                              -- exit, signal, error, crash
 ) strict;
 create unique index launch_live on launch ((1)) where ended is null;</code></pre>
 <p>The factory sets the model and the effort on the command line (its requirement R2). So a launch can carry a pick. The pick of the next turn is the launch's, if it has one, or else the chat's.</p>
