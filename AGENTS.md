@@ -15,6 +15,13 @@ EverChat is an LLM agent harness. Its core idea: the chat itself is the memory.
 There is one chat that never ends. A cheap model compresses the log into a tree
 of summaries, and the agent zooms into that tree when it needs detail.
 
+## Words
+
+[GLOSSARY.md](GLOSSARY.md) is the dictionary of this project. Read it first.
+Use its names exactly, in code, in documents, and in replies. If you need a
+name that is not there, add it there first. Its last section lists the words
+that we do not use.
+
 ## Tools
 
 - [Bun](https://bun.sh) is the runtime, package manager, test runner, and
@@ -260,7 +267,7 @@ Almost all state lives in one SQLite database. This gives two things:
 
 - Restart: when the process is interrupted, crashes, or restarts, it reads the
   database and continues from where it was. It loses at most the work that was
-  in flight (for example, a model call that had not finished), and it can see
+  in flight (for example, a request that had not finished), and it can see
   what that work was so that it can start it again.
 - Backup and moving hosts: an install is one to three files. These are one
   executable (`bun build --compile`), one SQLite database, and maybe one config
