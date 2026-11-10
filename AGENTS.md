@@ -146,19 +146,19 @@ when it runs alone, with no factory.
 
 ### Code mode is the only primary tool
 
-In code mode, the model writes a short program that calls tools as functions.
-A sandbox runs the program. The model does not make one tool call per step.
+In code mode, the model writes a short program that calls functions. A
+sandbox runs the program. The model does not ask for one function at a time.
 
-Code mode is the only primary tool that EverChat gives the model. The other
-tools (shell, read, write, edit, and the memory tools) become functions that
-the program can call.
+Code mode is the only primary tool that EverChat gives the model. What the old
+code gives the model as separate tools (shell, read, write, edit, and the
+memory tools) become functions that the program can call.
 
-### One system prompt for every kind of call
+### One system prompt for every kind of request
 
 The chat's turns, its compactions, and its subagents all send the same system
-prompt and the same tool list. The system prompt names each kind of call and
-holds its rules. A block after the view says which kind this call is (for
-example, one that starts `Subagent task:`).
+prompt and the same tool list. The system prompt names each kind of request
+and holds its rules. A block after the view says which kind this request is
+(for example, one that starts `Subagent task:`).
 
 The reason is the prompt cache: a request can read another request's cache
 only when both start with the same bytes. With one prompt, a subagent reads
@@ -200,7 +200,8 @@ take control that the memory needs:
   each one against our needs before you adopt it.
 
 Keep what is EverChat's own idea: the memory (the log, the tree of summaries,
-and the view that each call sees), and the prompt-cache rule in `askai.ts`.
+and the view that each request shows the model), and the prompt-cache rule in
+`askai.ts`.
 When a library replaces code that these depend on, make sure the behavior
 stays the same, and test it.
 
@@ -242,10 +243,10 @@ OpenAI subscription from a third-party harness such as EverChat.
 ### Model access through the author's inference gateway
 
 For now, every request to a model goes through the author's inference gateway, with an
-API key,
-for both vendors. The program reads the inference gateway's address and key from its
-environment. When they are not there, it reads `$HOME/.config/ai/proxy.json`
-(this path on Windows too). That file has two keys, `base_url` and `api_key`.
+API key, for both vendors. The program reads the inference gateway's address and key
+from its environment. When they are not there, it reads
+`$HOME/.config/ai/proxy.json` (this path on Windows too). That file has two
+keys, `base_url` and `api_key`.
 
 The values are secrets. Do not print them, do not log them, and do not put
 them in the database. To learn the file's shape, read its key names only.
@@ -253,9 +254,9 @@ them in the database. To learn the file's shape, read its key names only.
 Signing in with a ChatGPT plan comes later. Its tokens will then go in the
 database, because the program writes them.
 
-Tests use fake vendors. Do not call a real model on your own, to test or to
-probe, even though the inference gateway's key is on the machine. A real call to
-Anthropic (Claude) needs the owner's explicit approval each time.
+Tests use fake vendors. Do not send a request to a real model on your own, to
+test or to probe, even though the inference gateway's key is on the machine. A real
+request to Anthropic (Claude) needs the owner's explicit approval each time.
 
 ### All state in one SQLite file
 
@@ -294,6 +295,6 @@ Write the new code with Effect. In particular:
   and replies, the config file, hook payloads) with `Schema`, and decode it
   at the boundary.
 - Use Effect's resource scopes, fibers, and retries for open files, the
-  database, running calls, and interrupts, not hand-written versions.
+  database, running requests, and interrupts, not hand-written versions.
 - Use Effect's own modules (for example `effect/sql`, `effect/cli`) before
   other libraries, where they fit.
