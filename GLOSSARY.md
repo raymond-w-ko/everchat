@@ -74,6 +74,7 @@ instead.
 | effort | noun | The reasoning level of a pick, for example `high`. |
 | speed | noun | The service level of a pick, for example the vendor's fast mode. |
 | request | noun | One message to a vendor's model, and its streamed reply. The old code calls it a call. |
+| reply | noun | What the model gave back for one request: its text, the programs it wants to run, the vendor's own items as received, and the usage. |
 | head | noun | The part of a request before the messages: the system prompt and the tool list. Table `head`. The chat's turns, its compactions, and its subagents all have the same head. |
 | block | noun | One piece of a view in a request: 4 lines. |
 | prefix | noun | The first bytes of a request, up to a cache mark. Two requests can share a cache entry only if they have the same prefix. |
