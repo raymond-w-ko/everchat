@@ -197,6 +197,11 @@ refactor the old code step by step.
   the old file formats and we do not write a migration from them.
 - Importing the sessions of other harnesses (Claude Code, Codex) is out of
   scope. Do not port the old import code.
+- The kind of EverChat's own messages is `asst` (short for "assistant") in the
+  new code. Upstream says `unii` and the old code says `ever`. Keep it at 4
+  letters: the model reads each message as `<kind>: <text>`, and that whole
+  line counts toward a node's 512 bytes. A longer word changes which messages
+  need a compaction. When you port a test, change only this word.
 - Port the memory algorithm (the tree, the views, the merge order, the
   retries, the cache marks), do not reinvent it. Its invariant tests and its
   golden test move with it. They show that the port did not change what the
