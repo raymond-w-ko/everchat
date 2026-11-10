@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverChat Schema Draft</title>
+<style>
+:root {
+  --bg: #fbfaf7; --fg: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
+  --card: #ffffff; --code: #f3f0ea; --accent: #9a4d12; --ok: #3f6f3f;
+  --open: #8a5a00; --open-bg: #fbf1dc; --bad: #a33a2a;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171614; --fg: #ece8e1; --muted: #a39d93; --line: #34312c;
+    --card: #1f1d1a; --code: #26241f; --accent: #e59a5b; --ok: #8fc08f;
+    --open: #e7b75a; --open-bg: #2c2516; --bad: #e58a7a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171614; --fg: #ece8e1; --muted: #a39d93; --line: #34312c;
+  --card: #1f1d1a; --code: #26241f; --accent: #e59a5b; --ok: #8fc08f;
+  --open: #e7b75a; --open-bg: #2c2516; --bad: #e58a7a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 900px; margin: 0 auto; padding: 32px 16px 80px; }
+h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 8px; }
+h2 { font-size: 1.35rem; margin: 48px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+h3 { font-size: 1.1rem; margin: 32px 0 8px; }
+h3 code { font-size: 1.05rem; }
+p, li { max-width: 72ch; }
+.lede { color: var(--muted); font-size: 1.05rem; }
+code { font: 0.9em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code); padding: 1px 4px; border-radius: 4px; }
+pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre code { background: none; padding: 0; font-size: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.95rem; }
+.wrap { overflow-x: auto; }
+th, td { text-align: left; vertical-align: top; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px 12px; margin: 16px 0; }
+.tag { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); vertical-align: middle; margin-left: 6px; white-space: nowrap; }
+.tag.now, .tag.fits { color: var(--ok); border-color: var(--ok); }
+.tag.later, .tag.build { color: var(--open); border-color: var(--open); }
+.tag.gap { color: var(--bad); border-color: var(--bad); }
+td .tag { margin-left: 0; }
+.open { background: var(--open-bg); border-left: 3px solid var(--open); padding: 8px 14px; border-radius: 0 8px 8px 0; margin: 12px 0; }
+.open strong { color: var(--open); }
+.muted { color: var(--muted); }
+nav ol { columns: 2; column-gap: 32px; padding-left: 20px; }
+nav li { break-inside: avoid; }
+a { color: var(--accent); }
+@media (max-width: 640px) { nav ol { columns: 1; } h1 { font-size: 1.6rem; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>EverChat schema draft</h1>
+<p class="lede">The tables of the one SQLite database that holds almost all of EverChat's state. Draft 2, for review, before any code.</p>
+
+<p>This page follows <a href="state.md">docs/state.md</a>, which lists the 63 pieces of state that the old code keeps. The goals are in AGENTS.md, "All state in one SQLite file". Draft 2 also checks the design against the factory's seat runtime interface (everturn ADR 0186 and <code>packages/bridge/src/runtime/types.ts</code>).</p>
+
+<p>The words on this page are those of <a href="../GLOSSARY.md">GLOSSARY.md</a>.</p>
+
+<p>Decided already:</p>
+<ul>
+  <li>The driver is <code>@effect/sql-sqlite-bun</code> (Effect's SQL client over <code>bun:sqlite</code>). Bun bundles SQLite 3.53.4.</li>
+  <li><code>synchronous = full</code>: each commit is on the disk before the call returns. We will revisit this if it feels too slow.</li>
+  <li>Greenfield: no old chats, and no migration from the old files.</li>
+  <li>Model calls go through the author's inference gateway, with an API key, for both OpenAI and Anthropic. The sign-in with a ChatGPT plan is for later. Its tokens will then go in the database.</li>
+  <li>Imports of old Claude Code and Codex sessions are out of scope. Their tables and the <code>imported</code> flag are gone.</li>
+  <li>The kind of EverChat's own messages is <code>asst</code> (section 12).</li>
+  <li>Version 1 deletes nothing: every turn's items and every call's whole output stay in the database, so that they can be measured. Deleting is a question for version 2.</li>
+  <li>Background shells are for version 2. Version 1's background work is a subagent. EverChat has two uses. In the factory, it is a chief of staff that hands coding work to mature harnesses (Claude Code, Codex). Alone, for example as a person's main assistant, it has no other harness, and it uses its own subagents a lot. So subagents must be cheap and solid.</li>
+  <li>OpenAI goes first, then Anthropic.</li>
+</ul>
+
+<h3>What changed from draft 1</h3>
+<ul>
+  <li><strong>New:</strong> <code>chat</code> (one row, typed columns) replaces the key and value table <code>state</code>. <code>launch</code> (one row per start of the program) replaces the <code>owner</code> and <code>run_tag</code> keys.</li>
+  <li><strong>New:</strong> <code>kind</code> and <code>pick</code> are small tables, and other tables point to them with a small number.</li>
+  <li><strong>New:</strong> <code>head</code> keeps the system prompt and the tool list of a turn, as sent.</li>
+  <li><strong>Merged:</strong> <code>tool_call</code> and the "later" <code>tool_step</code> are now one table, <code>call</code>. The factory's interface needs each shell command, so it cannot wait.</li>
+  <li><strong>Removed:</strong> the hook outbox <code>hook_event</code>. Section 9 says why.</li>
+  <li><strong>Times</strong> are integers now. Every row has <code>created</code>. Section 1 gives the rule for <code>updated</code>.</li>
+</ul>
+
+<nav>
+<h2 id="contents">Contents</h2>
+<ol>
+  <li><a href="#rules">Rules for every table</a></li>
+  <li><a href="#map">The tables at a glance</a></li>
+  <li><a href="#chat">The chat and its launches</a></li>
+  <li><a href="#log">The log: kind, msg, msg_image, node, view, image, image_original</a></li>
+  <li><a href="#work">Work: pick, head, turn, turn_item, call, agent, agent_msg</a></li>
+  <li><a href="#process">Records: usage, log</a></li>
+  <li><a href="#writes">What each event writes</a></li>
+  <li><a href="#restart">What a restart does</a></li>
+  <li><a href="#hooks">Hooks, and why the outbox is gone</a></li>
+  <li><a href="#outside">What stays outside the database</a></li>
+  <li><a href="#fit">Fit with the factory's seat runtime interface</a></li>
+  <li><a href="#answers">Answers to the review questions</a></li>
+  <li><a href="#questions">Open questions (none)</a></li>
+</ol>
+</nav>
+
+<h2 id="rules">1. Rules for every table</h2>
+
+<ul>
+  <li><strong>One home, one database, one chat.</strong> EverChat has one chat that never ends. The variable <code>EVERCHAT_HOME</code> names a directory (the home), and the database is one file in it. A second, independent chat is a second home. The table <code>chat</code> has exactly one row.</li>
+  <li><strong>One writer.</strong> One process owns the file. The table <code>launch</code> shows which. Other programs may read the file (WAL mode allows that), for example a backup.</li>
+  <li><strong>One event, one transaction.</strong> Each event (a message sent, a step done, a function started) writes all its rows in one transaction. After a crash, an event is there whole or not at all. Section 7 lists the events.</li>
+  <li><strong>Append only where the memory needs it.</strong> A message's id never changes and is never reused. The tree math depends on it (node <code>(l, i)</code> covers messages <code>i·2^l</code> on). The tables <code>msg</code>, <code>agent_msg</code>, <code>node</code>, <code>turn_item</code> and <code>usage</code> have triggers that refuse an <code>update</code>. <code>msg</code>, <code>agent_msg</code> and <code>node</code> also refuse a <code>delete</code>. A bug in the program then cannot rewrite the chat's history.</li>
+  <li><strong>Times</strong> are integers: milliseconds since 1970-01-01 UTC. An integer takes 6 bytes, and the ISO 8601 text of draft 1 took 24. The program formats a time when it shows it to the model or to a person.</li>
+  <li><strong>Order comes from ids, never from times.</strong> A clock can jump back, and a chat can move to another host. Times are for people.</li>
+  <li><strong><code>created</code> and <code>updated</code>.</strong> Every row of data has <code>created</code>. A row that can change also has the time of its last change: <code>updated</code>, or <code>ended</code> for a row that changes only once, when it closes (a turn, a call, a launch). A row that can never change has no <code>updated</code>. That absence is a statement: the triggers above enforce it.</li>
+  <li><strong>Who, what, when, where, why</strong> come from the structure, not from five more columns on each row. Section 12 has the table.</li>
+  <li><strong>Small numbers for repeated values.</strong> A value that repeats on many rows of a large table, and whose list can grow, is a small integer that points to a small table (<code>kind</code>, <code>pick</code>). SQLite cannot change a <code>check</code> list without a copy of the whole table, so a list in a small table is the only cheap way to add a value later. A status on a small table stays a word with a <code>check</code>, because it is easy to read.</li>
+  <li><strong>STRICT tables.</strong> SQLite then checks each column's type.</li>
+  <li><strong>Well-formed text.</strong> SQLite writes a lone surrogate as U+FFFD. So the program makes every string well formed (<code>toWellFormed()</code>) before it uses it, and the text in memory always equals the text on disk. <code>size</code> is the length of that text in UTF-8 bytes.</li>
+  <li><strong>Flags</strong> are <code>integer not null default 0</code>, checked to be 0 or 1.</li>
+  <li><strong>JSON</strong> goes in <code>text</code> columns, and only for values that the program always reads and writes whole (a view's parts, a vendor item). Anything the program searches or joins on gets its own column.</li>
+  <li><strong>Migrations</strong> run through Effect's migrator, loaded with <code>Migrator.fromRecord</code>, so they are compiled into the executable. The migrator keeps its own table (<code>effect_sql_migrations</code>). Each migration has a test that runs it on an empty database and on the one before it.</li>
+  <li><strong>Pragmas</strong> at open: <code>journal_mode = wal</code> (the driver sets it), <code>synchronous = full</code>, <code>foreign_keys = on</code>. The driver waits up to 5 s on a locked file and starts each write with <code>BEGIN IMMEDIATE</code>.</li>
+</ul>
+
+<h2 id="map">2. The tables at a glance</h2>
+
+<div class="wrap">
+<table>
+<thead><tr><th>Table</th><th>Holds</th><th>Rows change?</th></tr></thead>
+<tbody>
+<tr><td><code>chat</code></td><td>The chat itself: its id, its pick, its goal, the unsent draft. One row</td><td>yes</td></tr>
+<tr><td><code>launch</code></td><td>Each start of the program: process, host, directory, version</td><td>once, at its end</td></tr>
+<tr><td><code>kind</code></td><td>The list of message kinds</td><td>fixed list</td></tr>
+<tr><td><code>msg</code></td><td>The log: every message of the chat, forever</td><td>never</td></tr>
+<tr><td><code>msg_image</code></td><td>Which images a message carries</td><td>never</td></tr>
+<tr><td><code>node</code></td><td>The tree of summaries: each node built</td><td>never</td></tr>
+<tr><td><code>view</code></td><td>The two views (chat, compaction), byte for byte</td><td>yes</td></tr>
+<tr><td><code>image</code></td><td>Each image, as sent to the model</td><td>never</td></tr>
+<tr><td><code>image_original</code></td><td>The original of an image, when it is not what was sent</td><td>never</td></tr>
+<tr><td><code>pick</code></td><td>Each model choice used: vendor, model, effort, speed</td><td>never</td></tr>
+<tr><td><code>head</code></td><td>Each system prompt and tool list sent, stored once</td><td>never</td></tr>
+<tr><td><code>turn</code></td><td>Each turn of the chat or of an agent, and whether it still runs</td><td>once, at its end</td></tr>
+<tr><td><code>turn_item</code></td><td>A turn's request, step by step, as sent to the vendor</td><td>never</td></tr>
+<tr><td><code>call</code></td><td>Each program the model runs, and each function that program calls</td><td>once, at its end</td></tr>
+<tr><td><code>agent</code></td><td>Each subagent or computer task: role, effort, present task</td><td>yes</td></tr>
+<tr><td><code>agent_msg</code></td><td>Each agent's own log</td><td>never</td></tr>
+<tr><td><code>usage</code></td><td>What each model request used</td><td>never</td></tr>
+<tr><td><code>log</code></td><td>Diagnostics, instead of stderr</td><td>never; old rows deleted</td></tr>
+<tr><td><code>credential</code> <span class="tag later">later</span></td><td>Sign-in tokens, when we support the sign-in with a ChatGPT plan</td><td>yes</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="chat">3. The chat and its launches</h2>
+
+<div class="card">
+<h3><code>chat</code></h3>
+<p>The chat itself (items 11, 38, 43). It has exactly one row, so "one database, one chat" is a fact that the database checks. Draft 1 had a table of keys and JSON values. Typed columns are better: SQLite checks each type, the pick is a real reference, and a new value is one <code>alter table add column</code>.</p>
+<pre><code>create table chat (
+  id      integer primary key check (id = 1),     -- exactly one row
+  uuid    text    not null,                       -- made once, never changed
+  pick    integer not null references pick (id),  -- the next turn's pick
+  goal    text,                                   -- the /goal text, or null
+  draft   text,                                   -- typed and not yet sent
+  taken   integer not null default -1,            -- the last message that a request has taken in
+  created integer not null,
+  updated integer not null
+) strict;</code></pre>
+<p><code>taken</code> answers "which messages wait for a turn?" after a restart: the <code>user</code> and <code>work</code> messages with a higher id. A message that comes while a turn runs is logged at once, but the turn takes it in only after its step's results. The old code kept this in memory only.</p>
+<p><code>uuid</code> is the chat's id for the world outside. The factory calls it the session id, and it must be the same at every launch (ADR 0186, rule 3).</p>
+</div>
+
+<div class="card">
+<h3><code>launch</code></h3>
+<p>One row for each start of the program (items 31, 60). It does four jobs:</p>
+<ul>
+  <li><strong>Owner.</strong> A launch with no <code>ended</code> is live, or it crashed. The index below lets at most one such row exist. A new start checks whether that process still runs. If it does, the new start stops. If not, it closes the old row with <code>why = 'crash'</code> and adds its own, in one transaction.</li>
+  <li><strong>Leftover shells.</strong> Each shell gets the launch's <code>run_tag</code> in its environment. The next start stops each process that still carries an old tag.</li>
+  <li><strong>Where.</strong> Other rows point to the launch that wrote them. That gives the host, the directory and the program's version for every message, without three columns on each row.</li>
+  <li><strong>The factory's session record.</strong> ADR 0186 keeps one record per launch of a continuous chat. This table is that record.</li>
+</ul>
+<pre><code>create table launch (
+  id      integer primary key,
+  pid     integer not null,
+  host    text    not null,
+  cwd     text    not null,                 -- the work directory
+  version text    not null,                 -- the program's version
+  run_tag text    not null,                 -- marks the shells this launch starts
+  pick    integer references pick (id),     -- given on the command line, or null
+  created integer not null,                 -- when it started
+  ended   integer,                          -- null: it runs, or it crashed
+  why     text                              -- exit, signal, crash
+) strict;
+create unique index launch_live on launch ((1)) where ended is null;</code></pre>
+<p>The factory sets the model and the effort on the command line (its requirement R2). So a launch can carry a pick. The pick of the next turn is the launch's, if it has one, or else the chat's.</p>
+</div>
+
+<h2 id="log">4. The log</h2>
+
+<div class="card">
+<h3><code>kind</code></h3>
+<p>The kinds of message. The <code>name</code> is the word the model reads before each message (<code>user: ...</code>), as in the old code (<code>Memory.show</code>). A new kind is one new row, with no copy of <code>msg</code>. A test checks that this list equals the list in the code.</p>
+<pre><code>create table kind (
+  id   integer primary key,
+  name text    not null unique
+) strict;
+insert into kind (id, name) values
+  (1, 'user'),   -- the person
+  (2, 'asst'),   -- EverChat's reply ("assistant"; the old code says 'ever')
+  (3, 'tool'),   -- a program the model ran
+  (4, 'echo'),   -- that program's result
+  (5, 'work'),   -- an agent's report
+  (6, 'note');   -- a note from the program itself</code></pre>
+<p><code>mind</code> (a thought) is not a kind here: thoughts are shown and never logged, as before.</p>
+</div>
+
+<div class="card">
+<h3><code>msg</code></h3>
+<p>The chat's log (item 1). One row per page. A long message is cut into pages, and <code>more = 1</code> says that the message continues in the next row. All pages of a message are written in one transaction, so a crash can no longer leave a message half written.</p>
+<pre><code>create table msg (
+  i       integer primary key,              -- message id: 0, 1, 2, ... never reused
+  kind    integer not null references kind (id),
+  text    text    not null,                 -- well formed
+  size    integer not null,                 -- UTF-8 bytes of text
+  more    integer not null default 0 check (more in (0, 1)),
+  line    text,                             -- its own summary line, when the writer gives one
+  turn    integer references turn (id),     -- the turn that wrote it, or that it started
+  call    integer references call (id),     -- tool and echo: the program they belong to
+  launch  integer not null references launch (id),
+  created integer not null
+) strict;
+create trigger msg_no_update before update on msg
+  begin select raise(abort, 'msg is append only'); end;
+create trigger msg_no_delete before delete on msg
+  begin select raise(abort, 'msg is append only'); end;</code></pre>
+</div>
+
+<div class="card">
+<h3><code>msg_image</code></h3>
+<p>The images of a message, in order. Draft 1 had a JSON list in <code>msg</code>. A table gives a real reference: a message cannot name an image that is not there.</p>
+<pre><code>create table msg_image (
+  msg   integer not null references msg (i),
+  n     integer not null,                   -- 0, 1, 2, ... in the message
+  image integer not null references image (id),
+  primary key (msg, n)
+) strict, without rowid;</code></pre>
+<p class="muted">It has no time of its own. It is written with its message and never changes, so the message's <code>created</code> is its time.</p>
+</div>
+
+<div class="card">
+<h3><code>node</code></h3>
+<p>The tree of summaries (item 3). Node <code>(l, i)</code> is one line of at most about 512 bytes that covers the <code>2^l</code> messages from <code>i·2^l</code> on. All levels are in this one table. Section 12 says why, with a measurement.</p>
+<pre><code>create table node (
+  l       integer not null check (l &gt;= 0),
+  i       integer not null check (i &gt;= 0),
+  text    text    not null,
+  size    integer not null,
+  created integer not null,
+  primary key (l, i)
+) strict, without rowid;
+create trigger node_no_update before update on node
+  begin select raise(abort, 'node is written once'); end;
+create trigger node_no_delete before delete on node
+  begin select raise(abort, 'node is written once'); end;</code></pre>
+<p>A node is written once. A second write of the same node is a bug, and the primary key makes it fail. Which model made a node is in <code>usage</code>. A node whose source was short enough has no <code>usage</code> row: the old code builds it with no request (<code>Memory.pump</code>).</p>
+</div>
+
+<div class="card">
+<h3><code>view</code></h3>
+<p>The two views (items 5, 6): the chat's (for turns) and the compactions' (<code>seen</code> in the code). A view must come back byte for byte after a restart. If it does not, the first call after the restart misses the vendor's cache, which is mistake 3 of <code>optchat.md</code>. It is always read and written whole, so its parts are one JSON value and not rows.</p>
+<pre><code>create table view (
+  name    text    primary key check (name in ('chat', 'seen')),
+  parts   text    not null,                 -- JSON [[l, i], ...], oldest first
+  batch   integer not null default 0 check (batch in (0, 1)),   -- a merge is under way
+  created integer not null,
+  updated integer not null
+) strict, without rowid;</code></pre>
+<p>A view changes when a merge is accepted (<code>Memory.fit</code>). That write goes in the same transaction as the nodes that made the merge possible.</p>
+</div>
+
+<div class="card">
+<h3><code>image</code> and <code>image_original</code></h3>
+<p>The images that messages carry (item 15). Decided: every original is kept. An image is two tables:</p>
+<ul>
+  <li><code>image</code> holds the bytes <strong>as sent to the model</strong>. Each request with the image reads this row.</li>
+  <li><code>image_original</code> holds the original, and only when it is not what was sent (it was too large, so the model got a scaled JPEG of at most 1568 px). Almost nothing reads this row.</li>
+</ul>
+<pre><code>create table image (
+  id      integer primary key,
+  name    text    not null unique,          -- as the model reads it: 16 hex digits of the original's SHA-256, and its type
+  type    text    not null,                 -- MIME type of bytes
+  width   integer not null,                 -- of bytes, in pixels
+  height  integer not null,
+  source  text    not null check (source in ('person', 'tool')),
+  created integer not null,
+  bytes   blob    not null                  -- as sent to the model
+) strict;
+
+create table image_original (
+  image   integer primary key references image (id),
+  type    text    not null,
+  width   integer not null,
+  height  integer not null,
+  bytes   blob    not null
+) strict;</code></pre>
+<p>Why two tables, and not two columns:</p>
+<ul>
+  <li><strong>The sent bytes must be stored, not made again.</strong> A different JPEG encoder would give other bytes, and the request's prefix would no longer match the vendor's cache.</li>
+  <li><strong>The hot rows stay small.</strong> SQLite stores a row's columns one after the other. With both in one row, a read of the sent bytes would first pass over the pages of a large original.</li>
+  <li><strong>An image that was sent as it is has one copy</strong>, and no row in <code>image_original</code>.</li>
+  <li><strong>The originals can move.</strong> If they grow too large for one file, this one table can go to a second database file. No other table points to it.</li>
+  <li><strong>The originals can be dropped, as a last resort.</strong> If space runs out, the rows of very old images can be deleted from <code>image_original</code>. Nothing breaks: the chat, the memory and every request use <code>image</code> only. The owner strongly prefers not to do this, so the program never does it by itself. It needs a command that a person runs, and moving the table to a second file comes first.</li>
+</ul>
+<p class="muted"><code>image_original</code> has no time of its own: it is written with its <code>image</code> row and never changes. The blob is the last column of each table, so a read of the other columns does not touch it.</p>
+</div>
+
+<h2 id="work">5. Work</h2>
+
+<p>A <strong>turn</strong> is one agent loop: a first message, then steps and programs, until a step that runs no program. The chat has turns, and so does each agent. The old code kept a running turn only in memory (items 13, 22). After a crash, the new turn got only a restart note.</p>
+
+<div class="card">
+<h3><code>pick</code></h3>
+<p>A pick is a model choice: vendor, model, effort and speed. Draft 1 wrote it as text on each turn, and as four text columns on each <code>usage</code> row. There is about one <code>usage</code> row per message, because each compaction is a request. So the pick is now one row here, and the other tables hold its number.</p>
+<pre><code>create table pick (
+  id      integer primary key,
+  vendor  text    not null,
+  model   text    not null,
+  effort  text    not null,
+  speed   text    not null,
+  created integer not null,
+  unique (vendor, model, effort, speed)
+) strict;</code></pre>
+</div>
+
+<div class="card">
+<h3><code>head</code></h3>
+<p>The head of a request is the part before the messages: the system prompt and the tool list. A turn that continues after a restart must send the same head as before. The program may be a newer version by then, with a changed prompt. So each head that is sent is kept, once, and found by its hash. Thousands of turns share one row.</p>
+<pre><code>create table head (
+  id      integer primary key,
+  hash    text    not null unique,          -- SHA-256 of body
+  body    text    not null,                 -- JSON: the system prompt and the tool list, as sent
+  created integer not null
+) strict;</code></pre>
+<p class="muted">This also gives the cache rule in <code>askai.ts</code> the fact it lacks today: two requests can share a cache prefix only if they have the same head (docs/api-audit.md, A3).</p>
+</div>
+
+<div class="card">
+<h3><code>turn</code></h3>
+<pre><code>create table turn (
+  id        integer primary key,
+  agent     integer references agent (id),  -- null: the chat's own turn
+  status    text    not null check (status in ('running', 'done', 'stopped', 'failed')),
+  pick      integer not null references pick (id),   -- fixed for the whole turn
+  head      integer not null references head (id),   -- fixed for the whole turn
+  first_msg integer not null,               -- the message that started it: msg.i, or agent_msg.i for an agent
+  launch    integer not null references launch (id), -- the launch that started it
+  created   integer not null,
+  ended     integer,
+  why       text,                           -- stopped or failed: why
+  check ((status = 'running') = (ended is null))
+) strict;
+create index turn_running on turn (status) where status = 'running';</code></pre>
+<p>At start, a turn with status <code>running</code> was cut. The pick stays with the turn, because the turn must continue on the same model: Anthropic's thinking blocks are bound to the model that made them. <code>stopped</code> means that the person stopped it. <code>failed</code> has the vendor's error text in <code>why</code>. The factory's turn-end event needs both.</p>
+</div>
+
+<div class="card">
+<h3><code>turn_item</code></h3>
+<p>The request of a turn, step by step (item 23): item 0 is the first user message exactly as sent (the view's blocks, the devices, the user's text), then each model output, then each batch of tool results. This is what lets a restart continue <em>inside</em> the cut turn:</p>
+<ul>
+  <li>Item 0 holds the view as it was when the turn started. The view may have changed since, but the request is byte for byte the old one. So it reads the vendor's cache.</li>
+  <li>The request stays append only, which Anthropic's history check needs (docs/api-audit.md, "Append only within a turn").</li>
+  <li>The vendor's own items (reasoning, signatures, encrypted content) are kept as received, so they go back unchanged.</li>
+</ul>
+<pre><code>create table turn_item (
+  turn    integer not null references turn (id),
+  n       integer not null,                 -- 0, 1, 2, ... in request order
+  kind    text    not null check (kind in ('user', 'turn', 'back')),
+  body    text    not null,                 -- JSON: our Item, the vendor's output inside as received
+  created integer not null,
+  primary key (turn, n)
+) strict;
+create trigger turn_item_no_update before update on turn_item
+  begin select raise(abort, 'turn_item is append only'); end;</code></pre>
+<p>Images in an item are kept as image names, not as base64. Decided: version 1 keeps the items of every turn, with no limit. They are the only record of what the model was really sent, so they are what cache and cost measurements need; the leaves alone would lose that. Item 0 can be 100 KB or more, so a thousand turns are about 100 MB. Version 2 may delete old items, which is why this table refuses an <code>update</code> but allows a <code>delete</code>.</p>
+</div>
+
+<div class="card">
+<h3><code>call</code></h3>
+<p>Code mode is the only primary tool. So what the model runs is a program, and the program calls functions (shell, read, write, edit, zoom). Both are a <strong>call</strong>, and both are rows here, written when they start (items 25, 30, 31):</p>
+<ul>
+  <li>A row with no <code>parent</code> is a program that the model ran. <code>fn</code> is <code>run</code>, and <code>input</code> is the program's source.</li>
+  <li>A row with a <code>parent</code> is one function that the program called. <code>input</code> is its arguments, and <code>output</code> is what it gave back.</li>
+</ul>
+<pre><code>create table call (
+  id        integer primary key,
+  turn      integer not null references turn (id),
+  parent    integer references call (id),   -- null: the model's own call
+  vendor_id text,                           -- the vendor's call id: only on the model's own call
+  fn        text    not null,               -- run, shell, read, write, edit, zoom, ...
+  input     text    not null,               -- the program's source, or the function's arguments as JSON
+  output    text,                           -- the whole result, as produced
+  size      integer,                        -- UTF-8 bytes of the result
+  shown     integer,                        -- bytes of it that its reader got: less than size when it was shortened
+  status    text    not null check (status in ('running', 'done', 'failed', 'denied', 'cut')),
+  pgid      integer,                        -- shell: its process group, while it runs
+  launch    integer not null references launch (id),
+  created   integer not null,
+  ended     integer,
+  check ((parent is null) = (vendor_id is not null)),
+  check ((status = 'running') = (ended is null))
+) strict;
+create unique index call_vendor  on call (turn, vendor_id) where vendor_id is not null;
+create index        call_parent  on call (parent)          where parent is not null;
+create index        call_running on call (status)          where status = 'running';</code></pre>
+<ul>
+  <li>The old code logged a call only when its result came. A crash after a tool ran left no trace that it wrote a file or ran a command. Now a restart reads the open rows and tells the model exactly which functions ran, and which one was cut.</li>
+  <li>The memory still gets a program and its result as two <code>msg</code> rows (<code>tool</code>, then <code>echo</code>), as before. The functions inside do not go in the log. They are a record, not memory.</li>
+  <li><code>denied</code> is for a function that a hook refused (section 9).</li>
+  <li><code>output</code> is always the whole result, for a program and for a function. What the model was shown can be less: see "The output limit" below.</li>
+  <li>The factory's interface asks for exactly these two levels: each shell command as one call with its command and its output, and each program as a call of its own kind (ADR 0186, rule 4).</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>The output limit</h3>
+<p>Decided: the database keeps a result whole, and the model is shown a limited form. Three things happen when a program's result is over the limit:</p>
+<ol>
+  <li><strong>The model gets the head and the tail</strong>, with a line between them that says how much was left out and where the whole text is. The <code>echo</code> message in the log is this limited text, so the memory holds what the model saw.</li>
+  <li><strong>The amount is recorded:</strong> <code>size</code> is what was produced, and <code>shown</code> is what the model got.</li>
+  <li><strong>The whole text is written to a file</strong> in a private directory under the system's temporary directory (<code>/tmp</code>), named after the call's id. The model can read or search it with its normal functions. The file is a copy, not state. If it is gone (after a reboot, for example), a function writes it again from <code>call.output</code>.</li>
+</ol>
+<p><strong>The default limit is 30,000 characters</strong>, set in the config file. Three sources agree on about that size:</p>
+<div class="wrap">
+<table>
+<thead><tr><th>Harness</th><th>Shown to the model</th><th>The rest</th></tr></thead>
+<tbody>
+<tr><td>The old code (<code>clip.ts</code>, <code>CAP</code>)</td><td>30,000 characters: the head and the tail, half each</td><td>Lost. A line says how many characters were cut</td></tr>
+<tr><td>Claude Code (its tools reference)</td><td>About 30,000 characters. A failed command: about 10,000, head and tail</td><td>A file in the session directory, with a preview of the first 2,000 characters. Settable up to 128,000</td></tr>
+<tr><td>Codex (<code>tool_output_token_limit</code>)</td><td>10,000 tokens by reports, which is about 30,000 to 40,000 characters. The official page gives no number</td><td>Head and tail kept, with a warning</td></tr>
+</tbody>
+</table>
+</div>
+<p>Two points come from code mode:</p>
+<ul>
+  <li><strong>The limit is on what the model reads, not on what a program gets.</strong> A function gives its whole result to the program that called it, so the program can search or parse it. The limit applies to the program's own result, which is what goes to the model.</li>
+  <li><strong>A second, hard limit is still needed.</strong> A command that never stops printing must not fill the memory or the database, and SQLite cannot store a text over 1 GB. Decided: 64 MiB, the size at which Claude Code cuts its saved file. Past it, the output ends there and the command is stopped. <code>size</code> still tells the true amount.</li>
+</ul>
+</div>
+
+<div class="card">
+<h3><code>agent</code> and <code>agent_msg</code></h3>
+<p>Each subagent or computer task (items 17, 18, 28). The old code kept an agent's role and effort only as words in its first log note, and parsed them back. Its replies and its stop flag were in memory only.</p>
+<pre><code>create table agent (
+  id      integer primary key,
+  name    text    not null unique,          -- random AdjNoun; also the name of its work directory
+  role    text    not null check (role in ('sub', 'hands')),
+  effort  text,                             -- sub: its own effort, or null for the configured one
+  device  text,                             -- hands: the device it works on
+  turn    integer references turn (id),     -- the chat turn that started it
+  task    integer,                          -- agent_msg.i of the message that began its present task; null: idle
+  taken   integer not null default -1,      -- the last message of its log that a request has taken in
+  stop    integer not null default 0 check (stop in (0, 1)),   -- the present task was stopped
+  view    text,                             -- sub: JSON, the chat view's parts for its present task
+  created integer not null,
+  updated integer not null,
+  check ((role = 'hands') = (device is not null))
+) strict;
+
+create table agent_msg (
+  agent   integer not null references agent (id),
+  i       integer not null,                 -- 0, 1, 2, ... per agent
+  kind    integer not null references kind (id),
+  text    text    not null,
+  size    integer not null,
+  turn    integer references turn (id),
+  call    integer references call (id),
+  created integer not null,
+  primary key (agent, i)
+) strict;
+create trigger agent_msg_no_update before update on agent_msg
+  begin select raise(abort, 'agent_msg is append only'); end;
+create trigger agent_msg_no_delete before delete on agent_msg
+  begin select raise(abort, 'agent_msg is append only'); end;</code></pre>
+<p>An agent's log is a plain list with no tree, as in the old code (<code>Memory.agent_push</code> takes a kind and a text). It stays apart from <code>msg</code>, because the ids of <code>msg</code> are the tree's coordinates and must be 0, 1, 2, ... with no gap.</p>
+<p>A <strong>task</strong> is an agent's work from one message to its report. It can take more than one turn: a message that came too late for a turn starts the next one. The columns follow the old code (<code>Tools.start</code>, <code>Tools.tell</code>, <code>Tools.run</code>, <code>Tools.ask</code>):</p>
+<ul>
+  <li><strong>No pick.</strong> An agent has no model of its own. Each turn runs on the configured agents' pick, or else the chat's pick at that time, with the agent's own <code>effort</code> if it has one. The pick that ran is on the <code>turn</code>. An agent with no effort of its own, on the chat's pick, reads the chat's cache.</li>
+  <li><strong><code>view</code></strong> is taken anew for each task, and every turn of the task uses it, so they share one cache prefix. Agents started together get the same view, so they share it too. A computer task has no view.</li>
+  <li><strong>An agent does not read the chat's own cache</strong> in the old code. It gets the same view, but its system prompt is another one (<code>SUB</code>, not <code>MASTER</code>), and the system prompt comes before the view in a request. Its pick can differ too. So an agent's first request pays for the whole view at the full price. The cache rule knows this: <code>AskAI.keys</code> starts from the pick and the system prompt. The new code changes this: see "One system prompt" below.</li>
+  <li><strong><code>task</code></strong> marks where the present task began. The report is the last reply of each turn since then, or "failed" and the reason. So a restart can still build it. An agent with no task is idle.</li>
+  <li><strong><code>stop</code></strong>: a stopped task still reports, but its report starts no turn in the chat.</li>
+</ul>
+<h3>Check: one subagent, from start to report</h3>
+<div class="wrap">
+<table>
+<thead><tr><th>Step</th><th>The old code</th><th>This schema</th></tr></thead>
+<tbody>
+<tr><td>The chat's program starts an agent</td><td>A new name, a log file, a work directory. The log gets a note ("subagent at effort high") and the task</td><td><code>agent</code> (role, effort, <code>view</code>, <code>task = 1</code>), <code>agent_msg</code> 0 and 1, a <code>turn</code> for it, <code>turn_item</code> 0. The note stays in the log, so the model reads the same text</td></tr>
+<tr><td>The agent's request</td><td>The view's blocks, the devices, then the whole log as one text block</td><td><code>turn_item</code> 0 holds it as sent. The log text comes from <code>agent_msg</code> (id, kind, text)</td></tr>
+<tr><td>The agent runs programs</td><td>Each call and result is added to its log</td><td><code>call</code> rows on its turn; <code>agent_msg</code> <code>tool</code> and <code>echo</code></td></tr>
+<tr><td>The chat sends it a message while it works</td><td>Logged at once. The agent reads it between programs, or in a next request if it came too late</td><td><code>agent_msg</code> at once; <code>agent.taken</code> moves when a request takes it in. If the turn ends first, the next turn of the same task starts in the same transaction</td></tr>
+<tr><td>The task ends</td><td>The replies of all its calls become one <code>work</code> message in the chat. That message starts a turn of the chat, unless the task was stopped</td><td>One transaction: the agent's <code>turn</code> ends, <code>agent.task</code> is null, <code>msg</code> <code>work</code>, and a new <code>turn</code> of the chat</td></tr>
+<tr><td>The chat sends an idle agent a message</td><td>A new view, and a new task on the same log</td><td><code>agent</code> (<code>view</code>, <code>task</code>, <code>stop = 0</code>), <code>agent_msg</code>, a <code>turn</code></td></tr>
+<tr><td>The chat reads the agent's whole log (<code>zoom("Name")</code>)</td><td>Reads the log file</td><td><code>agent_msg</code>. It is never deleted</td></tr>
+<tr><td><strong>A crash while the agent works</strong></td><td>The agent comes back idle, with no view. Its replies so far are lost, and <strong>no report ever reaches the chat</strong></td><td>Its cut turn continues from <code>turn_item</code>. The report is built from <code>task</code>. The chat gets it</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>The spirit.</strong> In the original, the chat is the only memory. An agent is a short side chat: its whole log goes in each request, it has no tree, and what it found enters the memory as one <code>work</code> message. The schema keeps all of that. One assumption needs a check during the port: <code>view</code> holds the view's parts and not its text. That is exact only if every node of the view is built when the view is taken (<code>Memory.settle</code> waits for that) and the text of a part never changes after.</p>
+</div>
+
+<div class="card">
+<h3>One system prompt for the chat and its subagents (decided)</h3>
+<p>Today a subagent has its own system prompt, so it cannot read the chat's cache and pays for the whole view again (section 5). Decided: a subagent gets the chat's system prompt, and a message after the view tells it that it is a subagent.</p>
+<p><strong>The old code already does this for compactions.</strong> Its one system prompt says: "Each call to you is a turn or a compaction: the view below is followed by the user's new message, or by a task starting <code>Compaction:</code>." The rules for a compaction are a section of that prompt, and the text after the view chooses the role. A cheap compactor model follows it.</p>
+<p><strong>The design:</strong></p>
+<ol>
+  <li><strong>One head.</strong> The chat and its subagents send the same system prompt and the same tool list. Code mode makes the tool list equal for free: there is one tool.</li>
+  <li><strong>The system prompt names three kinds of call:</strong> a turn, a compaction, and a subagent task. The rules for a subagent (today's <code>SUB</code> text) become a section of it, next to the compaction section.</li>
+  <li><strong>The request</strong> is: the head, the chat's view, the open devices, then a block that starts <code>Subagent task:</code> with the agent's name and its log. The first two parts are bytes that the chat already sent, so the agent reads them from the cache.</li>
+  <li><strong>Code enforces what a subagent may do, not the prompt.</strong> A subagent's program that calls a function only the chat may use (to start an agent, for example) gets an error.</li>
+  <li><strong>The pick is a choice per agent.</strong> On the chat's pick, the agent reads the chat's cache. On a cheaper model or another effort, it has its own cache, as today, but still the same prompt.</li>
+</ol>
+<p><strong>Is a message strong enough?</strong> Yes, if the system prompt itself defines the mode. Then the message does not argue with the system prompt ("you are EverChat" against "you are a subagent"). It starts a mode that the system prompt describes, and it is the last thing the model reads before it acts. Three sentences of today's subagent prompt must stay in that last block, because they guard against the known mistakes: do the task and not what the user's last message says; the final reply is a report to EverChat and not to the user; the view is context only.</p>
+<p><strong>What it saves.</strong> A view is 64 to 128 KB. Today each group of agents that start together pays for it once at the full price, and so does each new task for an idle agent. With one head, they read it from the cache. A computer task gains nothing: it has no view, and it has another tool.</p>
+<p><strong>For the schema:</strong> no change. An agent's turn points to the same <code>head</code> row as the chat's turns.</p></div>
+
+<h2 id="process">6. Records</h2>
+
+<div class="card">
+<h3><code>usage</code></h3>
+<p>What each model request used (item 27). The factory reads token use from it (its requirement R26), and the cache findings in docs/api-audit.md can be measured only with it.</p>
+<pre><code>create table usage (
+  id          integer primary key,
+  served      text    not null check (served in ('turn', 'compaction', 'goal')),
+  turn        integer references turn (id), -- a turn's request (the chat's or an agent's)
+  node_l      integer,                      -- a compaction's node
+  node_i      integer,
+  pick        integer not null references pick (id),   -- as it ran, not as asked
+  request     text,                         -- the vendor's id of the request
+  input       integer not null,             -- uncached input tokens
+  cache_read  integer not null,
+  cache_write integer not null,
+  output      integer not null,
+  searches    integer not null default 0,
+  micros      integer,                      -- cost in micro-USD at that day's prices
+  created     integer not null
+) strict;
+create trigger usage_no_update before update on usage
+  begin select raise(abort, 'usage is append only'); end;</code></pre>
+</div>
+
+<div class="card">
+<h3><code>log</code></h3>
+<p>Diagnostics (item 59). Today about 30 calls write to stderr. In one process inside a PTY, that would break the screen. Rows older than 30 days are deleted at start.</p>
+<pre><code>create table log (
+  seq     integer primary key,
+  level   text    not null check (level in ('debug', 'info', 'warn', 'error')),
+  source  text    not null,                 -- the module: memory, wire.openai, tools, ...
+  text    text    not null,
+  launch  integer not null references launch (id),
+  created integer not null
+) strict;</code></pre>
+</div>
+
+<div class="card">
+<h3>For people: a readable query</h3>
+<p>Numbers for kinds and times are harder to read in the <code>sqlite3</code> shell. So the schema has a read-only query for people. It costs no space.</p>
+<pre><code>create view msg_read as
+select m.i, k.name as kind, datetime(m.created / 1000, 'unixepoch') as at,
+       m.turn, m.call, m.size, m.text
+from msg m join kind k on k.id = m.kind;</code></pre>
+</div>
+
+<div class="card">
+<h3><code>credential</code> <span class="tag later">later</span></h3>
+<p>Decided: when we support the sign-in with a ChatGPT plan, its tokens go in the database, because the program writes them. Not now: the inference gateway's key is enough. The inference gateway's key itself never goes in the database (section 10).</p>
+<pre><code>create table credential (
+  vendor  text    primary key,              -- openai, ...
+  kind    text    not null,                 -- siwc
+  body    text    not null,                 -- JSON: access token, refresh token, expiry
+  created integer not null,
+  updated integer not null
+) strict, without rowid;</code></pre>
+</div>
+
+<h2 id="writes">7. What each event writes</h2>
+
+<p>Each row of this table is one transaction. The last column names the point where a hook will run, when hooks exist (section 9).</p>
+
+<div class="wrap">
+<table>
+<thead><tr><th>Event</th><th>Writes</th><th>Hook point</th></tr></thead>
+<tbody>
+<tr><td>The program starts</td><td><code>launch</code> (close a crashed one, add ours)</td><td>session start</td></tr>
+<tr><td>The program ends</td><td><code>launch</code> (<code>ended</code>, <code>why</code>)</td><td>session end</td></tr>
+<tr><td>The person sends a message, and no turn runs</td><td><code>turn</code> (<code>running</code>), <code>msg</code> (all its pages), <code>msg_image</code>, <code>image</code> and <code>image_original</code>, <code>head</code> and <code>pick</code> (if new), <code>turn_item</code> 0, clear <code>chat.draft</code></td><td>turn start</td></tr>
+<tr><td>The person sends a message while a turn runs</td><td><code>msg</code> (all its pages). The turn takes it after the step's results: then a <code>turn_item</code> (<code>user</code>) and <code>chat.taken</code></td><td></td></tr>
+<tr><td>A model step ends</td><td><code>turn_item</code> (<code>turn</code>: the vendor's output), <code>msg</code> for its replies, <code>usage</code></td><td></td></tr>
+<tr><td>A program starts</td><td><code>call</code> (<code>running</code>, no parent)</td><td></td></tr>
+<tr><td>A function starts</td><td><code>call</code> (<code>running</code>, with its parent)</td><td>before a shell command</td></tr>
+<tr><td>A function ends</td><td><code>call</code> (<code>done</code>, <code>failed</code> or <code>denied</code>, with its whole output)</td><td></td></tr>
+<tr><td>A program ends</td><td><code>call</code> (its whole output, <code>size</code>, <code>shown</code>), <code>msg</code> <code>tool</code> and <code>echo</code> (the text as shown)</td><td>after a program</td></tr>
+<tr><td>All of a step's results are in</td><td><code>turn_item</code> (<code>back</code>)</td><td></td></tr>
+<tr><td>A turn ends</td><td><code>turn</code> (<code>done</code>, <code>stopped</code> or <code>failed</code>)</td><td>turn end</td></tr>
+<tr><td>A compaction ends</td><td><code>node</code>, <code>view</code> (if a merge is now accepted), <code>usage</code></td><td></td></tr>
+<tr><td>A node that needs no model call</td><td><code>node</code>, in the same transaction as its <code>msg</code> or its halves</td><td></td></tr>
+<tr><td>An agent gets a task</td><td><code>agent</code> (<code>task</code>, <code>view</code>), <code>agent_msg</code> (its note and its task), <code>turn</code> for it, <code>turn_item</code> 0</td><td>agent start</td></tr>
+<tr><td>An agent's turn ends, and a message waits in its log</td><td><code>turn</code> (ended), the next <code>turn</code> of the same task, <code>turn_item</code> 0, <code>agent.taken</code></td><td></td></tr>
+<tr><td>An agent's task ends</td><td><code>turn</code> (ended), <code>agent</code> (<code>task</code> null), <code>msg</code> <code>work</code> (its report, in the chat), a <code>turn</code> of the chat unless the task was stopped</td><td>agent end</td></tr>
+<tr><td><code>/pick</code>, <code>/goal</code></td><td><code>chat</code></td><td></td></tr>
+<tr><td>The person types (debounced)</td><td><code>chat.draft</code></td><td></td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="muted">Model text streams to the screen as it comes, but goes to the database only when its step ends. A crash in the middle of a step loses that step's partial text, and the step then runs again. Decided: the partial text is dropped, not kept as a note.</p>
+
+<h2 id="restart">8. What a restart does</h2>
+
+<ol>
+  <li><strong>Take the file.</strong> Open it and run the migrations. Read the <code>launch</code> row with no <code>ended</code>. If its process still runs on this host, stop. If not, close it with <code>why = 'crash'</code> and add our own row.</li>
+  <li><strong>Clean up processes.</strong> Stop each process that still carries the <code>run_tag</code> of a launch that ended (a shell that a crash left running).</li>
+  <li><strong>Load the memory.</strong> Read both views from <code>view</code>, byte for byte. Read the nodes that they and the tree above them need. Find the nodes to build with a query (nodes not built whose two halves are), not with a walk of the tree.</li>
+  <li><strong>Close the cut calls.</strong> Set each <code>call</code> still <code>running</code> to <code>cut</code>. For a cut program, log its <code>tool</code> and an <code>echo</code> that lists its functions: which ended, with what result, and which one was cut ("It may or may not have finished."). Add the same text as its result in the turn's items.</li>
+  <li><strong>Continue the cut turns.</strong> For each <code>turn</code> still <code>running</code> (the chat's and each agent's), build the request again from its <code>head</code> and its <code>turn_item</code> rows, and send the next step. The prefix is the one sent before, on the same pick. So it reads the vendor's cache and keeps the thinking blocks valid.</li>
+  <li><strong>Start the compactions</strong> again. Their state is derived, so nothing is stored for them. A compaction that was cut is asked again.</li>
+</ol>
+
+<p class="muted">ADR 0186 expects step 5: "a continuous chat resumes with the cut turn at its next launch" (rule 3).</p>
+
+<h2 id="hooks">9. Hooks, and why the outbox is gone</h2>
+
+<p>Draft 1 had a table <code>hook_event</code>: an outbox that kept each event until a hook had run for it, also after a crash. ADR 0186 shows that this is the wrong shape for the factory, for three reasons:</p>
+<ul>
+  <li><strong>A hook speaks about the live process.</strong> The bridge accepts a hook's event only from a direct child of the runtime process that runs now. An event of a process that died, sent late by the next process, would describe a state that is gone. When EverChat dies, the bridge sees the exit itself.</li>
+  <li><strong>A hook can answer.</strong> The session-start hook gives text for the model. The hook before a shell command can refuse it. The hook after a program can add text for the model (the factory's "steer mail"). So EverChat must wait for each hook, at the point where it runs.</li>
+  <li><strong>What must last is the answer's effect, not the event.</strong> That effect already has a place: text for the model becomes a <code>msg</code> row and a <code>turn_item</code>, and a refusal becomes a <code>call</code> with status <code>denied</code> and the reason as its output.</li>
+</ul>
+
+<p>So there is no hook table now. Hooks come later, and section 7 marks the points where they will run. The puzzle "how do shell hooks work when the only tool is code mode" has an answer in the ADR (rule 4), which Codex's code mode already follows:</p>
+<ul>
+  <li>The hook before a tool runs <strong>for each shell command</strong>, not for the program around it. It runs in the <code>shell</code> function on the host side, before the command starts. The hook sees the command text.</li>
+  <li>The hook after a tool runs <strong>after each program</strong>.</li>
+  <li>The sandbox must have no other way to start a process, and no way to type into a command that already runs. Without both, a command could pass the hook unseen. This is a condition on the code-mode design (how <code>pi-codemode</code> runs a program), not on the schema.</li>
+  <li>Each command's shell must be a direct child of the EverChat process, wherever the sandbox runs.</li>
+</ul>
+
+<h2 id="outside">10. What stays outside the database</h2>
+
+<div class="wrap">
+<table>
+<thead><tr><th>What</th><th>Where</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>The inference gateway's address and key</td><td>Variables that the launcher sets. If there are none: <code>$HOME/.config/ai/proxy.json</code> (also on Windows), keys <code>base_url</code> and <code>api_key</code></td><td>Never in the database: a backup must not carry a key. The program deletes the key from its environment, so that no shell inherits it</td></tr>
+<tr><td>Settings the person sets (models, default pick, compactor, agents' pick, rules path, computer flag, output limit)</td><td>Config file in the home, read only</td><td>The person edits it by hand</td></tr>
+<tr><td>Hook commands</td><td>A hooks file in the home, read only</td><td>The factory writes it before a launch (its <code>hooks.files</code>)</td></tr>
+<tr><td>Skills</td><td>A directory of <code>SKILL.md</code> files in the home</td><td>The factory links it to the shared skills (its requirement R29)</td></tr>
+<tr><td>The transcript export</td><td>JSONL files in the home, one per launch, append only</td><td>For the factory and for people. Not state: EverChat never reads it back (section 11)</td></tr>
+<tr><td>Whole results that were shortened for the model</td><td>Files in a private directory under <code>/tmp</code></td><td>Copies of <code>call.output</code>, so that the model can read and search them. Written again on request</td></tr>
+<tr><td>The work directory's files</td><td>The file system</td><td>They are the person's own files</td></tr>
+<tr><td>Prompt-cache single flight, busy rooms, retry state</td><td>Memory</td><td>Lost harmlessly at a crash (items 20, 21, 26)</td></tr>
+<tr><td>Running compactions, build queue, node text cache</td><td>Memory</td><td>Derived from <code>node</code> and <code>view</code> at start (items 4, 7, 8)</td></tr>
+<tr><td>Streaming text, thoughts</td><td>Memory</td><td>A thought is never logged. Partial text: see section 7</td></tr>
+<tr><td>Terminal screen state</td><td>Memory</td><td>Built again from the database (items 40, 45)</td></tr>
+<tr><td>Prompts, compaction tasks, hello text</td><td>Inside the executable</td><td>Static text. The head that was sent is in <code>head</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><strong>The inference gateway file.</strong> I read only its key names, not its values. It has two keys, both strings: <code>base_url</code> and <code>api_key</code>. The factory's bridge reads the same file (<code>proxy-settings.ts</code>): it removes a final <code>/v1</code> from the address, and it refuses an address with a user name, a query or a fragment. EverChat will read it the same way, and use one address and one key for both vendors' routes.</p>
+
+<p><strong>Backups and moving hosts.</strong> While the program runs, SQLite keeps two side files (<code>-wal</code>, <code>-shm</code>). A clean exit folds them back, which leaves one file. For a copy while it runs, a command can use <code>VACUUM INTO 'copy.db'</code>, which writes one whole, consistent file.</p>
+
+<p><strong>Dropped:</strong> imports (out of scope), acts, accounts, billing, sockets, workers, the web's and the phone's storage (items 9, 10, 14, 42, 47&ndash;58).</p>
+
+<h2 id="fit">11. Fit with the factory's seat runtime interface</h2>
+
+<p>I read ADR 0186, <code>runtime/types.ts</code> and <code>docs/references/seat-runtime.md</code> (requirements R1 to R34). The ADR makes sense, and it already expects EverChat in three places: the <code>continuous</code> session (one chat per seat, with no handoff), code mode (rule 4), and a hook as "any process, in any language". The table shows what each part needs from EverChat. Some points wait for <strong>the adapter's ADR</strong>. The adapter is the code in everturn that presents EverChat to the bridge as a <code>SeatRuntime</code> object. ADR 0186 requires a new everturn ADR for each new runtime, which records its checks against R1 to R34 and its capabilities. That ADR is the place to change the interface where EverChat needs it. <span class="tag fits">fits</span> means that the schema already holds it. <span class="tag build">to build</span> means work in EverChat, with no conflict. Nothing is left "to settle": the two points where the sides did not match are decided below.</p>
+
+<div class="wrap">
+<table>
+<thead><tr><th>The interface needs</th><th>EverChat's answer</th><th></th></tr></thead>
+<tbody>
+<tr><td>A full-screen terminal program in a PTY, one process, no prompts for permission, no first-run screens (R1, R5, R6)</td><td>The goal already. EverChat asks no permission</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Model and effort on the command line (R2)</td><td><code>launch.pick</code></td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>A config root named by a variable; a seat gets only its own (R3, rule 5)</td><td><code>EVERCHAT_HOME</code>: the database, the config file, the hooks file, the skills</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Exit on SIGTERM within 5 s (R7)</td><td>Each event is one transaction, so the program can stop at any point</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>A <code>continuous</code> session: the same session id at every launch, <code>startup</code> the first time and <code>resume</code> after; one record per launch (rule 3)</td><td><code>chat.uuid</code>; the first <code>launch</code> row is <code>startup</code>, each later one <code>resume</code></td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Model calls through the operator's proxy, from the environment (R11)</td><td>Section 10</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Turn start and turn end; an agent's events carry its id; a failed turn closes with its text (R17, the <code>SeatEvent</code> kinds)</td><td><code>turn</code>: <code>agent</code>, <code>status</code>, <code>why</code></td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Session end with a reason; idle at the prompt (R18, R19)</td><td><code>launch.why</code>; idle means that no <code>turn</code> and no <code>call</code> runs</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Token use per model call (R26)</td><td><code>usage</code>, sent as a <code>usage</code> event</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Each shell command as one call with its text and output; each program as a call of its own kind (rule 4, <code>transcript.toolCalls</code>)</td><td><code>call</code> with and without <code>parent</code></td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Background agents: a start with an id, and an end as completed, failed or killed (R32, R33)</td><td><code>agent</code>, and the status of its <code>turn</code></td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Transcripts kept for about ten years (R34)</td><td>The log is never deleted</td><td><span class="tag fits">fits</span></td></tr>
+<tr><td>Hooks as shell commands that are direct children, or events posted to the seat socket (R15, rule 6)</td><td>Section 9</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>Session-start text reaches the model, up to 9,500 characters per part, at every launch (R16)</td><td>It becomes a <code>note</code> message, so the memory compacts it like any other. If the text is the same as at the last launch, EverChat can skip it</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>A hook before each shell command that can refuse it; a hook after each program that can add text (R21, R22, rule 4)</td><td><code>call.status = 'denied'</code>; added text takes the same path as a message that the person sends while a turn runs</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>A skill started by a typed line, from <code>SKILL.md</code> files (R14, R29)</td><td>EverChat has no skills today. Files in the home, no table</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>A gate file that each command shell reads; a predictable shell (R23)</td><td>A variable names the file. No table</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>Shells are direct children of the runtime; the sandbox has no other way to start a process (R24, rule 4)</td><td>A condition on the code-mode design. <code>call.pgid</code> records each shell</td><td><span class="tag build">to build</span></td></tr>
+<tr><td>Instructions from <code>AGENTS.md</code> in the work directory (R28)</td><td>The old code reads the rules file again at every call. The new code must read it once per turn, into <code>head</code>, or each change breaks the cache in the middle of a turn</td><td><span class="tag build">to build</span></td></tr>
+<tr><td><strong>A JSONL transcript file</strong>, appended as it goes, that the bridge follows and its archive uploads (R25)</td><td>Decided: EverChat writes a JSONL file as an export. See below</td><td><span class="tag build">to build</span></td></tr>
+<tr><td><code>send</code> answers "accepted" when <strong>a root turn starts</strong> for the message (rule 2)</td><td>Decided: EverChat sends its own "accepted" event, and the adapter maps it. See below</td><td><span class="tag build">to build</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>The transcript: a JSONL export (decided)</h3>
+<p>The interface wants a file of JSON lines that the bridge can follow, and our state is a SQLite file. So EverChat also writes a JSONL file, as an export. The database stays the only state: EverChat never reads the file back, and a deleted file loses nothing.</p>
+<p><strong>The file is append only.</strong> A line is written once, after its transaction is on disk, and it never changes. The bridge needs this: it remembers a byte position in the file and reads only what comes after. The rule for what gets a line follows from section 2:</p>
+<ul>
+  <li>A row that <strong>never changes</strong> gets one line (a message, a model request's usage).</li>
+  <li>A row that <strong>changes once, when it closes</strong>, gets two lines: one at its start and one at its end (a launch, a turn, a call). A reader joins them by id. A call with a start line and no end line is still running, or was cut.</li>
+  <li>A row that <strong>changes often</strong>, or that is derived, gets no line.</li>
+</ul>
+<p><strong>It holds what happened, in full, and not the memory.</strong> The tree's nodes and the views are not in it.</p>
+<div class="wrap">
+<table>
+<thead><tr><th>In the file</th><th>From</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Each launch: its start and its end</td><td><code>launch</code>, <code>chat.uuid</code></td><td>The session record</td></tr>
+<tr><td>Each turn: its start and its end, with status and reason</td><td><code>turn</code></td><td>A failed turn must close, with its text</td></tr>
+<tr><td>Each message, in full, with its kind, its turn and its call</td><td><code>msg</code>, <code>agent_msg</code></td><td>The transcript itself. An agent's lines carry its name</td></tr>
+<tr><td>Each program and each function it called: its start (with the source or the command) and its end (with status and output)</td><td><code>call</code></td><td>The interface's tool calls (rule 4)</td></tr>
+<tr><td>Each model request's token use</td><td><code>usage</code></td><td>The interface's context use (R26). Compactions' use too, marked as such</td></tr>
+</tbody>
+</table>
+</div>
+<div class="wrap">
+<table>
+<thead><tr><th>Not in the file</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>The tree: leaves and levels (<code>node</code>)</td><td>Derived from the messages. A summary of old messages is written long after them, so it would be a line about the past. No reader needs it, and it would about double the file</td></tr>
+<tr><td>The views (<code>view</code>, <code>agent.view</code>)</td><td>They change often, and they are memory, not history</td></tr>
+<tr><td>Requests as sent (<code>turn_item</code>, <code>head</code>)</td><td>They repeat the view in each turn, and hold the vendor's own items (encrypted reasoning). They are for the restart, in the database</td></tr>
+<tr><td>Image bytes</td><td>A message's line has the image's name. The bytes are in the database</td></tr>
+<tr><td>The draft, the goal, diagnostics (<code>log</code>)</td><td>Not part of the conversation</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>One file per launch.</strong> Each launch writes its own file, named after its <code>launch</code> row. A file ends with its launch, so the factory's archive can call it done, and a person can delete old files with no loss. One file for the whole chat would never end and would grow as large as the chat. ADR 0186 assumes one file for a continuous chat ("each names the same transcript"), so the adapter's ADR must change that sentence.</p>
+<p><strong>After a crash</strong>, some rows can be in the database and not yet in the file. Each line carries its row's id, so the next start reads the end of the crashed launch's file, finds the last id of each kind, and adds what is missing there, before it starts its own file. Lines of one kind are always in id order.</p>
+<p class="muted">Section 12's five questions hold in the file too: each line has its time, its launch, its turn and its call.</p>
+
+<h3>What tells the factory that a typed line was accepted (decided)</h3>
+<p>For EverChat, a turn is one loop: from a first message until a step that calls no tool. For the bridge, a turn start is also the proof that the line it typed was taken: <code>send</code> answers "accepted" at the next turn start, and "refused" after a timeout. The two agree when a message comes to an idle chat. They differ in three cases:</p>
+<ul>
+  <li><strong>A message while a turn runs.</strong> It steers the running turn: the model reads it between two programs, as in the old code. No turn starts, so the bridge would answer "refused" for a line that was taken.</li>
+  <li><strong>A message too late for the running turn.</strong> It starts the next turn by itself when the running one ends. A turn starts, but later than the bridge's timeout may allow.</li>
+  <li><strong>A turn that continues after a restart.</strong> It starts with no message at all, right after the session start.</li>
+</ul>
+<p>Decided, with no change to the interface: EverChat has its own event "a message was accepted", sent when the message is in the log (at once, on Enter), and its own turn events. The adapter turns the accepted event and each turn start, also one that continues after a restart, into the bridge's turn start, with the turn's id. One check is left for the adapter's ADR: that the bridge takes a second turn start inside a running turn.</p>
+
+<h2 id="answers">12. Answers to the review questions</h2>
+
+<div class="card">
+<h3>The word in place of "unii": <code>asst</code> (decided)</h3>
+<p>The table stores the number 2, and the word is one row in <code>kind</code>. But the word matters, because the model reads it before each of its own messages (<code>asst: ...</code>), and the compactor writes it inside summaries. The old code says <code>ever</code>, which is an English word: a summary can read oddly, and a search also finds "every" and "never". <code>asst</code> is the standard short form of "assistant", so a person and a model both read it right with no definition.</p>
+<p>It has 4 letters on purpose. The prefix counts toward a node's 512 bytes (<code>Memory.show</code>), so <code>asst: </code> keeps the byte budgets of upstream's <code>unii: </code>: a message is its own leaf, with no request, up to 506 bytes of text. A longer word breaks nothing, but it sends a few more messages to the compactor. The new code uses <code>asst</code> from the start. The old code keeps <code>ever</code> until it moves to <code>ref/</code>, and the ported tests change only that word.</p>
+</div>
+
+<div class="card">
+<h3>Should <code>kind</code> be a number?</h3>
+<p>Yes, but not for the space. The word takes about 4 bytes more than the number, on rows of hundreds of bytes: under 1%. The real reason is growth. SQLite cannot change a <code>check (kind in (...))</code> list without a copy of the whole table. For <code>msg</code>, the table that grows forever, that copy is the one thing to avoid. With the small table, a new kind is one new row. Statuses on small tables stay words.</p>
+</div>
+
+<div class="card">
+<h3>All levels of <code>node</code> in one table, or a table per level?</h3>
+<p>One table. A table per level is a bad idea:</p>
+<ul>
+  <li>The set of tables would grow while the program runs. A migration cannot describe that, and each query needs a table name built at run time.</li>
+  <li>It gains nothing. With the key <code>(l, i)</code>, SQLite already keeps each level together on disk, in order of <code>i</code>.</li>
+  <li>A query across levels becomes impossible. The restart needs one: "the nodes not built whose two halves are".</li>
+</ul>
+<p>There are few levels: a million messages make 20. I measured three shapes of this one table, with 800,000 nodes of 200 to 512 bytes:</p>
+<div class="wrap">
+<table>
+<thead><tr><th>Shape</th><th>File</th><th>One random read</th><th>One read in a run at one level</th></tr></thead>
+<tbody>
+<tr><td>Key <code>(l, i)</code>, <code>without rowid</code> (this draft)</td><td>305 MB</td><td>9.0 µs</td><td>3.8 µs</td></tr>
+<tr><td>Key <code>(l, i)</code>, ordinary table</td><td>311 MB</td><td>8.7 µs</td><td>5.6 µs</td></tr>
+<tr><td>One integer key, the old code's <code>Memory.slot</code></td><td>326 MB</td><td>6.2 µs</td><td>5.2 µs</td></tr>
+</tbody>
+</table>
+</div>
+<p>All three are fast, and they differ by microseconds, next to requests that take seconds. So the draft keeps the plainest shape. <span class="muted">The reads used a 2 MB page cache and a warm disk cache. All 800,000 rows took 2.5 to 3.3 s to write, in batches, without <code>synchronous = full</code>.</span></p>
+</div>
+
+<div class="card">
+<h3>Keep the original image? Yes, all of them (decided)</h3>
+<p>The log is forever, and the scaled JPEG loses detail. A later model may read more pixels, and the agent could zoom into a part of the original, which is EverChat's own idea applied to images. The cost is space: a computer task can make a screenshot at each step, and a thousand screenshots of 2 MB are 2 GB a day. So the originals have their own table, <code>image_original</code> (section 4). They are out of the way of every read that a request makes, and they are the one table that can move to a second file. An image has a row there only when the original is not what was sent, so no byte is stored twice. As a last resort for space, the rows of very old images can be deleted, but only by a person's command (section 4).</p>
+</div>
+
+<div class="card">
+<h3>Is a database of terabytes still fine?</h3>
+<p>SQLite itself is fine. Its limit is about 17 TB with the default page size, and a lookup by key takes a few more page reads as the file grows, not many more. What gets slow is each operation that touches the whole file:</p>
+<ul>
+  <li>A backup copies every byte.</li>
+  <li>A migration that copies a large table needs hours and twice the disk space.</li>
+  <li>A full check (<code>pragma integrity_check</code>) reads everything.</li>
+</ul>
+<p>The schema guards against these: no migration needs a copy of <code>msg</code> (the <code>kind</code> table), and the large bytes are in their own tables (<code>image</code>, <code>image_original</code>), so the other tables stay small and fast to scan. Text alone will not come near a terabyte. If a seat logs 20 MB of text a day, a year is about 7 GB. Only images can reach a terabyte, and of those, the originals are the large part. If they ever grow too large, <code>image_original</code> can move to a second database file with no change to the other tables.</p>
+</div>
+
+<div class="card">
+<h3>Should <code>pick</code> be normalized?</h3>
+<p>Yes. It was on each turn as text, and on each <code>usage</code> row as four text columns, and there is about one <code>usage</code> row per message. It is now the table <code>pick</code>.</p>
+</div>
+
+<div class="card">
+<h3>Times on every row, and the five questions</h3>
+<p>Every row of data has <code>created</code>. I push back on one point: <code>updated</code> on a row that can never change. On <code>msg</code>, <code>node</code>, <code>usage</code> and the like, it would always equal <code>created</code>. It would take space, and it would suggest that the row can change. The draft says the opposite, and enforces it with triggers. Rows that do change have <code>updated</code> or <code>ended</code>.</p>
+<p>The five questions are answered by references, with no extra columns. For a message:</p>
+<div class="wrap">
+<table>
+<thead><tr><th>Question</th><th>Answer</th></tr></thead>
+<tbody>
+<tr><td>Who</td><td><code>kind</code>: the person, EverChat, a program, an agent, the program itself. For EverChat's own words, the model is <code>turn.pick</code></td></tr>
+<tr><td>What</td><td><code>text</code>, and its images</td></tr>
+<tr><td>When</td><td><code>created</code></td></tr>
+<tr><td>Where</td><td><code>launch</code>: host, work directory, process, program version</td></tr>
+<tr><td>Why</td><td><code>turn</code> (the turn that wrote it) and <code>call</code> (the program whose result it is). The turn points back to the message that started it</td></tr>
+</tbody>
+</table>
+</div>
+<p>The same holds for a summary (<code>usage</code> names the model that made it), a call (its turn, its parent, its launch) and a turn (its first message, its pick, its launch).</p>
+</div>
+
+<div class="card">
+<h3>Several independent chats in one database?</h3>
+<p>No. One database per chat, and one home per database, as you suggest with the variable. It also fits the factory, which gives each seat its own config root. Reasons:</p>
+<ul>
+  <li><strong>The spirit of the original.</strong> One chat that never ends, per person. The old server kept many people's chats, but each in its own files.</li>
+  <li><strong>One writer.</strong> SQLite allows one writer per file. Several processes on one file would wait on each other at every commit.</li>
+  <li><strong>Backup, move, delete.</strong> One chat is one file. To remove a seat is to remove its home.</li>
+  <li><strong>Simple keys.</strong> With several chats, every key needs a chat column, and node <code>(l, i)</code> becomes <code>(chat, l, i)</code>.</li>
+  <li><strong>Damage stays small.</strong> A broken file breaks one chat.</li>
+</ul>
+<p>A program that wants to read across chats can open several files in one connection (<code>ATTACH</code>).</p>
+</div>
+
+<div class="card">
+<h3>Could a subagent need its own process?</h3>
+<p>Not for speed. An agent waits on model calls and on shells, and those already run outside the program's one thread. A separate process would also break two things: the one-writer rule, and the factory's rule that each shell is a direct child of the runtime. So subagents stay in the process. If one ever needs its own process, it must not open the database: it sends its events to the owner, which writes them. And an agent that must be truly independent is a second EverChat with its own home, which is what a seat is.</p>
+</div>
+
+<h2 id="questions">13. Open questions</h2>
+
+<p>None. Every question of this draft is decided. The points left for the adapter's ADR are in section 11.</p>
+
+</main>
+</body>
+</html>
