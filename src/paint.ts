@@ -148,9 +148,6 @@ export const LOOKS: Readonly<Record<Exclude<Kind, "asst" | "work">, Look>> = {
   note: { mark: dim(MARKS.note), ink: (text) => dim(italic(text)) }
 }
 
-// A program while the model writes it: its last rows.
-export const WRITING: Look = { mark: dim(MARKS.tool), ink: dim, most: MOST, keep: "tail" }
-
 // A thought while the model thinks it: its last rows.
 export const THOUGHT: Look = { mark: dim("  "), ink: (text) => dim(italic(text)), most: 6, keep: "tail" }
 

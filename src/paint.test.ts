@@ -3,7 +3,7 @@
 
 import { expect, test } from "bun:test"
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui"
-import { clean, LOOKS, message, MOST, Row, THOUGHT, TOLD, Wrapped, WRITING, written } from "./paint.ts"
+import { clean, LOOKS, message, MOST, Row, THOUGHT, TOLD, Wrapped, written } from "./paint.ts"
 
 // The rows with no ink: what a person reads.
 const read = (rows: ReadonlyArray<string>) => rows.map((row) => stripTerminalSequences(row))
@@ -67,15 +67,13 @@ test("a long program or result keeps its first rows and its last two, and says h
   expect(read(new Wrapped("x".repeat(400), LOOKS.echo).render(12)).length).toBe(MOST)
 })
 
-test("what streams keeps its last rows", () => {
-  const rows = read(new Wrapped(numbered(30), WRITING).render(40))
-  expect(rows.length).toBe(MOST)
-  expect(rows[0]).toBe("▸ … 19 rows above")
-  expect(rows.slice(1, 3)).toEqual(["  row 19", "  row 20"])
-  expect(rows[MOST - 1]).toBe("  row 29")
+test("a thought keeps its last rows", () => {
   const thought = read(new Wrapped(numbered(30), THOUGHT).render(40))
   expect(thought.length).toBe(6)
-  expect(thought[5]).toBe("  row 29")
+  expect(thought[0]).toBe("  … 25 rows above")
+  expect(thought.slice(1)).toEqual(["  row 25", "  row 26", "  row 27", "  row 28", "  row 29"])
+  expect(read(new Wrapped(numbered(6), THOUGHT).render(40)).length).toBe(6)
+  expect(read(new Wrapped(numbered(6), THOUGHT).render(40))[0]).toBe("  row 0")
 })
 
 test("each kind has its own look, and a person's or a program's text is never read as markdown", () => {
