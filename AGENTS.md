@@ -52,7 +52,11 @@ The new code:
 - `src/x.test.ts`: the tests of one module sit next to it (`x.ts`).
 - `tests/`: tests that cover many modules at once, or that need a second
   process. `tests/help.ts` holds what the tests share, and `tests/child.ts`
-  is the program that such a test starts.
+  is the program that such a test starts. `tests/screen.ts` is a terminal
+  in memory, and `tests/pty.ts` runs a process in a real pseudo-terminal
+  (see "The terminal").
+- `src/main.ts`: the program's entry. `just run` starts it from its source,
+  and `just build` makes the executable `everchat`.
 
 Run `just test` and `just check` (the type check) before you say that a
 change is done.
@@ -181,7 +185,41 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
   from source does not: the worker as a second entrypoint of the build
   (a file that imports `@earendil-works/pi-codemode/worker`, given to the
   sandbox as `workerUrl`), and the QuickJS file (`quickjs.wasm`) inside
-  the executable (given as `wasm`). This is not built yet.
+  the executable (given as `wasm`). This is not built yet: in the
+  executable that `just build` makes, the terminal works, and every
+  program fails with "Failed to load QuickJS".
+
+### The terminal
+
+The terminal is the person's interface, and the one that the factory uses.
+How it is built (`src/terminal.ts`, `src/paint.ts`, `src/main.ts`):
+
+- The library `pi-tui` draws the screen and reads the keys: the input with
+  its editing keys, the markdown, and a renderer that writes only the rows
+  that changed. Our code says what is on the screen and what a key does.
+- It draws on the terminal's main screen, not on the alternate one. So the
+  messages are in the terminal's own scrollback, and the terminal's scroll,
+  select and copy work on them.
+- The log is the truth of what is on the screen. The turn loop's events say
+  when a message entered the log, and carry what streams. The terminal
+  shows messages in the order of their ids, and reads from the store what
+  an event skipped.
+- No control character of a text reaches the terminal (`clean` in
+  `src/paint.ts`). Use it for every text that you add to the screen.
+- A row that a component gives must not be wider than the screen: `pi-tui`
+  fails on such a row. `Wrapped` and `Row` in `src/paint.ts` keep to that.
+
+How to test it:
+
+- `tests/screen.ts` is a terminal in memory (xterm.js with no window). A
+  test gives it to the terminal's layer, types with `type`, and reads the
+  rows that a person would see. Use it for what the screen shows and what
+  a key does (`tests/terminal.test.ts`).
+- `tests/pty.ts` runs the whole program as a process in a real
+  pseudo-terminal, against a fake vendor on this machine
+  (`tests/main.test.ts`). Use it for the launch, the signals, and the end
+  of the process. `EVERCHAT_BIN=<file> just test tests/main.test.ts` runs
+  the same tests on an executable.
 
 ### One system prompt for every kind of request
 
@@ -226,8 +264,9 @@ take control that the memory needs:
 
 - `pi-codemode` (from the [pi libraries](https://github.com/earendil-works/pi),
   `@earendil-works/pi-*` on npm) for code mode. It does not depend on `pi-ai`.
-- Other pi packages where they fit (for example `pi-mcp` or `pi-tui`). Check
-  each one against our needs before you adopt it.
+- `pi-tui` for the terminal's screen and keys (see "The terminal").
+- Other pi packages where they fit (for example `pi-mcp`). Check each one
+  against our needs before you adopt it.
 
 Keep what is EverChat's own idea: the memory (the log, the tree of summaries,
 and the view that each request shows the model), and the prompt-cache rule in
@@ -362,6 +401,8 @@ Write the new code with Effect. In particular:
   other libraries, where they fit.
 - Do not write to stdout or stderr (`console.log`, `process.stderr`).
   EverChat is one process in a terminal, and such a line breaks the screen.
+  The one module that may is `src/main.ts`, and only when the screen is not
+  up: for the usage, and for the reason why the program could not start.
   To say something about the program's own work, log it with Effect
   (`Effect.logWarning`, `Effect.logError`), with the module's name as the
   annotation `source`. The logger writes it to the table `log`

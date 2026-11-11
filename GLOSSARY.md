@@ -139,6 +139,16 @@ instead.
 | export | noun | A copy of data from the database into a file, for other programs and for people. An export is not state: EverChat never reads it back. |
 | transcript | noun | The export of what happened in a chat: launches, turns, messages, calls, and usage. It is JSONL (one JSON value per line), one file per launch, and append only. It does not hold the tree or the views. |
 
+## The terminal
+
+| Term | Part of speech | Meaning |
+| --- | --- | --- |
+| terminal | noun | The person's interface to the chat: the screen that shows it, and the keys. It is one process in a PTY. Also the part of the program that draws it (`src/terminal.ts`). |
+| row | noun | One row of the screen. Use this word for the screen, and keep "line" for a node as the model reads it. |
+| input | noun | The box at the bottom of the terminal where the person types. Its text is the draft until it is sent. |
+| status row | noun | The last row of the terminal. It says what EverChat does (`idle`, or the turn that runs), and then the pick. |
+| slash command | noun | What the person sends when its first word is a slash and letters only, for example `/help`. It tells the program what to do. It is not a message: it does not enter the log, and the model never reads it. |
+
 ## The factory
 
 | Term | Part of speech | Meaning |
@@ -182,3 +192,6 @@ instead.
 | worker, sub-agent | agent, subagent | |
 | background shell | (none in version 1) | Background work is an agent. |
 | user (for the human) | person | `user` is the kind of the person's messages. |
+| transcript (for the messages on the screen) | the messages | A transcript is an export, in a file. |
+| line (for a row of the screen) | row | A line is a node as the model reads it. A line of a text file is still a line. |
+| device (for the terminal that the program draws on) | terminal | A device is a computer on which functions run. |
