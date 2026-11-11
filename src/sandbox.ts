@@ -29,9 +29,22 @@
 // not wait for it: a long built-in operation can keep the thread busy.
 // The program's result does not wait for the thread, and the thread can
 // do nothing more, because every function call goes through this module.
+//
+// The two files of the engine
+//
+// The library looks for its worker thread's program and for the QuickJS
+// file in `node_modules`. The executable has no `node_modules`. So this
+// module names both itself, in a way that holds in a run from source and
+// in the executable:
+//
+// - QUICKJS: the QuickJS file, imported as a file. The build puts it into
+//   the executable, and the import gives its path in there.
+// - WORKER: our own worker.ts, next to this file. It is the build's second
+//   entrypoint, and worker.ts says why.
 
-import { CodemodeSandbox, type CodemodeResult } from "@earendil-works/pi-codemode"
+import { CodemodeSandbox, type CodemodeResult, loadQuickJSWasm } from "@earendil-works/pi-codemode"
 import { Context, Effect, FiberSet, Layer } from "effect"
+import QUICKJS from "quickjs-wasi/quickjs.wasm" with { type: "file" }
 import { FunctionError, Functions } from "./functions.ts"
 import { capped, HARD } from "./limit.ts"
 import { Store } from "./store.ts"
@@ -45,6 +58,13 @@ export const MEMORY = 512 * 1024 * 1024
 // The compute limit: the most time that a program may run with no function
 // at work.
 export const COMPUTE = 60_000
+
+// The program of the worker thread. In the executable, every module's
+// address is the executable's own, and Bun finds an entrypoint of the build
+// by its path from the first entrypoint's directory. So worker.ts must
+// stay next to main.ts. (The library's own default finds the same file in
+// the executable today, but only because of that file's name.)
+const WORKER = new URL("./worker.ts", import.meta.url)
 
 // What the result of a function says when it was stopped.
 export const STOPPED = "The function was stopped before it ended. It may or may not have finished."
@@ -161,6 +181,9 @@ export class Sandbox extends Context.Service<Sandbox, {
           const vm = new CodemodeSandbox({
             timeoutMs: Number.POSITIVE_INFINITY,
             memoryLimitBytes: memory,
+            // Read and compiled once: the library keeps it by its path.
+            wasm: loadQuickJSWasm(QUICKJS),
+            workerUrl: WORKER,
             globals: functions.names.map((name) => ({
               name,
               spread: true,

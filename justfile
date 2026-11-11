@@ -15,6 +15,7 @@ check:
 run *args:
     bun src/main.ts {{args}}
 
-# Build EverChat as one executable, `everchat`.
+# Build EverChat as one executable, `everchat`. The sandbox's worker thread
+# is the second entrypoint (src/worker.ts says why).
 build:
-    bun build --compile src/main.ts --outfile everchat
+    bun build --compile src/main.ts src/worker.ts --outfile everchat
