@@ -605,7 +605,8 @@ from msg m join kind k on k.id = m.kind;</code></pre>
 <tbody>
 <tr><td>The program starts</td><td><code>launch</code> (close a crashed one, add ours)</td><td>session start</td></tr>
 <tr><td>The program ends</td><td><code>launch</code> (<code>ended</code>, <code>why</code>)</td><td>session end</td></tr>
-<tr><td>The person sends a message, and no turn runs</td><td><code>turn</code> (<code>running</code>), <code>msg</code> (all its pages), <code>msg_image</code>, <code>image</code> and <code>image_original</code>, <code>head</code> and <code>pick</code> (if new), <code>turn_item</code> 0, clear <code>chat.draft</code></td><td>turn start</td></tr>
+<tr><td>The person sends a message, and no turn runs</td><td><code>turn</code> (<code>running</code>), <code>msg</code> (all its pages), <code>msg_image</code>, <code>image</code> and <code>image_original</code>, <code>head</code> and <code>pick</code> (if new), clear <code>chat.draft</code></td><td>turn start</td></tr>
+<tr><td>The turn's first request is built</td><td><code>turn_item</code> 0, <code>chat.taken</code>. This is its own event, after the one above: the first request holds the view, and the turn must first wait until every message before its own has its leaf, which can need compactions. A turn that runs with no item is one that a stop cut in between. The next launch builds its first request</td><td></td></tr>
 <tr><td>The person sends a message while a turn runs</td><td><code>msg</code> (all its pages). The turn takes it after the step's results: then a <code>turn_item</code> (<code>user</code>) and <code>chat.taken</code></td><td></td></tr>
 <tr><td>A model step ends</td><td><code>turn_item</code> (<code>turn</code>: the vendor's output), <code>msg</code> for its replies, <code>usage</code></td><td></td></tr>
 <tr><td>A program starts</td><td><code>call</code> (<code>running</code>, no parent)</td><td></td></tr>
