@@ -98,6 +98,7 @@ instead.
 | function | noun | One thing that a program can call: `shell`, `read`, `write`, `edit`, `zoom`, `date`, `result`, and later others. A function runs on EverChat's side, outside the sandbox. |
 | call | noun | One run of a program, or one run of a function inside a program. Table `call`. A call is recorded when it starts, not when it ends. |
 | sandbox | noun | The closed place where a program runs. In there, a program has no files, no network, and no timers. It can reach the world only through functions, and it can start a process only through the `shell` function. |
+| worker thread | noun | The thread in which the sandbox runs one program. Each program has its own. It is not an agent. |
 | result | noun | What a call gave back. The database keeps it whole. |
 | output limit | noun | The most text of a program's result that the model is shown: 30,000 characters by default. A longer result is shortened: the model gets its head and its tail, and the whole text is put in a file. A function gives its whole result to its program: the limit is not on that. |
 | hard limit | noun | The most text that a call may produce: 64 MiB. Past it, the command is stopped. |
@@ -139,15 +140,17 @@ instead.
 | export | noun | A copy of data from the database into a file, for other programs and for people. An export is not state: EverChat never reads it back. |
 | transcript | noun | The export of what happened in a chat: launches, turns, messages, calls, and usage. It is JSONL (one JSON value per line), one file per launch, and append only. It does not hold the tree or the views. |
 
-## The terminal
+## The terminal and pipe mode
 
 | Term | Part of speech | Meaning |
 | --- | --- | --- |
+| interface | noun | The part of the program through which the person and the chat meet. There are two: the terminal, and pipe mode. One launch has one of them. |
 | terminal | noun | The person's interface to the chat: the screen that shows it, and the keys. It is one process in a PTY. Also the part of the program that draws it (`src/terminal.ts`). |
+| pipe mode | noun | The interface with no terminal. The program works this way when its standard input or its standard output is not a terminal. Each line of the standard input is a message, and the messages go one after the other. Each message that enters the log goes to the standard output as text. It has no screen, no keys, and no slash commands. |
 | row | noun | One row of the screen. Use this word for the screen, and keep "line" for a node as the model reads it. |
 | input | noun | The box at the bottom of the terminal where the person types. Its text is the draft until it is sent. |
 | status row | noun | The last row of the terminal. It says what EverChat does (`idle`, or the turn that runs), and then the pick. |
-| slash command | noun | What the person sends when its first word is a slash and letters only, for example `/help`. It tells the program what to do. It is not a message: it does not enter the log, and the model never reads it. |
+| slash command | noun | What the person sends in the terminal when its first word is a slash and letters only, for example `/help`. It tells the program what to do. It is not a message: it does not enter the log, and the model never reads it. |
 
 ## The factory
 
@@ -189,9 +192,10 @@ instead.
 | compact (a chat) | build a node | Nothing in EverChat compacts or replaces the chat. A compaction builds one node. |
 | truncate, cut (for a result) | shorten | "Cut" is for a turn or a call that a stop interrupted. |
 | resume | continue | One word for "go on after a stop". |
-| worker, sub-agent | agent, subagent | |
+| worker, sub-agent | agent, subagent | A worker thread is still a worker thread: the sandbox's, and no agent. |
 | background shell | (none in version 1) | Background work is an agent. |
 | user (for the human) | person | `user` is the kind of the person's messages. |
 | transcript (for the messages on the screen) | the messages | A transcript is an export, in a file. |
 | line (for a row of the screen) | row | A line is a node as the model reads it. A line of a text file is still a line. |
 | device (for the terminal that the program draws on) | terminal | A device is a computer on which functions run. |
+| headless mode, print mode, batch mode | pipe mode | One name for the interface with no terminal. A batch is a round of merges. |

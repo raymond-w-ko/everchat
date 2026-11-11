@@ -53,10 +53,12 @@ The new code:
 - `tests/`: tests that cover many modules at once, or that need a second
   process. `tests/help.ts` holds what the tests share, and `tests/child.ts`
   is the program that such a test starts. `tests/screen.ts` is a terminal
-  in memory, and `tests/pty.ts` runs a process in a real pseudo-terminal
-  (see "The terminal").
+  in memory, `tests/pty.ts` runs a process in a real pseudo-terminal, and
+  `tests/vendor.ts` is a fake vendor for a whole process (see "The
+  terminal and pipe mode").
 - `src/main.ts`: the program's entry. `just run` starts it from its source,
-  and `just build` makes the executable `everchat`.
+  and `just build` makes the executable `everchat`. `just test-build`
+  builds it and runs the tests of the whole program on it.
 
 Run `just test` and `just check` (the type check) before you say that a
 change is done.
@@ -181,18 +183,28 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
 - A stop of a program is a request: the library asks the worker thread to
   end and does not wait for it. So the program's exit must not wait for
   worker threads.
-- The executable (`bun build --compile`) will need two things that a run
-  from source does not: the worker as a second entrypoint of the build
-  (a file that imports `@earendil-works/pi-codemode/worker`, given to the
-  sandbox as `workerUrl`), and the QuickJS file (`quickjs.wasm`) inside
-  the executable (given as `wasm`). This is not built yet: in the
-  executable that `just build` makes, the terminal works, and every
-  program fails with "Failed to load QuickJS".
+- The executable (`bun build --compile`) has no `node_modules`, where the
+  library looks for its two files. So the sandbox names both itself, in a
+  way that holds from source and in the executable: the worker thread's
+  program is our own `src/worker.ts`, the second entrypoint of the build,
+  and the QuickJS file is imported as a file, so the build puts it into
+  the executable. `src/worker.ts` must stay next to `src/main.ts`.
+- `quickjs-wasi` is in `package.json` for that import. Its version must be
+  the one that `pi-codemode` names, and a test checks it. Change both
+  together.
+- After a change to the sandbox, the build, or the dependencies, run
+  `just test-build`: `just test` runs from source, and does not show a
+  fault that only the executable has.
 
-### The terminal
+### The terminal and pipe mode
+
+The program has two interfaces, and one launch has one of them
+(`src/main.ts` chooses): the terminal, when the standard input and the
+standard output are both a terminal, and pipe mode, when one of them is
+not.
 
 The terminal is the person's interface, and the one that the factory uses.
-How it is built (`src/terminal.ts`, `src/paint.ts`, `src/main.ts`):
+How it is built (`src/terminal.ts`, `src/paint.ts`):
 
 - The library `pi-tui` draws the screen and reads the keys: the input with
   its editing keys, the markdown, and a renderer that writes only the rows
@@ -200,26 +212,44 @@ How it is built (`src/terminal.ts`, `src/paint.ts`, `src/main.ts`):
 - It draws on the terminal's main screen, not on the alternate one. So the
   messages are in the terminal's own scrollback, and the terminal's scroll,
   select and copy work on them.
-- The log is the truth of what is on the screen. The turn loop's events say
-  when a message entered the log, and carry what streams. The terminal
-  shows messages in the order of their ids, and reads from the store what
-  an event skipped.
-- No control character of a text reaches the terminal (`clean` in
-  `src/paint.ts`). Use it for every text that you add to the screen.
 - A row that a component gives must not be wider than the screen: `pi-tui`
   fails on such a row. `Wrapped` and `Row` in `src/paint.ts` keep to that.
 
-How to test it:
+Pipe mode is for scripts and for tests (`src/pipe.ts`): each line of the
+standard input is a message, one after the other, and each message that
+enters the log goes to the standard output as text. It is the same chat
+with the same parts, so it is the cheap way to run the whole program: no
+pseudo-terminal and no terminal emulator.
 
+What holds for both:
+
+- The log is the truth of what an interface shows. The turn loop's events
+  say when a message entered the log, and carry what streams. An interface
+  subscribes first, then reads the log, and shows each message once, in
+  the order of the ids (`src/follow.ts`). Use that module in a new
+  interface, and do not show a message from an event alone.
+- No control character of a text reaches the terminal or the standard
+  output (`clean` in `src/paint.ts`). Use it for every text that you show.
+
+How to test them:
+
+- `tests/pipe.test.ts` runs the whole program in pipe mode, as a process
+  with pipes, against a fake vendor on this machine (`tests/vendor.ts`).
+  Use it first for anything that does not need the screen or the keys: a
+  turn, a program, a restart, a signal, the arguments, the exit code.
 - `tests/screen.ts` is a terminal in memory (xterm.js with no window). A
   test gives it to the terminal's layer, types with `type`, and reads the
   rows that a person would see. Use it for what the screen shows and what
   a key does (`tests/terminal.test.ts`).
 - `tests/pty.ts` runs the whole program as a process in a real
-  pseudo-terminal, against a fake vendor on this machine
-  (`tests/main.test.ts`). Use it for the launch, the signals, and the end
-  of the process. `EVERCHAT_BIN=<file> just test tests/main.test.ts` runs
-  the same tests on an executable.
+  pseudo-terminal (`tests/main.test.ts`). Use it for what only a real
+  terminal shows: the launch of the screen, the signals, a closed window.
+- `just test-build` runs the two whole-program files on the executable
+  (`EVERCHAT_BIN=<file>` names the program to start).
+
+To run the program by hand against no real model, start a fake vendor and
+give its address as `EVERCHAT_GATEWAY_URL`, as these tests do. `just run`
+with the real address sends real requests.
 
 ### One system prompt for every kind of request
 
@@ -264,7 +294,8 @@ take control that the memory needs:
 
 - `pi-codemode` (from the [pi libraries](https://github.com/earendil-works/pi),
   `@earendil-works/pi-*` on npm) for code mode. It does not depend on `pi-ai`.
-- `pi-tui` for the terminal's screen and keys (see "The terminal").
+- `pi-tui` for the terminal's screen and keys (see "The terminal and pipe
+  mode").
 - Other pi packages where they fit (for example `pi-mcp`). Check each one
   against our needs before you adopt it.
 
@@ -399,10 +430,18 @@ Write the new code with Effect. In particular:
   database, running requests, and interrupts, not hand-written versions.
 - Use Effect's own modules (for example `effect/sql`, `effect/cli`) before
   other libraries, where they fit.
+- The arguments are read with `effect/cli`, and the standard input, the
+  standard output, the file system and the paths in `src/main.ts` and
+  `src/pipe.ts` are Effect's services (`Stdio`, `FileSystem`, `Path`),
+  from `@effect/platform-bun`. Import one module of that package
+  (`@effect/platform-bun/BunServices`), not its index: the index loads all
+  of it, and each start pays for that.
 - Do not write to stdout or stderr (`console.log`, `process.stderr`).
   EverChat is one process in a terminal, and such a line breaks the screen.
-  The one module that may is `src/main.ts`, and only when the screen is not
-  up: for the usage, and for the reason why the program could not start.
+  Two modules may: `src/main.ts`, and only when the screen is not up (the
+  usage and what else `effect/cli` prints, and the reason why the program
+  could not start), and `src/pipe.ts`, whose output is the standard
+  output.
   To say something about the program's own work, log it with Effect
   (`Effect.logWarning`, `Effect.logError`), with the module's name as the
   annotation `source`. The logger writes it to the table `log`
