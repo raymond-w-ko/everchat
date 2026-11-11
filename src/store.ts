@@ -165,6 +165,58 @@ export interface NewUsage {
   readonly expected?: number | null | undefined
 }
 
+// One turn, with its pick and its head as text.
+export interface Turn {
+  readonly id: number
+  readonly agent: number | null
+  readonly status: "running" | "done" | "stopped" | "failed"
+  readonly pick: Pick
+  readonly head: string // JSON: the system prompt and the tool list, as sent
+  readonly firstMsg: number
+  readonly launch: number
+  readonly created: number
+}
+
+export interface NewTurn {
+  readonly agent?: number | null | undefined
+  readonly pick: Pick
+  readonly head: string
+  readonly firstMsg: number
+}
+
+export interface TurnItem {
+  readonly n: number
+  readonly kind: "user" | "turn" | "back"
+  readonly body: string
+}
+
+export interface NewCall {
+  readonly turn: number
+  readonly parent?: number | null | undefined
+  readonly vendorId?: string | null | undefined // the vendor's id of the call: only for a program
+  readonly fn: string
+  readonly input: string
+}
+
+// How a call ended. `size`: the bytes of the whole result. `shown`: the
+// bytes that its reader got.
+export interface CallEnd {
+  readonly status: "done" | "failed" | "denied" | "cut"
+  readonly output: string
+  readonly shown?: number | undefined
+}
+
+export interface Call {
+  readonly id: number
+  readonly turn: number
+  readonly parent: number | null
+  readonly vendorId: string | null
+  readonly fn: string
+  readonly input: string
+  readonly output: string | null
+  readonly status: "running" | "done" | "failed" | "denied" | "cut"
+}
+
 // Errors
 // ------
 
@@ -238,6 +290,37 @@ const ImageRow = Schema.Struct({
   bytes: Schema.Uint8Array
 })
 
+const TurnRow = Schema.Struct({
+  id: Schema.Int,
+  agent: Schema.NullOr(Schema.Int),
+  status: Schema.Literals(["running", "done", "stopped", "failed"]),
+  ...Pick.fields,
+  head: Schema.String,
+  firstMsg: Schema.Int,
+  launch: Schema.Int,
+  created: Schema.Int
+})
+
+const TurnItemRow = Schema.Struct({
+  n: Schema.Int,
+  kind: Schema.Literals(["user", "turn", "back"]),
+  body: Schema.String
+})
+
+const CallRow = Schema.Struct({
+  id: Schema.Int,
+  turn: Schema.Int,
+  parent: Schema.NullOr(Schema.Int),
+  vendorId: Schema.NullOr(Schema.String),
+  fn: Schema.String,
+  input: Schema.String,
+  output: Schema.NullOr(Schema.String),
+  status: Schema.Literals(["running", "done", "failed", "denied", "cut"])
+})
+
+const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow))
+const decodeTurnItems = Schema.decodeUnknownEffect(Schema.Array(TurnItemRow))
+const decodeCalls = Schema.decodeUnknownEffect(Schema.Array(CallRow))
 const decodeMessages = Schema.decodeUnknownEffect(Schema.Array(MessageRow))
 const decodeNodes = Schema.decodeUnknownEffect(Schema.Array(Node))
 const decodeViews = Schema.decodeUnknownEffect(Schema.Array(ViewRow))
@@ -295,6 +378,26 @@ export class Store extends Context.Service<Store, {
 
   // The usage of one request.
   addUsage(usage: NewUsage): Effect.Effect<void, StoreError>
+
+  // The messages of the given kinds after message `after`, in order.
+  messagesAfter(after: number, kinds: ReadonlyArray<Kind>): Effect.Effect<Array<Message>, StoreError>
+
+  // Turns. A turn has one pick and one head from its start to its end.
+  // `endTurn` closes a turn that runs; a turn that has ended stays as it is.
+  startTurn(turn: NewTurn): Effect.Effect<Turn, StoreError>
+  endTurn(id: number, status: "done" | "stopped" | "failed", why?: string | null): Effect.Effect<void, StoreError>
+  runningTurns(agent: number | null): Effect.Effect<Array<Turn>, StoreError>
+
+  // A turn's request, item by item, as JSON. `addTurnItem` gives the next
+  // number of the turn.
+  addTurnItem(turn: number, kind: "user" | "turn" | "back", body: string): Effect.Effect<number, StoreError>
+  turnItems(turn: number): Effect.Effect<Array<TurnItem>, StoreError>
+
+  // Calls: a program that the model ran (no parent), or a function that a
+  // program called. A call is written when it starts.
+  startCall(call: NewCall): Effect.Effect<number, StoreError>
+  endCall(id: number, end: CallEnd): Effect.Effect<void, StoreError>
+  calls(turn: number): Effect.Effect<Array<Call>, StoreError>
 }>()("everchat/store/Store") {
   // The store over the `SqlClient` in the context.
   static readonly layerNoDatabase = (options: Options) => Layer.effect(Store, make(options))
@@ -598,6 +701,100 @@ const make = Effect.fnUntraced(function*(options: Options) {
     }))
   }, failed("addUsage"))
 
+  const messagesAfter = Effect.fn("Store.messagesAfter")(function*(after: number, kinds: ReadonlyArray<Kind>) {
+    const rows = yield* sql`
+      select m.i, k.name as kind, m.text, m.size, m.more, m.line, m.turn, m.call, m.launch, m.created
+      from msg m join kind k on k.id = m.kind
+      where m.i > ${after} and ${sql.in("m.kind", kinds.map((kind) => KINDS[kind]))}
+      order by m.i`
+    return (yield* decodeMessages(rows)).map((row): Message => ({ ...row, more: row.more === 1 }))
+  }, failed("messagesAfter"))
+
+  // Turns
+  // -----
+
+  const turnRows = (where: string, params: ReadonlyArray<number>) =>
+    Effect.gen(function*() {
+      const rows = yield* sql.unsafe(
+        `select t.id, t.agent, t.status, p.vendor, p.model, p.effort, p.speed, h.body as head,
+                t.first_msg as firstMsg, t.launch, t.created
+         from turn t join pick p on p.id = t.pick join head h on h.id = t.head
+         where ${where} order by t.id`,
+        params
+      )
+      return (yield* decodeTurns(rows)).map(({ effort, model, speed, vendor, ...rest }): Turn => ({ ...rest, pick: { vendor, model, effort, speed } }))
+    })
+
+  const startTurn = Effect.fn("Store.startTurn")(function*(turn: NewTurn) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const pick = yield* pickId(turn.pick)
+      const head = yield* putHead(turn.head)
+      const row = yield* only(
+        yield* sql<{ id: number }>`insert into turn ${
+          sql.insert({ agent: turn.agent ?? null, status: "running", pick, head, first_msg: turn.firstMsg, launch: launch.id, created: yield* now })
+        } returning id`
+      )
+      return yield* only(yield* turnRows("t.id = ?", [row.id]))
+    }))
+  }, failed("startTurn"))
+
+  const endTurn = Effect.fn("Store.endTurn")(function*(id: number, status: "done" | "stopped" | "failed", why: string | null = null) {
+    yield* sql`
+      update turn set status = ${status}, ended = ${yield* now}, why = ${why === null ? null : why.toWellFormed()}
+      where id = ${id} and status = 'running'`
+  }, failed("endTurn"))
+
+  const runningTurns = Effect.fn("Store.runningTurns")(function*(agent: number | null) {
+    return yield* (agent === null ? turnRows("t.status = 'running' and t.agent is null", []) : turnRows("t.status = 'running' and t.agent = ?", [agent]))
+  }, failed("runningTurns"))
+
+  const addTurnItem = Effect.fn("Store.addTurnItem")(function*(turn: number, kind: "user" | "turn" | "back", body: string) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const row = yield* only(yield* sql<{ n: number }>`select coalesce(max(n), -1) + 1 as n from turn_item where turn = ${turn}`)
+      yield* sql`insert into turn_item ${sql.insert({ turn, n: row.n, kind, body: body.toWellFormed(), created: yield* now })}`
+      return row.n
+    }))
+  }, failed("addTurnItem"))
+
+  const turnItems = Effect.fn("Store.turnItems")(function*(turn: number) {
+    return [...(yield* decodeTurnItems(yield* sql`select n, kind, body from turn_item where turn = ${turn} order by n`))]
+  }, failed("turnItems"))
+
+  // Calls
+  // -----
+
+  const startCall = Effect.fn("Store.startCall")(function*(call: NewCall) {
+    const row = yield* only(
+      yield* sql<{ id: number }>`insert into call ${
+        sql.insert({
+          turn: call.turn,
+          parent: call.parent ?? null,
+          vendor_id: call.vendorId ?? null,
+          fn: call.fn,
+          input: call.input.toWellFormed(),
+          status: "running",
+          launch: launch.id,
+          created: yield* now
+        })
+      } returning id`
+    )
+    return row.id
+  }, failed("startCall"))
+
+  const endCall = Effect.fn("Store.endCall")(function*(id: number, end: CallEnd) {
+    const output = end.output.toWellFormed()
+    const size = bytes(output)
+    yield* sql`
+      update call set status = ${end.status}, output = ${output}, size = ${size}, shown = ${end.shown ?? size}, ended = ${yield* now}
+      where id = ${id} and status = 'running'`
+  }, failed("endCall"))
+
+  const calls = Effect.fn("Store.calls")(function*(turn: number) {
+    return [...(yield* decodeCalls(
+      yield* sql`select id, turn, parent, vendor_id as vendorId, fn, input, output, status from call where turn = ${turn} order by id`
+    ))]
+  }, failed("calls"))
+
   const transaction = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | StoreError, R> =>
     Effect.mapError(
       sql.withTransaction(effect),
@@ -626,6 +823,15 @@ const make = Effect.fnUntraced(function*(options: Options) {
     image,
     putHead,
     head,
-    addUsage
+    addUsage,
+    messagesAfter,
+    startTurn,
+    endTurn,
+    runningTurns,
+    addTurnItem,
+    turnItems,
+    startCall,
+    endCall,
+    calls
   })
 })
