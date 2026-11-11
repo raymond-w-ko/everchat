@@ -23,6 +23,10 @@ instead.
 | page | noun | One message of a text that is too long for one message. The text is logged as pages in a row, of at most 30,000 characters each. Each page has its own id. |
 | kind | noun | The type of a message. It says who or what wrote it. The model reads each message as `<kind>: <text>`. See the table below. |
 | thought | noun | The model's reasoning text. It is shown to the person and never logged. The old code calls it `mind`. |
+| stream | verb | Said of what the model gives while a step runs: its thought, its text, and the program that it writes. What streams is shown, and it is never in the database: a step is written when it ends, whole. |
+| piece | noun | A small part of what streams, as the vendor sends it: often a few characters. The code calls it `delta`. |
+| paragraph | noun | A part of a thought or of a text that ends with an empty line. Code between two fence lines is one paragraph, whatever empty lines it has. |
+| pace | verb | To hold back what streams, and give it on at a boundary: the end of a paragraph, a whole line after a short time, or all of it when the model stops for a while. An interface shows what streams paced, and not each word. |
 | image | noun | A picture that a message carries, as it was sent to the model. Table `image`. |
 | original | noun | An image as the person or a tool gave it, before EverChat made it smaller for the model. Table `image_original`. It exists only when it is not what was sent. |
 | draft | noun | The text that the person typed and did not send yet. |
@@ -199,3 +203,5 @@ instead.
 | line (for a row of the screen) | row | A line is a node as the model reads it. A line of a text file is still a line. |
 | device (for the terminal that the program draws on) | terminal | A device is a computer on which functions run. |
 | headless mode, print mode, batch mode | pipe mode | One name for the interface with no terminal. A batch is a round of merges. |
+| block (for a part of a text) | paragraph | A block is one piece of a view in a request. |
+| chunk, token (for a piece of what streams) | piece | A token is what a vendor counts. |
