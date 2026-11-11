@@ -398,6 +398,12 @@ export class Store extends Context.Service<Store, {
   startCall(call: NewCall): Effect.Effect<number, StoreError>
   endCall(id: number, end: CallEnd): Effect.Effect<void, StoreError>
   calls(turn: number): Effect.Effect<Array<Call>, StoreError>
+  call(id: number): Effect.Effect<Option.Option<Call>, StoreError>
+  // The process group of a shell command, while it runs.
+  setCallPgid(id: number, pgid: number): Effect.Effect<void, StoreError>
+
+  // The run tags of the launches that ended. No process may still carry one.
+  readonly endedRunTags: Effect.Effect<Array<string>, StoreError>
 }>()("everchat/store/Store") {
   // The store over the `SqlClient` in the context.
   static readonly layerNoDatabase = (options: Options) => Layer.effect(Store, make(options))
@@ -785,7 +791,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
     const output = end.output.toWellFormed()
     const size = bytes(output)
     yield* sql`
-      update call set status = ${end.status}, output = ${output}, size = ${size}, shown = ${end.shown ?? size}, ended = ${yield* now}
+      update call set status = ${end.status}, output = ${output}, size = ${size}, shown = ${end.shown ?? size}, pgid = null, ended = ${yield* now}
       where id = ${id} and status = 'running'`
   }, failed("endCall"))
 
@@ -794,6 +800,22 @@ const make = Effect.fnUntraced(function*(options: Options) {
       yield* sql`select id, turn, parent, vendor_id as vendorId, fn, input, output, status from call where turn = ${turn} order by id`
     ))]
   }, failed("calls"))
+
+  const call = Effect.fn("Store.call")(function*(id: number) {
+    const rows = yield* decodeCalls(
+      yield* sql`select id, turn, parent, vendor_id as vendorId, fn, input, output, status from call where id = ${id}`
+    )
+    return Option.fromUndefinedOr(rows[0])
+  }, failed("call"))
+
+  const setCallPgid = Effect.fn("Store.setCallPgid")(function*(id: number, pgid: number) {
+    yield* sql`update call set pgid = ${pgid} where id = ${id} and status = 'running'`
+  }, failed("setCallPgid"))
+
+  const endedRunTags = Effect.gen(function*() {
+    const rows = yield* sql<{ tag: string }>`select distinct run_tag as tag from launch where ended is not null`
+    return rows.map((row) => row.tag)
+  }).pipe(failed("endedRunTags"), Effect.withSpan("Store.endedRunTags"))
 
   const transaction = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | StoreError, R> =>
     Effect.mapError(
@@ -832,6 +854,9 @@ const make = Effect.fnUntraced(function*(options: Options) {
     turnItems,
     startCall,
     endCall,
-    calls
+    calls,
+    call,
+    setCallPgid,
+    endedRunTags
   })
 })
