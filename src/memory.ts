@@ -536,6 +536,22 @@ export class Memory extends Context.Service<Memory, {
   // starts the compactions that are now due.
   push(said: ReadonlyArray<Said>): Effect.Effect<Array<Message>, StoreError>
 
+  // The same, with more writes of the caller in the same transaction: an
+  // event that logs a message and writes other rows is still one
+  // transaction. `also` gets the pages as written. If it fails, the memory
+  // stops for good, as after any failed write.
+  pushWith<B>(
+    said: ReadonlyArray<Said>,
+    also: (written: Array<Message>) => Effect.Effect<B, StoreError>
+  ): Effect.Effect<readonly [Array<Message>, B], StoreError>
+
+  // The first message, from `from` on, from which the messages to the end
+  // go whole in one request: HIGH bytes at most, and the last one always.
+  whole(from: number): Effect.Effect<number, StoreError>
+
+  // The pages from `a` up to, and not with, `b`, as one text.
+  say(a: number, b: number): Effect.Effect<string, StoreError>
+
   // Waits until every message before `upto` has its leaf.
   settle(upto: number): Effect.Effect<void, StoreError>
 
@@ -621,11 +637,13 @@ export class Memory extends Context.Service<Memory, {
       })
 
       // The change's writes, in one transaction.
-      const flush = Effect.gen(function*() {
+      // `also`: more writes of the same event, by the caller, in the same
+      // transaction. It gets the messages as written.
+      const flush = <B>(also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null) => Effect.gen(function*() {
         const wrote = mem.journal
         mem.journal = journal(mem.count)
-        if (wrote.messages.length === 0 && wrote.nodes.length === 0 && wrote.usage.length === 0 && !wrote.views) {
-          return []
+        if (also === null && wrote.messages.length === 0 && wrote.nodes.length === 0 && wrote.usage.length === 0 && !wrote.views) {
+          return [[] as Array<Message>, undefined as B] as const
         }
         return yield* db.transaction(Effect.gen(function*() {
           const written = wrote.messages.length === 0 ? [] : yield* db.append(wrote.messages)
@@ -642,7 +660,7 @@ export class Memory extends Context.Service<Memory, {
           for (const usage of wrote.usage) {
             yield* db.addUsage(usage)
           }
-          return written
+          return [written, also === null ? (undefined as B) : yield* also(written)] as const
         }))
       })
 
@@ -659,13 +677,16 @@ export class Memory extends Context.Service<Memory, {
       // One change of the state: the algorithm with no pause, then its
       // writes, then the jobs it started. One at a time, and never cut in
       // the middle.
-      const apply = <A>(change: () => A): Effect.Effect<readonly [A, Array<Message>], StoreError> =>
+      const apply = <A, B = void>(
+        change: () => A,
+        also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null = null
+      ): Effect.Effect<readonly [A, Array<Message>, B], StoreError> =>
         lock.withPermits(1)(Effect.gen(function*() {
           if (broken !== null) {
             return yield* Effect.fail(broken)
           }
           const result = change()
-          const written = yield* Effect.tapError(flush, (error) =>
+          const [written, more] = yield* Effect.tapError(flush(also), (error) =>
             Effect.gen(function*() {
               broken = error
               mem.started.length = 0
@@ -678,7 +699,7 @@ export class Memory extends Context.Service<Memory, {
             yield* Effect.forkIn(run(job), scope)
           }
           yield* wake
-          return [result, written] as const
+          return [result, written, more] as const
         })).pipe(Effect.uninterruptible)
 
       // Node (l, i)'s compaction: asked until a line fits, TRIES lines at
@@ -755,6 +776,23 @@ export class Memory extends Context.Service<Memory, {
           return Effect.ensuring(Deferred.await(waiter.done), Effect.sync(() => waiters.delete(waiter)))
         })
 
+      const whole = Effect.fn("Memory.whole")(function*(from: number) {
+        const messages = yield* db.messages(from, mem.count)
+        let [k, total] = [mem.count, 0]
+        for (; k > from; k--) {
+          const message = messages[k - 1 - from]
+          total += message === undefined ? 0 : bytes(show(message.kind, message.text))
+          if (k < mem.count && total > HIGH) {
+            return k
+          }
+        }
+        return k
+      })
+
+      const say = Effect.fn("Memory.say")(function*(a: number, b: number) {
+        return (yield* db.messages(a, b)).map((message) => message.text).join("")
+      })
+
       const zoom = Effect.fn("Memory.zoom")(function*(id: number, n: number, at: number) {
         const part = partOf(mem.count, id, n)
         if (part === null) {
@@ -777,6 +815,9 @@ export class Memory extends Context.Service<Memory, {
 
       return Memory.of({
         push: (said) => Effect.map(apply(() => push(mem, said)), ([, written]) => written),
+        pushWith: (said, also) => Effect.map(apply(() => push(mem, said), also), ([, written, more]) => [written, more] as const),
+        whole,
+        say,
         settle: (upto) => until(() => first(mem) >= upto),
         idle: until(() => mem.busy.size === 0),
         view: (upto) => Effect.sync(() => blocks(mem, upto ?? mem.count, mem.view.parts)),
