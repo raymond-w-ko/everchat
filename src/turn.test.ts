@@ -4,6 +4,7 @@
 
 import { expect, test } from "bun:test"
 import { Deferred, Effect, Layer } from "effect"
+import * as path from "node:path"
 import { compactor, fakeWire, newFile, options, reply, rows, wireError } from "../tests/help.ts"
 import { Ask, AskDelay } from "./ask.ts"
 import { Cache } from "./cache.ts"
@@ -11,7 +12,9 @@ import { head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import type { Item, Reply, Request } from "./request.ts"
 import { Store } from "./store.ts"
-import { CUT, HEAD, Sandbox, STOPPED, type TurnEvent, Turns } from "./turn.ts"
+import { Limit } from "./limit.ts"
+import { Sandbox } from "./sandbox.ts"
+import { CUT, cutText, HEAD, STOPPED, type TurnEvent, Turns } from "./turn.ts"
 import { Stream } from "effect"
 
 type Run = (program: string) => Effect.Effect<{ output: string; failed: boolean }>
@@ -29,7 +32,8 @@ const withTurns = <A, E>(
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
-  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.merge(asking, sandbox)))
+  const limit = Limit.layer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
+  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
@@ -118,13 +122,13 @@ test("a program runs between two requests: its call is written, and the model's 
   expect(JSON.stringify(third[0])).toBe(JSON.stringify(wire.sent[0]!.items[0]))
   expect(third[1]).toEqual({ kind: "turn", output: [{ type: "reasoning", id: "rs_call_1", encrypted_content: "SECRET" }, { type: "custom_tool_call", call_id: "call_1", name: "run", input: "return 1 + 1" }] })
   expect(third[2]).toEqual({ kind: "back", results: [{ id: "call_1", output: "2" }] })
-  expect(third[4]).toEqual({ kind: "back", results: [{ id: "call_2", output: "error: boom" }] })
+  expect(third[4]).toEqual({ kind: "back", results: [{ id: "call_2", output: "boom" }] })
   expect(messages(file).map((m) => [m.kind, m.text, m.call])).toEqual([
     ["user", "add one and one", null],
     ["tool", "return 1 + 1", 1],
     ["echo", "2", 1],
     ["tool", "throw new Error('boom')", 2],
-    ["echo", "error: boom", 2],
+    ["echo", "boom", 2],
     ["asst", "It is 2.", null]
   ])
   expect(rows(file, "select id, turn, parent, vendor_id, fn, input, output, size, shown, status from call order by id")).toEqual([
@@ -144,7 +148,7 @@ test("a tool that is not the one tool gives the model an error, and no program r
     yield* turnsService.say("list")
     yield* turnsService.idle
   }))
-  expect(wire.sent[1]!.items[2]).toEqual({ kind: "back", results: [{ id: "call_1", output: "error: No tool \"shell\": the one tool is \"run\"." }] })
+  expect(wire.sent[1]!.items[2]).toEqual({ kind: "back", results: [{ id: "call_1", output: "No tool \"shell\": the one tool is \"run\"." }] })
   expect(rows(file, "select fn, status from call")).toEqual([{ fn: "shell", status: "failed" }])
 })
 
@@ -272,11 +276,11 @@ test("the person stops a turn: the program that runs is closed as cut, and the t
     // A stopped turn is over: a new message starts a new turn.
     expect(turns(file)).toEqual([{ id: 1, status: "stopped", why: "Stopped.", first_msg: 0 }])
   }))
-  expect(rows(file, "select status, output from call")).toEqual([{ status: "cut", output: STOPPED }])
+  expect(rows(file, "select status, output from call")).toEqual([{ status: "cut", output: cutText(STOPPED, []) }])
   expect(messages(file).map((m) => [m.kind, m.text])).toEqual([
     ["user", "run for ever"],
     ["tool", "forever()"],
-    ["echo", STOPPED],
+    ["echo", cutText(STOPPED, [])],
     ["note", "Stopped."]
   ])
 })
@@ -321,12 +325,12 @@ test("a program that ran when the program stopped is closed as cut at the next l
   // The program is not run again: the model gets the cut as its result.
   expect(wire.sent.length).toBe(1)
   expect(wire.sent[0]!.items.map((item) => item.kind)).toEqual(["user", "turn", "back"])
-  expect(wire.sent[0]!.items[2]).toEqual({ kind: "back", results: [{ id: "call_1", output: CUT }] })
-  expect(rows(file, "select status, output from call")).toEqual([{ status: "cut", output: CUT }])
+  expect(wire.sent[0]!.items[2]).toEqual({ kind: "back", results: [{ id: "call_1", output: cutText(CUT, []) }] })
+  expect(rows(file, "select status, output from call")).toEqual([{ status: "cut", output: cutText(CUT, []) }])
   expect(messages(file).map((m) => [m.kind, m.text])).toEqual([
     ["user", "do the slow thing"],
     ["tool", "slow()"],
-    ["echo", CUT],
+    ["echo", cutText(CUT, [])],
     ["asst", "It was cut, I will check."]
   ])
   expect(turns(file)).toEqual([{ id: 1, status: "done", why: null, first_msg: 0 }])

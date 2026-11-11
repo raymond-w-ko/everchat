@@ -46,16 +46,27 @@
 // database: it is cut, and it goes on at the next launch. Only `stop`, the
 // person's own, ends a turn as stopped.
 //
-// Not here yet: code mode. `Sandbox` is the service that runs a program,
-// and a test gives a fake. The output limit comes with code mode, so a
-// result is shown whole for now. Agents and hooks come later too.
+// A program's result
+//
+// The sandbox runs a program and gives its whole result (sandbox.ts). The
+// database keeps it whole, in the program's call. The model is shown at
+// most the output limit (limit.ts), and the `echo` message is what the
+// model was shown, so the memory holds what the model saw.
+//
+// A program that was cut, or that the person stopped, has no result. Its
+// `echo` then lists the functions that it called: which ended, and which
+// one was cut. The model reads that list, and decides what to do again.
+//
+// Not here yet: agents, hooks, and images.
 
 import { Context, Effect, Fiber, Layer, PubSub, Schema, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
 import { head as makeHead, TOOL } from "./head.ts"
+import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
-import { type Message, Store, StoreError, type Turn } from "./store.ts"
+import { Sandbox } from "./sandbox.ts"
+import { type Call as CallRow, type Message, Store, StoreError, type Turn } from "./store.ts"
 
 // The start of the block with the person's new message, after the view.
 export const HEAD = "Turn: the user's new message:\n\n"
@@ -63,13 +74,32 @@ export const HEAD = "Turn: the user's new message:\n\n"
 // What a call's result says when the program stopped while it ran.
 export const CUT = "The program was cut when EverChat stopped. It may or may not have finished."
 
+// What a function's result says in that case.
+export const CUT_FUNCTION = "The function was cut when EverChat stopped. It may or may not have finished."
+
 // What it says when the person stopped the turn while it ran.
 export const STOPPED = "The program was stopped. It may or may not have finished."
 
-// The closed place where a program runs. Code mode gives the real one.
-export class Sandbox extends Context.Service<Sandbox, {
-  run(program: string, call: { readonly turn: number; readonly call: number }): Effect.Effect<{ readonly output: string; readonly failed: boolean }>
-}>()("everchat/turn/Sandbox") {}
+// The most characters of a function's arguments, and of its result, in the
+// list of a cut program's functions.
+const BRIEF = 300
+
+const brief = (text: string): string => (text.length <= BRIEF ? text : text.slice(0, BRIEF) + "... (" + text.length + " characters)")
+
+// What a cut program's `echo` says: why it has no result, then the
+// functions that it called, in order.
+export const cutText = (why: string, functions: ReadonlyArray<CallRow>): string => {
+  if (functions.length === 0) {
+    return why + "\nIt called no function."
+  }
+  const lines = functions.map((row) => {
+    const head = "- call " + row.id + ", " + row.fn + "(" + brief(row.input.slice(1, -1)) + ")"
+    return row.status === "cut" || row.status === "running"
+      ? head + " was cut: it may or may not have finished."
+      : head + " " + (row.status === "done" ? "ended" : row.status) + ": " + brief(row.output ?? "")
+  })
+  return why + "\nThe functions that it called (result(id) gives a whole result):\n" + lines.join("\n")
+}
 
 // What the terminal shows as it happens.
 export type TurnEvent =
@@ -108,9 +138,6 @@ const decodeHead = Schema.decodeUnknownEffect(KeptHead)
 const item = (kept: Kept): Item =>
   kept.kind === "turn" ? { kind: "turn", output: kept.output } : kept.kind === "user" ? { kind: "user", blocks: kept.blocks } : { kind: "back", results: kept.results }
 
-// A call's result as the model reads it, and as the `echo` says it.
-const shown = (failed: boolean, output: string): string => (failed ? "error: " : "") + output
-
 export interface Options {
   readonly rules?: string | null | undefined // the person's own instructions, for the head
 }
@@ -133,6 +160,7 @@ export class Turns extends Context.Service<Turns, {
         const memory = yield* Memory
         const ask = yield* Ask
         const sandbox = yield* Sandbox
+        const limit = yield* Limit
         const scope = yield* Effect.scope
         const lock = yield* Semaphore.make(1)
         const hub = yield* PubSub.unbounded<TurnEvent>()
@@ -215,25 +243,37 @@ export class Turns extends Context.Service<Turns, {
           yield* emit({ type: "end", turn: turn.id, status, why })
         })
 
+        // The functions that program `id` called.
+        const functionsOf = (turn: number, id: number) => Effect.map(store.calls(turn), (rows) => rows.filter((row) => row.parent === id))
+
         // One program of the model: its call is written when it starts, and
         // its `tool` and `echo` when it ends.
         const program = Effect.fnUntraced(function*(turn: Turn, call: Call) {
           const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: call.input })
-          const close = (status: "done" | "failed" | "cut", output: string, text: string) =>
+          const close = (status: "done" | "failed" | "cut", output: string, text: string, bytes?: number) =>
             log(
               [{ kind: "tool", text: call.input, turn: turn.id, call: id }, { kind: "echo", text, turn: turn.id, call: id }],
-              store.endCall(id, { status, output })
+              store.endCall(id, { status, output, shown: bytes })
             )
+          // The person stopped the turn: the call is closed, with the list
+          // of its functions. The sandbox has closed those by then. The
+          // program's own stop leaves the call running, for the next launch
+          // to close.
+          const stopped = Effect.gen(function*() {
+            if (running === null || running.stop === null) {
+              return
+            }
+            const text = (yield* limit.show(id, cutText(STOPPED, yield* functionsOf(turn.id, id)))).text
+            yield* close("cut", text, text)
+          })
           const result = call.name === TOOL
-            ? yield* sandbox.run(call.input, { turn: turn.id, call: id }).pipe(
-              // The person stopped the turn: the call is closed. The program's
-              // own stop leaves it running, for the next launch to close.
-              Effect.onInterrupt(() => running?.stop === null || running === null ? Effect.void : Effect.ignore(close("cut", STOPPED, STOPPED)))
-            )
+            ? yield* sandbox.run(call.input, { turn: turn.id, call: id }).pipe(Effect.onInterrupt(() => Effect.ignore(stopped)))
             : { output: `No tool "${call.name}": the one tool is "${TOOL}".`, failed: true }
-          const text = shown(result.failed, result.output)
-          yield* close(result.failed ? "failed" : "done", result.output, text)
-          return { id: call.id, output: text }
+          // A failed program's result is its error, as text: nothing marks it
+          // apart from that. The call's status says that it failed.
+          const seen = yield* limit.show(id, result.output)
+          yield* close(result.failed ? "failed" : "done", result.output, seen.text, seen.shown)
+          return { id: call.id, output: seen.text }
         })
 
         // After a model step: its programs run, their results are kept, and
@@ -244,7 +284,13 @@ export class Turns extends Context.Service<Turns, {
           const known = (yield* store.calls(turn.id)).filter((row) => row.parent === null)
           for (const call of calls) {
             const row = known.find((one) => one.vendorId === call.id)
-            results.push(row === undefined ? yield* program(turn, call) : { id: call.id, output: shown(row.status === "failed", row.output ?? "") })
+            // A program that ended is shown as it was then. One that was
+            // cut has its list of functions as its result.
+            results.push(
+              row === undefined
+                ? yield* program(turn, call)
+                : { id: call.id, output: row.status === "cut" ? row.output ?? "" : (yield* limit.show(row.id, row.output ?? "")).text }
+            )
           }
           if (results.length > 0) {
             const back: Kept = { kind: "back", results }
@@ -410,13 +456,17 @@ export class Turns extends Context.Service<Turns, {
         // A restart: close the calls that still run, then go on with the
         // turn that still runs.
         for (const turn of yield* store.runningTurns(null)) {
-          for (const call of (yield* store.calls(turn.id)).filter((row) => row.status === "running")) {
-            yield* call.parent === null
-              ? log(
-                [{ kind: "tool", text: call.input, turn: turn.id, call: call.id }, { kind: "echo", text: CUT, turn: turn.id, call: call.id }],
-                store.endCall(call.id, { status: "cut", output: CUT })
-              )
-              : store.endCall(call.id, { status: "cut", output: CUT })
+          const open = (yield* store.calls(turn.id)).filter((row) => row.status === "running")
+          // The functions first, so that a program's list shows them as cut.
+          for (const call of open.filter((row) => row.parent !== null)) {
+            yield* store.endCall(call.id, { status: "cut", output: CUT_FUNCTION })
+          }
+          for (const call of open.filter((row) => row.parent === null)) {
+            const text = (yield* limit.show(call.id, cutText(CUT, yield* functionsOf(turn.id, call.id)))).text
+            yield* log(
+              [{ kind: "tool", text: call.input, turn: turn.id, call: call.id }, { kind: "echo", text, turn: turn.id, call: call.id }],
+              store.endCall(call.id, { status: "cut", output: text })
+            )
           }
         }
         const [cut] = yield* store.runningTurns(null)
