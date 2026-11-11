@@ -2,11 +2,13 @@
 // with the store.
 
 import { Database as Sqlite } from "bun:sqlite"
-import { Effect, Layer, Semaphore } from "effect"
+import { Effect, Layer, Semaphore, Stream } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import * as Database from "../src/database.ts"
+import { OpenAI } from "../src/openai.ts"
+import { type Event, type Reply, type Request, type Wire, WireError } from "../src/request.ts"
 import { type Block, type Compaction, Compactor, type CompactorError, Memory, type Part } from "../src/memory.ts"
 import { type LaunchInput, type Options, type Pick, ProcessAlive, Store } from "../src/store.ts"
 
@@ -100,3 +102,35 @@ export const serialCompactor = (line: (blocks: ReadonlyArray<Block>, node: Part)
       })
     })
   )
+
+// A reply of a fake wire.
+export const reply = (asked: Request, over: Partial<Reply> = {}): Reply => ({
+  output: [],
+  text: "a line",
+  calls: [],
+  stop: "done",
+  usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 5, searches: 0 },
+  diagnosis: null,
+  pick: asked.pick,
+  id: "resp_1",
+  request: "req_1",
+  ...over
+})
+
+// A fake OpenAI wire: `answer` gives the reply to the n-th send (1, 2, ...),
+// or the error it fails with. `sent` holds the requests.
+export const fakeWire = (answer: (asked: Request, n: number) => Reply | WireError) => {
+  const sent: Array<Request> = []
+  const wire: Wire = {
+    send: (asked) =>
+      Stream.suspend(() => {
+        sent.push(asked)
+        const got = answer(asked, sent.length)
+        return got instanceof WireError ? Stream.fail(got) : Stream.make<Array<Event>>({ type: "text", delta: got.text }, { type: "end", reply: got })
+      })
+  }
+  return { sent, wire, layer: Layer.succeed(OpenAI, OpenAI.of(wire)) }
+}
+
+export const wireError = (kind: WireError["kind"], over: Partial<WireError> = {}) =>
+  new WireError({ kind, message: "it failed", retry: kind === "busy" || kind === "cut", began: false, after: null, status: null, code: null, request: null, ...over })
