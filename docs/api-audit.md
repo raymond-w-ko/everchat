@@ -526,3 +526,125 @@ What it changed in the wire:
 OpenRouter changes the ids of some items (a program's id had 19 characters,
 and 54 through the inference gateway). The wire sends back what it got, so this does
 no harm.
+
+## Many compactions at once (2026-11-10)
+
+The first run of the whole real stack: the store, the memory, the real
+compactor, the ask service with single flight, the cache watch, and the
+wire, through the author's inference gateway
+(`bun tools/probe.ts compact gpt-6-luna 32`, at low effort). A new chat got
+150 short messages in one push, and then 32 long messages in one push.
+
+The run was larger than planned: 313 requests and about 1.7 million input
+tokens, in 270 s. The plan was about 63 requests. Two things made it larger:
+
+- The 150 short messages needed compactions too. Each is its own line, and
+  two of them still fit in one node, but four do not. So the first push
+  started 37 merges of level 2 at once, and more above them.
+- Many lines came back too long and were asked again. The 32 long messages
+  took 105 requests, about 3 tries each. The text was random words and the
+  effort was low, so real chats may do better. It still shows that the tries
+  for a long line multiply the requests.
+
+What the cache did:
+
+| | Requests | Read something | Input tokens | From the cache |
+| --- | --- | --- | --- | --- |
+| All | 313 | 111 | 1,717,000 | 660,000 (38%) |
+| Leaves | 105 | 43 | 844,000 | 338,000 |
+| Merges | 208 | 68 | 873,000 | 322,000 |
+
+- **Single flight as built is not enough on this route.** In the first wave
+  one request went first, and about 36 waited the 5 s and then went
+  together. All of them read 0 tokens, though the head that they shared had
+  been sent 5 s before. Requests that came later, spread over time, read it
+  (1,408 tokens each).
+- So a burst of requests does not find an entry that single requests find.
+  The entry may need more than 5 s after a burst, or requests that arrive
+  together may be served by different machines. This run cannot tell which.
+- **The cache watch did its job.** Every request has a usage row with what it
+  read and what it should have read, and each miss was logged as it
+  happened. The numbers above come from one query on the table `usage`.
+
+Two things about the memory that the run showed. Both are as in the old
+code:
+
+- After a push of many messages at once, the first merges get a compactions'
+  view that is almost empty. The view moves on only after the nodes of the
+  push are stored, and the merges start before that. In normal use messages
+  come one at a time, and this does not happen.
+- Four merges gave no line, and their nodes are their sources, cut. The
+  input was random words.
+
+What to try next, with small probes: let the requests that waited go a few
+at a time and not all together; or wait for the end of the first reply and
+not for a fixed 5 s; or run fewer compactions at once on this route.
+
+## Followers that go together (2026-11-10)
+
+Two small runs through the author's inference gateway, to see if the misses
+of the section above come from requests that go together
+(`bun tools/probe.ts burst gpt-6-luna all <b>`). One request goes first, and
+`b` more with the same prefix follow together, 5 s after the first was
+sent. The probe now stops itself at a number of requests (`PROBE_LIMIT`).
+
+| The shared prefix | The first reply took | Followers that read it |
+| --- | --- | --- |
+| A head and a view, 5,332 tokens | 1.2 s | 16 of 16 (5,120 tokens each) |
+| The program's own head only, 1,396 tokens | 5.1 s | 7 of 8 (1,280 tokens each) |
+
+So requests that go together do read the entry, also when the shared part
+is only the head. In the second run the followers went right after the
+first reply ended, and they read it.
+
+What then explains the misses of the large run is not proven. The most
+likely reason: a compaction can take longer than 5 s, and there the
+followers went 5 s after the first request was sent, with its reply still
+running. The cache watch now waits for both: 5 s after the first request was
+sent, and the end of its reply. This is not yet tested against the real
+stack.
+
+Not tested: a way to let the followers go a few at a time, and fewer
+compactions at once. The runs above give no reason for either yet.
+
+## The real stack again, small (2026-11-10)
+
+One run of the memory with the real compactor on a small chat, after the
+change above (`PROBE_LIMIT=50 bun tools/probe.ts compact gpt-6-luna 8 24`:
+24 short messages, then 8 long ones). About 40 requests were expected. The
+probe stopped itself at 50, as it is built to. 40 requests had written
+their usage rows by then.
+
+| | Requests | Read from the cache |
+| --- | --- | --- |
+| The first try for a node | 18 | 0 |
+| A later try for the same node (its line was too long) | 22 | 21 |
+
+- **A later try reads the try before it.** It sends the same request with
+  one note more, and it read 1,408 to 2,560 tokens each time.
+- **The first try for a node read nothing**, also long after other nodes'
+  requests with the same head had ended. What these requests share is the
+  head and a few tokens more, about 1,300 tokens. In the run of the section
+  above, followers with the same head did read 1,280 tokens, but those
+  requests were equal almost to their end. A head of 2,560 tokens was read
+  under another view in an earlier run. So on this route a shared part near
+  the vendor's minimum is not read reliably. The reason is not known.
+- **The wait for the end of the first reply worked**: the followers went
+  after it, and each had the head as its expected read.
+
+What this means:
+
+- The head alone is about 1,300 tokens, so little is lost when it is not
+  read. The gain of the cache is in a long shared view, and a long shared
+  view was read by all 16 followers in the run above.
+- This probe has almost no shared view, for a reason of its own: all its
+  messages come in two pushes, and after a push of many messages the first
+  merges get a view that is almost empty.
+- The watch logs a miss for these requests. That is true to its rule, and
+  it is noise: near the minimum its count is not exact, and the vendor does
+  not read such a part reliably.
+
+A flaw of the probe's own text: it is made of random words, which no model
+can make shorter without loss. So lines came back too long, and nodes took
+up to 5 tries. 12 nodes took 40 requests. A run with real text is needed
+before the number of tries says anything about real use.
