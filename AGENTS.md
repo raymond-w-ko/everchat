@@ -164,6 +164,25 @@ Code mode is the only primary tool that EverChat gives the model. What the old
 code gives the model as separate tools (shell, read, write, edit, and the
 memory tools) become functions that the program can call.
 
+How it is built (`src/sandbox.ts`, `src/functions.ts`):
+
+- A program is JavaScript. It runs in a QuickJS engine that is compiled to
+  WebAssembly, in a worker thread (the library `pi-codemode`). In there it
+  has no files, no network, and no timers.
+- Each function runs on EverChat's side. It is a row in `call` from its
+  start, and the hooks will run there. So no command can pass a hook unseen.
+- The tool's description lists the functions as TypeScript declarations
+  (`src/head.ts`). To add a function, add its declaration, its arguments'
+  schema, and its code in `src/functions.ts`, with a test.
+- A stop of a program is a request: the library asks the worker thread to
+  end and does not wait for it. So the program's exit must not wait for
+  worker threads.
+- The executable (`bun build --compile`) will need two things that a run
+  from source does not: the worker as a second entrypoint of the build
+  (a file that imports `@earendil-works/pi-codemode/worker`, given to the
+  sandbox as `workerUrl`), and the QuickJS file (`quickjs.wasm`) inside
+  the executable (given as `wasm`). This is not built yet.
+
 ### One system prompt for every kind of request
 
 The chat's turns, its compactions, and its subagents all send the same system

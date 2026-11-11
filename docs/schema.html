@@ -436,7 +436,7 @@ create index        call_running on call (status)          where status = 'runni
 <ol>
   <li><strong>The model gets the head and the tail</strong>, with a line between them that says how much was left out and where the whole text is. The <code>echo</code> message in the log is this limited text, so the memory holds what the model saw.</li>
   <li><strong>The amount is recorded:</strong> <code>size</code> is what was produced, and <code>shown</code> is what the model got.</li>
-  <li><strong>The whole text is written to a file</strong> in a private directory under the system's temporary directory (<code>/tmp</code>), named after the call's id. The model can read or search it with its normal functions. The file is a copy, not state. If it is gone (after a reboot, for example), a function writes it again from <code>call.output</code>.</li>
+  <li><strong>The whole text is written to a file</strong> in a private directory under the system's temporary directory (<code>/tmp</code>), named after the call's id: <code>everchat-&lt;user id&gt;/&lt;chat's uuid&gt;/&lt;call id&gt;.txt</code>. The model can read or search it with its normal functions. The file is a copy, not state. If it is gone (after a reboot, for example), the function <code>result(id)</code> writes it again from <code>call.output</code>, and gives the whole text to the program that called it. The directory is used only if EverChat owns it and no other user can enter it. If not, the line names only <code>result(id)</code>.</li>
 </ol>
 <p><strong>The default limit is 30,000 characters</strong>, set in the config file. Three sources agree on about that size:</p>
 <div class="wrap">
@@ -452,7 +452,12 @@ create index        call_running on call (status)          where status = 'runni
 <p>Two points come from code mode:</p>
 <ul>
   <li><strong>The limit is on what the model reads, not on what a program gets.</strong> A function gives its whole result to the program that called it, so the program can search or parse it. The limit applies to the program's own result, which is what goes to the model.</li>
-  <li><strong>A second, hard limit is still needed.</strong> A command that never stops printing must not fill the memory or the database, and SQLite cannot store a text over 1 GB. Decided: 64 MiB, the size at which Claude Code cuts its saved file. Past it, the output ends there and the command is stopped. <code>size</code> still tells the true amount.</li>
+  <li><strong>A second, hard limit is still needed.</strong> A command that never stops printing must not fill the memory or the database, and SQLite cannot store a text over 1 GB. Decided: 64 MiB, the size at which Claude Code cuts its saved file. Past it, the output ends there and the command is stopped. <code>size</code> is the size of what was kept.</li>
+</ul>
+<p>Two more limits keep a program from holding its turn for ever. They are not in the schema, and they are here because they end a call:</p>
+<ul>
+  <li><strong>The time limit of a command:</strong> 600 seconds, or the seconds that the program gives to <code>shell</code>. The command is then stopped, and its result says so.</li>
+  <li><strong>The compute limit of a program:</strong> 60 seconds with no function at work. A program has no timers, so one that computes for that long is in a loop. A program may wait for a function as long as that function takes.</li>
 </ul>
 </div>
 
@@ -611,7 +616,7 @@ from msg m join kind k on k.id = m.kind;</code></pre>
 <tr><td>A model step ends</td><td><code>turn_item</code> (<code>turn</code>: the vendor's output), <code>msg</code> for its replies, <code>usage</code></td><td></td></tr>
 <tr><td>A program starts</td><td><code>call</code> (<code>running</code>, no parent)</td><td></td></tr>
 <tr><td>A function starts</td><td><code>call</code> (<code>running</code>, with its parent)</td><td>before a shell command</td></tr>
-<tr><td>A function ends</td><td><code>call</code> (<code>done</code>, <code>failed</code> or <code>denied</code>, with its whole output)</td><td></td></tr>
+<tr><td>A function ends</td><td><code>call</code> (<code>done</code>, <code>failed</code> or <code>denied</code>, with its whole output). A function that was stopped before it ended is closed as <code>cut</code>: its program ended and did not wait for it, or its program was stopped</td><td></td></tr>
 <tr><td>A program ends</td><td><code>call</code> (its whole output, <code>size</code>, <code>shown</code>), <code>msg</code> <code>tool</code> and <code>echo</code> (the text as shown)</td><td>after a program</td></tr>
 <tr><td>All of a step's results are in</td><td><code>turn_item</code> (<code>back</code>)</td><td></td></tr>
 <tr><td>A turn ends</td><td><code>turn</code> (<code>done</code>, <code>stopped</code> or <code>failed</code>)</td><td>turn end</td></tr>
@@ -632,9 +637,9 @@ from msg m join kind k on k.id = m.kind;</code></pre>
 
 <ol>
   <li><strong>Take the file.</strong> Open it and run the migrations. Read the <code>launch</code> row with no <code>ended</code>. If its process still runs on this host, stop. If not, close it with <code>why = 'crash'</code> and add our own row.</li>
-  <li><strong>Clean up processes.</strong> Stop each process that still carries the <code>run_tag</code> of a launch that ended (a shell that a crash left running).</li>
+  <li><strong>Clean up processes.</strong> Stop each process that still carries the <code>run_tag</code> of a launch that ended (a shell that a crash left running). The tag is in each process's environment, as <code>EVERCHAT_RUN</code>. A launch that ends cleanly stops its own processes: each shell's process group, then each process that carries its tag.</li>
   <li><strong>Load the memory.</strong> Read both views from <code>view</code>, byte for byte. Read the nodes that they and the tree above them need. Find the nodes to build with a query (nodes not built whose two halves are), not with a walk of the tree.</li>
-  <li><strong>Close the cut calls.</strong> Set each <code>call</code> still <code>running</code> to <code>cut</code>. For a cut program, log its <code>tool</code> and an <code>echo</code> that lists its functions: which ended, with what result, and which one was cut ("It may or may not have finished."). Add the same text as its result in the turn's items.</li>
+  <li><strong>Close the cut calls.</strong> Set each <code>call</code> still <code>running</code> to <code>cut</code>, the functions first. For a cut program, log its <code>tool</code> and an <code>echo</code> that lists its functions: which ended, with the start of its result, and which one was cut ("It may or may not have finished."). Each line has the call's id, so that <code>result(id)</code> gives a whole result. Add the same text as its result in the turn's items. The program is not run again. A program that the person stopped gets the same list.</li>
   <li><strong>Continue the cut turns.</strong> For each <code>turn</code> still <code>running</code> (the chat's and each agent's), build the request again from its <code>head</code> and its <code>turn_item</code> rows, and send the next step. The prefix is the one sent before, on the same pick. So it reads the vendor's cache and keeps the thinking blocks valid.</li>
   <li><strong>Start the compactions</strong> again. Their state is derived, so nothing is stored for them. A compaction that was cut is asked again.</li>
 </ol>

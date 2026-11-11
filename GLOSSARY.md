@@ -95,14 +95,16 @@ instead.
 | code mode | noun | The way the model works: it writes a program that calls functions. Code mode is the only tool that EverChat gives the model. |
 | tool | noun | What a vendor's API lets the model call. EverChat has one: code mode. |
 | program | noun | The code that the model writes in code mode. A sandbox runs it. |
-| function | noun | One thing that a program can call: `shell`, `read`, `write`, `edit`, `zoom`, and others. |
+| function | noun | One thing that a program can call: `shell`, `read`, `write`, `edit`, `zoom`, `date`, `result`, and later others. A function runs on EverChat's side, outside the sandbox. |
 | call | noun | One run of a program, or one run of a function inside a program. Table `call`. A call is recorded when it starts, not when it ends. |
-| sandbox | noun | The closed place where a program runs. A program can start a process only through the `shell` function. |
+| sandbox | noun | The closed place where a program runs. In there, a program has no files, no network, and no timers. It can reach the world only through functions, and it can start a process only through the `shell` function. |
 | result | noun | What a call gave back. The database keeps it whole. |
-| output limit | noun | The most text of a result that the model is shown: 30,000 characters by default. A longer result is shortened: the model gets its head and its tail, and the whole text is put in a file. |
+| output limit | noun | The most text of a program's result that the model is shown: 30,000 characters by default. A longer result is shortened: the model gets its head and its tail, and the whole text is put in a file. A function gives its whole result to its program: the limit is not on that. |
 | hard limit | noun | The most text that a call may produce: 64 MiB. Past it, the command is stopped. |
+| time limit | noun | The most time that one command of the `shell` function may run: 600 seconds, or the seconds that the program gives. Past it, the command is stopped. |
+| compute limit | noun | The most time that a program may run with no function at work: 60 seconds. Past it, the program is stopped. A program may wait for a function as long as that function takes. |
 | shorten | verb | To show the model less than the whole result, because of the output limit. Use this word, and keep "cut" for a turn or a call. |
-| cut | adjective | Said of a turn or a call that ran when the program stopped. A cut turn continues at the next launch. A cut call may or may not have finished, and the model is told so. |
+| cut | adjective | Said of a turn or a call that ran when EverChat stopped. A cut turn continues at the next launch. A cut call may or may not have finished, and the model is told so. Also said of a function that was stopped before it ended, because its program ended or was stopped. |
 | denied | adjective | Said of a call that a hook refused. It did not run. |
 | stopped | adjective | Said of a turn or a task that the person or EverChat ended before it was done. |
 | failed | adjective | Said of a turn or a call that ended with an error. |
