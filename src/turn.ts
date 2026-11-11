@@ -59,7 +59,7 @@
 //
 // Not here yet: agents, hooks, and images.
 
-import { Context, Effect, Fiber, Layer, PubSub, Schema, Semaphore, Stream } from "effect"
+import { Context, Effect, Fiber, Layer, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
 import { head as makeHead, TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
@@ -109,6 +109,7 @@ export type TurnEvent =
   | { readonly type: "accepted"; readonly messages: ReadonlyArray<Message> } // a message of the person is in the log
   | { readonly type: "start"; readonly turn: number }
   | { readonly type: "text" | "thought" | "program"; readonly turn: number; readonly delta: string }
+  | { readonly type: "call"; readonly turn: number; readonly call: number; readonly program: string } // a program starts to run
   | { readonly type: "message"; readonly message: Message } // a reply, a program, a result, or a note is in the log
   | { readonly type: "end"; readonly turn: number; readonly status: "done" | "stopped" | "failed"; readonly why: string | null }
 
@@ -154,6 +155,9 @@ export class Turns extends Context.Service<Turns, {
   readonly idle: Effect.Effect<void>
   // What happens, as it happens.
   readonly events: Stream.Stream<TurnEvent>
+  // The same, for a listener that must miss nothing from a known moment on:
+  // the subscription is made when this effect ends, not when a stream starts.
+  readonly subscribe: Effect.Effect<PubSub.Subscription<TurnEvent>, never, Scope.Scope>
 }>()("everchat/turn/Turns") {
   static readonly layer = (options: Options = {}) =>
     Layer.effect(
@@ -253,6 +257,7 @@ export class Turns extends Context.Service<Turns, {
         // its `tool` and `echo` when it ends.
         const program = Effect.fnUntraced(function*(turn: Turn, call: Call) {
           const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: call.input })
+          yield* emit({ type: "call", turn: turn.id, call: id, program: call.input })
           const close = (status: "done" | "failed" | "cut", output: string, text: string, bytes?: number) =>
             log(
               [{ kind: "tool", text: call.input, turn: turn.id, call: id }, { kind: "echo", text, turn: turn.id, call: id }],
@@ -478,7 +483,7 @@ export class Turns extends Context.Service<Turns, {
           yield* launch(cut)
         }
 
-        return Turns.of({ say, stop, idle, events: Stream.fromPubSub(hub) })
+        return Turns.of({ say, stop, idle, events: Stream.fromPubSub(hub), subscribe: PubSub.subscribe(hub) })
       })
     )
 }

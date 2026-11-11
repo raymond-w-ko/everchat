@@ -3,7 +3,7 @@
 // and how it goes on after a restart.
 
 import { expect, test } from "bun:test"
-import { Deferred, Effect, Layer } from "effect"
+import { Deferred, Effect, Layer, PubSub } from "effect"
 import * as path from "node:path"
 import { compactor, fakeWire, newFile, options, reply, rows, wireError } from "../tests/help.ts"
 import { Ask, AskDelay } from "./ask.ts"
@@ -138,6 +138,23 @@ test("a program runs between two requests: its call is written, and the model's 
   expect(items(file)).toEqual(["user", "turn", "back", "turn", "back", "turn"])
   expect(turns(file)).toEqual([{ id: 1, status: "done", why: null, first_msg: 0 }])
   expect(rows(file, "select count(*) as n from usage where served = 'turn' and turn = 1")).toEqual([{ n: 3 }])
+})
+
+test("a listener that subscribes before a message misses no event, and a program's start is one of them", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "return 1 + 1") : says(asked, "It is 2.")))
+  await withTurns(file, wire, () => Effect.succeed({ output: "2", failed: false }), Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    // The subscription is there when this ends: nothing has to wait for it.
+    const subscription = yield* turnsService.subscribe
+    yield* turnsService.say("add one and one")
+    yield* turnsService.idle
+    const seen: ReadonlyArray<TurnEvent> = yield* PubSub.takeAll(subscription)
+    expect(seen.map((event) => event.type)).toEqual(["accepted", "start", "text", "call", "message", "message", "text", "message", "end"])
+    // The program's call is known when it starts, before its messages are in the log.
+    expect(seen[3]).toEqual({ type: "call", turn: 1, call: 1, program: "return 1 + 1" })
+    expect(seen.flatMap((event) => (event.type === "message" ? [[event.message.kind, event.message.call]] : []))).toEqual([["tool", 1], ["echo", 1], ["asst", null]])
+  })))
 })
 
 test("a tool that is not the one tool gives the model an error, and no program runs", async () => {
