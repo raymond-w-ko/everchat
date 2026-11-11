@@ -15,6 +15,9 @@ EverChat is an LLM agent harness. Its core idea: the chat itself is the memory.
 There is one chat that never ends. A cheap model compresses the log into a tree
 of summaries, and the agent zooms into that tree when it needs detail.
 
+This codebase is yours: what it's for and how it's built are your call, and
+you'll keep building on it.
+
 ## Words
 
 [GLOSSARY.md](GLOSSARY.md) is the dictionary of this project. Read it first.
