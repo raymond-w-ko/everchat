@@ -22,10 +22,8 @@
 //
 // The log is the truth. The turn loop's events (turn.ts) say when a
 // message entered the log, and carry what streams. The terminal subscribes
-// before it reads the log. Then every message has its id, and the terminal
-// shows the messages in the order of their ids: an event of a message that
-// it has shown is dropped, and when an id was skipped, it reads the
-// missing messages from the store. So no message is shown twice or left
+// before it reads the log, and then shows the messages in the order of
+// their ids, each once (follow.ts). So no message is shown twice or left
 // out, whenever the turn loop started.
 //
 // The keys
@@ -55,9 +53,10 @@
 // the launch ends, so that a change of the terminal's size can draw it
 // again.
 //
-// Not here yet: images, the agents, a list of the functions that a program
-// runs, and a way to work with no terminal (each line of the standard
-// input as a message).
+// With no terminal, the program works in pipe mode (pipe.ts).
+//
+// Not here yet: images, the agents, and a list of the functions that a
+// program runs.
 
 import {
   CombinedAutocompleteProvider,
@@ -74,8 +73,9 @@ import {
   TuiMainScreen
 } from "@earendil-works/pi-tui"
 import { Clock, Context, DateTime, Deferred, Effect, FiberSet, Layer, PubSub } from "effect"
+import { follow, type Shown } from "./follow.ts"
 import { bold, clean, dim, LOOKS, markdown, message as paint, plain, Row, THOUGHT, TOLD, Wrapped, WRITING } from "./paint.ts"
-import { type Diagnostic, type Kind, type Message, Store, type StoreError } from "./store.ts"
+import { type Diagnostic, type Message, Store, type StoreError } from "./store.ts"
 import { type TurnEvent, Turns } from "./turn.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
@@ -168,8 +168,6 @@ export class Terminal extends Context.Service<Terminal, {
         const pick = store.launch.pick ?? chat.pick
 
         // The state of the screen.
-        let next = 0 // the id of the first message that is not shown
-        let page: { kind: Kind; text: string } | null = null // the pages so far of a message that has more
         let now = yield* Clock.currentTimeMillis
         let working: { turn: number; since: number } | null = null
         const programs = new Set<number>() // the calls of the programs that run, and that are on the screen
@@ -218,16 +216,9 @@ export class Terminal extends Context.Service<Terminal, {
           tui.requestRender()
         }
 
-        // One message of the log goes on the screen. A text of many pages
-        // is shown once, when its last page is there.
-        const show = (message: Message) => {
-          next = message.i + 1
-          const whole = (page !== null && page.kind === message.kind ? page.text : "") + message.text
-          if (message.more) {
-            page = { kind: message.kind, text: whole }
-            return
-          }
-          page = null
+        // One message of the log goes on the screen.
+        const show = (message: Shown) => {
+          const whole = message.text
           if (message.kind === "user") {
             editor.addToHistory(whole)
           }
@@ -250,17 +241,30 @@ export class Terminal extends Context.Service<Terminal, {
           add(paint(message.kind, whole), message.kind !== "echo")
         }
 
-        // Shows `message`, and first the messages before it that are not shown.
-        const take = Effect.fnUntraced(function*(message: Message) {
-          if (message.i < next) {
-            return
-          }
-          if (message.i > next) {
-            for (const missed of yield* store.messages(next, message.i)) {
-              show(missed)
-            }
-          }
+        // The last messages of the log. The first one shown is the first
+        // page of its text.
+        const count = yield* store.count
+        const tail = yield* store.messages(Math.max(0, count - SHOWN - 1), count)
+        let first = tail[0]?.i === 0 ? 0 : 1
+        while (first < tail.length && tail[first - 1]?.more === true) {
+          first++
+        }
+        const before = tail[first]?.i ?? count
+        if (before > 0) {
+          add(new Wrapped(before + " earlier messages are in the memory.", TOLD))
+        }
+        // From here on: each message once, in the order of the ids.
+        const log = follow(store.messages, before)
+        for (const message of log.join(tail.slice(first))) {
           show(message)
+        }
+
+        // Shows a message that an event brought, and first the messages
+        // before it that are not shown.
+        const take = Effect.fnUntraced(function*(message: Message) {
+          for (const one of yield* log.take(message)) {
+            show(one)
+          }
         })
 
         const handle = Effect.fnUntraced(function*(event: TurnEvent) {
@@ -437,22 +441,6 @@ export class Terminal extends Context.Service<Terminal, {
           return undefined
         })
 
-        // The last messages of the log. The first one shown is the first
-        // page of its text.
-        const count = yield* store.count
-        const tail = yield* store.messages(Math.max(0, count - SHOWN - 1), count)
-        let first = tail[0]?.i === 0 ? 0 : 1
-        while (first < tail.length && tail[first - 1]?.more === true) {
-          first++
-        }
-        const before = tail[first]?.i ?? count
-        if (before > 0) {
-          add(new Wrapped(before + " earlier messages are in the memory.", TOLD))
-        }
-        for (const message of tail.slice(first)) {
-          show(message)
-        }
-        next = count
         const [cut] = yield* store.runningTurns(null)
         if (cut !== undefined) {
           working = { turn: cut.id, since: now }
