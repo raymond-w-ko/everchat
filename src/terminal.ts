@@ -13,7 +13,9 @@
 //   it enters the log. They go into the terminal's own scrollback, so the
 //   terminal's scroll, select and copy work on them.
 // - What the model gives right now, and is not in the log yet: its
-//   thought, its text, the program that it writes.
+//   thought and its text. They are paced (pace.ts): a whole paragraph at a
+//   time, and not each word. A program is shown whole when it starts to
+//   run. While the model writes it, only the status row says so.
 // - The input: the box that the person types in.
 // - The status row: what EverChat does, then the pick. What it does is
 //   first, because a narrow terminal shows only the row's start.
@@ -72,9 +74,10 @@ import {
   type Terminal as Tty,
   TuiMainScreen
 } from "@earendil-works/pi-tui"
-import { Clock, Context, DateTime, Deferred, Effect, FiberSet, Layer, PubSub } from "effect"
+import { Clock, Context, DateTime, Deferred, Effect, FiberSet, Layer, Stream } from "effect"
 import { follow, type Shown } from "./follow.ts"
-import { bold, clean, dim, LOOKS, markdown, message as paint, plain, Row, THOUGHT, TOLD, Wrapped, WRITING } from "./paint.ts"
+import { type Pace, paced } from "./pace.ts"
+import { bold, clean, dim, LOOKS, markdown, message as paint, plain, Row, THOUGHT, TOLD, Wrapped } from "./paint.ts"
 import { type Diagnostic, type Message, Store, type StoreError } from "./store.ts"
 import { type TurnEvent, Turns } from "./turn.ts"
 
@@ -131,6 +134,8 @@ export interface Options {
   readonly tty?: Tty | undefined
   // Where the input completes file names from.
   readonly cwd?: string | undefined
+  // The times of the pace. With none, those of pace.ts.
+  readonly pace?: Pace | undefined
 }
 
 export class Terminal extends Context.Service<Terminal, {
@@ -173,7 +178,7 @@ export class Terminal extends Context.Service<Terminal, {
         const programs = new Set<number>() // the calls of the programs that run, and that are on the screen
         let thought: { text: string; drawn: Wrapped } | null = null
         let text: { text: string; drawn: Markdown } | null = null
-        let writing: { text: string; drawn: Wrapped } | null = null
+        let writing = false // the model writes a program
         let hint: string | null = null
         let armed = false // Ctrl+C was pressed once with an empty input
 
@@ -192,7 +197,7 @@ export class Terminal extends Context.Service<Terminal, {
 
         const relive = () => {
           live.clear()
-          for (const one of [thought, text, writing]) {
+          for (const one of [thought, text]) {
             if (one !== null) {
               live.addChild(new Spacer(1))
               live.addChild(one.drawn)
@@ -208,7 +213,8 @@ export class Terminal extends Context.Service<Terminal, {
             return IDLE
           }
           const seconds = Math.max(0, Math.round((now - working.since) / 1000))
-          return "turn " + working.turn + " · " + (programs.size > 0 ? "runs a program" : "works") + " · " + seconds + " s · Esc stops"
+          const does = programs.size > 0 ? "runs a program" : writing ? "writes a program" : "works"
+          return "turn " + working.turn + " · " + does + " · " + seconds + " s · Esc stops"
         }
 
         const draw = () => {
@@ -299,8 +305,7 @@ export class Terminal extends Context.Service<Terminal, {
             }
             case "program": {
               thought = null
-              writing = { text: (writing?.text ?? "") + event.delta, drawn: writing?.drawn ?? new Wrapped("", WRITING) }
-              writing.drawn.setText(writing.text)
+              writing = true
               relive()
               break
             }
@@ -309,7 +314,7 @@ export class Terminal extends Context.Service<Terminal, {
               // here is not in the log: it was blank.
               thought = null
               text = null
-              writing = null
+              writing = false
               relive()
               programs.add(event.call)
               add(new Wrapped(event.program, LOOKS.tool))
@@ -318,7 +323,7 @@ export class Terminal extends Context.Service<Terminal, {
             case "end": {
               thought = null
               text = null
-              writing = null
+              writing = false
               relive()
               programs.clear()
               working = null
@@ -453,10 +458,10 @@ export class Terminal extends Context.Service<Terminal, {
         yield* Effect.acquireRelease(Effect.sync(() => tui.start()), () => Effect.sync(() => tui.stop()))
         // At the end, before the screen stops: the draft as it is then.
         yield* Effect.addFinalizer(() => save)
-        yield* Effect.forkScoped(Effect.forever(Effect.flatMap(PubSub.take(events), (event) =>
+        yield* Effect.forkScoped(Stream.runForEach(paced(events, options.pace), (event) =>
           handle(event).pipe(
             Effect.catch((error) => diagnostic(Effect.logError("the terminal did not show an event (" + event.type + ")", error)))
-          ))))
+          )))
         // The seconds of the status row.
         yield* Effect.forkScoped(Effect.forever(Effect.andThen(
           Effect.sleep(1000),

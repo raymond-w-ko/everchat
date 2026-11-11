@@ -12,6 +12,7 @@ import { Functions } from "../src/functions.ts"
 import { Limit } from "../src/limit.ts"
 import { Memory } from "../src/memory.ts"
 import { OpenAI } from "../src/openai.ts"
+import { type Pace, QUIET } from "../src/pace.ts"
 import type { Event, Reply, Request, WireError } from "../src/request.ts"
 import { Sandbox } from "../src/sandbox.ts"
 import { Shell } from "../src/shell.ts"
@@ -45,7 +46,8 @@ const launch = <A, E>(
   file: string,
   wire: { layer: Layer.Layer<OpenAI> },
   screen: Screen,
-  effect: Effect.Effect<A, E, Terminal | Turns | Store | Memory>
+  effect: Effect.Effect<A, E, Terminal | Turns | Store | Memory>,
+  pace?: Pace
 ) => {
   const cwd = path.dirname(file)
   // The logger is under every layer, and merged: see diagnostics.ts.
@@ -57,7 +59,7 @@ const launch = <A, E>(
   const sandbox = Sandbox.layer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
-  const terminal = Terminal.layer({ tty: screen, cwd }).pipe(Layer.provideMerge(turns))
+  const terminal = Terminal.layer({ tty: screen, cwd, pace }).pipe(Layer.provideMerge(turns))
   return Effect.runPromise(effect.pipe(Effect.provide(terminal), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
@@ -157,10 +159,76 @@ test("what the model gives is shown as it streams: the thought, then the text, a
   }))
 })
 
-test("a program is shown while the model writes it and while it runs, then its result, each once", async () => {
+test("a text is shown a paragraph at a time, and not each word", async () => {
   const file = newFile()
   const screen = new Screen(60, 24)
-  const written = gate()
+  const [first, second] = [gate(), gate()]
+  const said = "The first block is whole.\n\nThe second block has `code` in it.\n\nThe third one ends the reply."
+  const wire = wireOf((asked) =>
+    Stream.make<Array<Event>>({ type: "text", delta: "The first block " }, { type: "text", delta: "is whole.\n\nThe second bl" }).pipe(
+      Stream.concat(waits(first)),
+      Stream.concat(Stream.make<Array<Event>>({ type: "text", delta: "ock has `code` in it.\n\nThe third one" })),
+      Stream.concat(waits(second)),
+      Stream.concat(Stream.make<Array<Event>>({ type: "text", delta: " ends the reply." }, { type: "end", reply: says(asked, said) }))
+    ))
+  // No time gives a text on in this test: only the end of a paragraph does.
+  const never = { limit: 3_600_000, quiet: 3_600_000, long: 3_600_000 }
+  await launch(file, wire, screen, Effect.gen(function*() {
+    yield* idle(screen)
+    send(screen, "say three things")
+    const one = yield* sees(screen, "The first block is whole.")
+    expect(one).not.toContain("The second")
+    // Longer than the time after which a held text is given on by default.
+    yield* Effect.sleep(QUIET + 200)
+    expect(yield* Effect.promise(() => screen.text())).not.toContain("The second")
+    yield* open(first)
+    yield* sees(screen, "The second block has code in it.")
+    yield* Effect.sleep("150 millis")
+    expect(yield* Effect.promise(() => screen.text())).not.toContain("The third")
+    yield* open(second)
+    // The last paragraph was never given on: the message of the log shows it.
+    yield* sees(screen, "The third one ends the reply.", IDLE)
+    expect(yield* Effect.promise(() => screen.all())).toEqual([
+      "",
+      "› say three things",
+      "",
+      "The first block is whole.",
+      "",
+      "The second block has code in it.",
+      "",
+      "The third one ends the reply.",
+      "",
+      RULE,
+      "",
+      RULE,
+      IDLE
+    ])
+  }), never)
+})
+
+test("a text that has no end of a paragraph still moves: its whole lines are shown after a short time", async () => {
+  const file = newFile()
+  const screen = new Screen(60, 24)
+  const held = gate()
+  const wire = wireOf((asked) =>
+    Stream.make<Array<Event>>({ type: "text", delta: "- one\n- two\n- thr" }).pipe(
+      Stream.concat(waits(held)),
+      Stream.concat(Stream.make<Array<Event>>({ type: "text", delta: "ee" }, { type: "end", reply: says(asked, "- one\n- two\n- three") }))
+    ))
+  await launch(file, wire, screen, Effect.gen(function*() {
+    yield* idle(screen)
+    send(screen, "list them")
+    // Nothing comes for a while: all that is held is shown.
+    yield* sees(screen, "- one", "- two", "- thr")
+    yield* open(held)
+    yield* sees(screen, "- three", IDLE)
+  }))
+})
+
+test("a program is shown whole when it starts to run, then its result, each once; while the model writes it, the status row says so", async () => {
+  const file = newFile()
+  const screen = new Screen(60, 24)
+  const [written, after] = [gate(), gate()]
   const code = "const said = await shell('sleep 0.4; echo it ran')\nreturn said"
   const wire = wireOf((asked, n) =>
     n === 1
@@ -168,14 +236,20 @@ test("a program is shown while the model writes it and while it runs, then its r
         Stream.concat(waits(written)),
         Stream.concat(Stream.make<Array<Event>>({ type: "end", reply: runs(asked, "call_1", code) }))
       )
-      : whole(says(asked, "It ran.")))
+      : Stream.concat(waits(after), whole(says(asked, "It ran."))))
   await launch(file, wire, screen, Effect.gen(function*() {
     yield* idle(screen)
     send(screen, "run it")
-    yield* sees(screen, "▸ const said = await shell(", "turn 1 · works · ")
+    // Half a program is not shown: it says nothing to a person.
+    const writing = yield* sees(screen, "turn 1 · writes a program · ")
+    expect(writing).not.toContain("▸")
+    expect(writing).not.toContain("const said")
     yield* open(written)
     const running = yield* sees(screen, "  return said", "turn 1 · runs a program · ")
     expect(running).not.toContain("◂")
+    // The program has ended, and the model works on its next step.
+    yield* sees(screen, "◂ it ran", "turn 1 · works · ")
+    yield* open(after)
     const done = yield* sees(screen, "◂ it ran", "It ran.", IDLE)
     expect(done.split("const said = await shell").length).toBe(2)
     expect(yield* Effect.promise(() => screen.all())).toEqual([
@@ -282,6 +356,28 @@ test("Esc stops the turn that runs: its note is shown, and what streamed and is 
   }))
   expect(turns(file)).toEqual([{ id: 1, status: "stopped" }])
   expect(messages(file)).toEqual([{ kind: "user", text: "tell me all" }, { kind: "note", text: "Stopped." }])
+})
+
+test("a stop while the model writes a program: nothing of the program is shown, and the next turn works", async () => {
+  const file = newFile()
+  const screen = new Screen(60, 20)
+  const held = gate()
+  const wire = wireOf((asked, n) =>
+    n === 1
+      ? Stream.concat(Stream.make<Array<Event>>({ type: "program", delta: "const half = " }), Stream.never)
+      : Stream.concat(waits(held), whole(says(asked, "Here I am."))))
+  await launch(file, wire, screen, Effect.gen(function*() {
+    send(screen, "write it")
+    yield* sees(screen, "turn 1 · writes a program · ")
+    screen.type(KEYS.escape)
+    const stopped = yield* sees(screen, "· Stopped.", IDLE)
+    expect(stopped).not.toContain("const half")
+    send(screen, "are you there?")
+    yield* sees(screen, "turn 2 · works · ")
+    yield* open(held)
+    yield* sees(screen, "Here I am.", IDLE)
+  }))
+  expect(turns(file)).toEqual([{ id: 1, status: "stopped" }, { id: 2, status: "done" }])
 })
 
 test("a message that is sent while a turn runs is shown at once, and it steers that turn", async () => {
