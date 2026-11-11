@@ -360,3 +360,10 @@ Write the new code with Effect. In particular:
   database, running requests, and interrupts, not hand-written versions.
 - Use Effect's own modules (for example `effect/sql`, `effect/cli`) before
   other libraries, where they fit.
+- Do not write to stdout or stderr (`console.log`, `process.stderr`).
+  EverChat is one process in a terminal, and such a line breaks the screen.
+  To say something about the program's own work, log it with Effect
+  (`Effect.logWarning`, `Effect.logError`), with the module's name as the
+  annotation `source`. The logger writes it to the table `log`
+  (`src/diagnostics.ts`). That file also says where the logger's layer must
+  go, so that every fiber has it.

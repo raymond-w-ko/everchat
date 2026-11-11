@@ -18,7 +18,7 @@ instead.
 | chat | noun | The one exchange between a person and EverChat. It never ends. One chat is one database in one home. |
 | person | noun | The human who uses EverChat. The factory calls its one person the operator. |
 | EverChat | noun | The program, and the agent that the person talks to. In the log, its messages have the kind `asst`. |
-| log | noun | All the messages of the chat, in the order they came, kept for ever. Table `msg`. A message in the log never changes and is never deleted. |
+| log | noun | All the messages of the chat, in the order they came, kept for ever. Table `msg`. A message in the log never changes and is never deleted. The table named `log` is not the log: it holds the diagnostics. |
 | message | noun | One entry of the log. It has an id (0, 1, 2, ...) that never changes and is never used again. |
 | page | noun | One message of a text that is too long for one message. The text is logged as pages in a row, of at most 30,000 characters each. Each page has its own id. |
 | kind | noun | The type of a message. It says who or what wrote it. The model reads each message as `<kind>: <text>`. See the table below. |
@@ -135,6 +135,7 @@ instead.
 | run tag | noun | A marker that a launch puts in the environment of each shell it starts. The next launch uses it to find and stop shells that a crash left behind. |
 | crash | noun | The end of a launch without a clean exit. The next launch finds it and records it. |
 | restart | noun | A launch after another launch of the same chat. It reads the database and continues: cut turns continue, and cut calls are closed. |
+| diagnostic | noun | One line that EverChat writes about its own work, for the person who looks for a fault: a request that is sent again, a compaction that failed. Table `log`. It has a level (`debug`, `info`, `warn`, `error`) and a source, the module that wrote it. It is not a message, and the model never reads it. Diagnostics are deleted after 30 days. |
 | export | noun | A copy of data from the database into a file, for other programs and for people. An export is not state: EverChat never reads it back. |
 | transcript | noun | The export of what happened in a chat: launches, turns, messages, calls, and usage. It is JSONL (one JSON value per line), one file per launch, and append only. It does not hold the tree or the views. |
 
@@ -169,6 +170,7 @@ instead.
 | conversation, thread | chat | One name for one thing. |
 | session (for the chat) | chat | "Session" is the factory's word. Use it only when you write about the factory. |
 | history | log | The log is a table with exact rules. |
+| log, log line (for what the program says about its own work) | diagnostic | The log is the chat's messages. As a verb, "to log" is still correct for both: a message is logged, and a module logs a diagnostic. |
 | context (for what the model is shown) | view | "Context window" is still correct for a model's size limit. |
 | assistant, AI, bot (for who speaks) | EverChat | `asst` is only the name of the kind. |
 | `ever`, `unii` | `asst` | The names of the old code and of upstream for that kind. |

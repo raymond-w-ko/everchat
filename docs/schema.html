@@ -568,11 +568,19 @@ create trigger usage_no_update before update on usage
 
 <div class="card">
 <h3><code>log</code></h3>
-<p>Diagnostics (item 59). Today about 30 calls write to stderr. In one process inside a PTY, that would break the screen. Rows older than 30 days are deleted at start.</p>
+<p>Diagnostics (item 59). The old code has about 30 calls that write to stderr. In one process inside a PTY, that would break the screen. So nothing goes to stderr: Effect's logger writes to this table (<code>src/diagnostics.ts</code>), and each module logs as any Effect program does. Rows older than 30 days are deleted at start.</p>
+<ul>
+  <li><code>level</code> is Effect's level: Fatal and Error are <code>error</code>, Warn is <code>warn</code>, Info is <code>info</code>, Debug and Trace are <code>debug</code>. Lines below Info are dropped unless the program sets a lower minimum.</li>
+  <li><code>source</code> is the module, which names itself with a log annotation. A line with none has <code>everchat</code>.</li>
+  <li><code>text</code> is the message, then the other annotations as <code>key=value</code>, then the cause, if there is one.</li>
+  <li><code>created</code> is when the line happened, not when it was written. <code>seq</code> gives the order.</li>
+  <li>The lines are written in batches, every 100 ms, and when the program ends. A kill of the process loses at most the lines of one batch. This is the one place where an event is not written at once: a diagnostic is not state, and a write for each line would make a burst of warnings slow.</li>
+  <li>A batch that the database refuses is dropped and counted. The next batch starts with a line that says how many were lost.</li>
+</ul>
 <pre><code>create table log (
   seq     integer primary key,
   level   text    not null check (level in ('debug', 'info', 'warn', 'error')),
-  source  text    not null,                 -- the module: memory, wire.openai, tools, ...
+  source  text    not null,                 -- the module: memory, cache, ask, turn, shell, ...
   text    text    not null,
   launch  integer not null references launch (id),
   created integer not null
