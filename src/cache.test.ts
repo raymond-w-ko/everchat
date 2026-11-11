@@ -2,10 +2,10 @@
 // the verdict of its reply.
 
 import { expect, test } from "bun:test"
-import { Effect, Layer, Stream } from "effect"
+import { Clock, Effect, Fiber, Layer, Stream } from "effect"
 import { TestClock } from "effect/testing"
-import { ALIVE, Cache, judge, MIN, parts, READY } from "./cache.ts"
-import type { Block, Event, Reply, Request, Usage, Wire } from "./request.ts"
+import { ALIVE, Cache, GAIN, judge, LOOK, MIN, parts, READY, WORTH } from "./cache.ts"
+import { type Block, type Event, type Reply, type Request, type Usage, type Wire, WireError } from "./request.ts"
 
 const blocks = (n: number): Array<Block> => Array.from({ length: n }, (_, k) => ({ text: `block ${k} ` + "x".repeat(1000) + "\n", mark: k === n - 1 }))
 
@@ -90,6 +90,11 @@ test("a reply is first, a hit, a partial read, or a miss", () => {
   expect(judge(expectation, usage(10440, 2560))).toEqual({ verdict: "partial", expected: 11700, read: 2560 })
   expect(judge(expectation, usage(13000, 0))).toEqual({ verdict: "miss", expected: 11700, read: 0 })
   expect(judge({ bytes: 0, total: 10000, age: null }, usage(13000, 0)).verdict).toBe("first")
+  // A small part that is not read is not a miss; one that is read is a hit.
+  expect(judge({ bytes: 1500, total: 10000, age: 6000 }, usage(13000, 0))).toEqual({ verdict: "small", expected: 1950, read: 0 })
+  expect(judge({ bytes: 1500, total: 10000, age: 6000 }, usage(11720, 1280)).verdict).toBe("hit")
+  expect(judge({ bytes: 1600, total: 10000, age: 6000 }, usage(13000, 0)).verdict).toBe("miss") // 2,080 tokens: counted on
+  expect(WORTH).toBe(2048)
   // A prefix shorter than the vendor's minimum is never cached: no miss.
   expect(judge({ bytes: 700, total: 10000, age: 6000 }, usage(13000, 0))).toEqual({ verdict: "first", expected: 910, read: 0 })
   expect(MIN).toBe(1024)
@@ -122,4 +127,118 @@ test("a watched wire puts its judgment in the reply, and logs a miss", async () 
     { verdict: "hit", expected: 13000, read: 12000 },
     { verdict: "miss", expected: 13000, read: 0 }
   ])
+})
+
+// Single flight
+// -------------
+
+test("a request that can wait does so until a long prefix of its own is readable; a turn goes at once", async () => {
+  const times: Array<[string, number]> = []
+  const fake: Wire = {
+    send: (asked) =>
+      Stream.unwrap(Effect.map(Clock.currentTimeMillis, (now) => {
+        times.push([asked.session + "/" + (asked.items[0] as any).blocks.length, now])
+        const reply: Reply = { output: [], text: "ok", calls: [], stop: "done", usage: usage(13000, 0), diagnosis: null, pick: asked.pick, id: "r", request: "q" }
+        return Stream.make<Array<Event>>({ type: "end", reply })
+      }))
+  }
+  await run(Effect.gen(function*() {
+    const cache = yield* Cache
+    const go = (asked: Request, patient: boolean) => Effect.forkChild(Stream.runDrain(cache.send(fake, asked, patient)))
+    yield* go(request(8), true) // the first of its kind: it goes
+    yield* TestClock.adjust(1000)
+    const follower = yield* go(request(9), true) // 8 of its blocks were sent 1 s ago: it waits
+    const turn = yield* go(request(10), false) // a turn does not wait
+    const other = yield* go(request(8, { session: "chat-2" }), true) // another chat shares nothing
+    yield* TestClock.adjust(READY - 1001)
+    expect(times.map(([name]) => name)).toEqual(["chat-1/9", "chat-1/11", "chat-2/9"])
+    yield* TestClock.adjust(1)
+    yield* Fiber.join(follower)
+    yield* Fiber.join(turn)
+    yield* Fiber.join(other)
+  }))
+  expect(times).toEqual([["chat-1/9", 0], ["chat-1/11", 1000], ["chat-2/9", 1000], ["chat-1/10", READY]])
+})
+
+test("a request does not wait for a gain of a few lines", async () => {
+  const sends: Array<number> = []
+  const fake: Wire = {
+    send: (asked) =>
+      Stream.unwrap(Effect.map(Clock.currentTimeMillis, (now) => {
+        sends.push(now)
+        const reply: Reply = { output: [], text: "ok", calls: [], stop: "done", usage: usage(13000, 0), diagnosis: null, pick: asked.pick, id: "r", request: "q" }
+        return Stream.make<Array<Event>>({ type: "end", reply })
+      }))
+  }
+  await run(Effect.gen(function*() {
+    const cache = yield* Cache
+    yield* Stream.runDrain(cache.send(fake, request(8), true))
+    yield* TestClock.adjust(READY) // all of the first request is readable now
+    yield* Stream.runDrain(cache.send(fake, request(9), true)) // it adds one block of about 1 KB
+    yield* TestClock.adjust(1000)
+    // One more block, sent 1 s ago, is less than GAIN bytes: no wait.
+    yield* Stream.runDrain(cache.send(fake, request(10), true))
+  }))
+  expect(sends).toEqual([0, READY, READY + 1000])
+  expect(GAIN).toBe(4096)
+})
+
+test("a request that failed before the model began is forgotten: the next one does not wait for it", async () => {
+  const sends: Array<number> = []
+  let n = 0
+  const fake: Wire = {
+    send: (asked) =>
+      Stream.unwrap(Effect.map(Clock.currentTimeMillis, (now) => {
+        sends.push(now)
+        if (++n === 1) {
+          return Stream.fail(new WireError({ kind: "busy", message: "down", retry: true, began: false, after: null, status: 503, code: null, request: null }))
+        }
+        const reply: Reply = { output: [], text: "ok", calls: [], stop: "done", usage: usage(13000, 0), diagnosis: null, pick: asked.pick, id: "r", request: "q" }
+        return Stream.make<Array<Event>>({ type: "end", reply })
+      }))
+  }
+  await run(Effect.gen(function*() {
+    const cache = yield* Cache
+    yield* Effect.flip(Stream.runDrain(cache.send(fake, request(8), true)))
+    yield* TestClock.adjust(1000)
+    yield* Stream.runDrain(cache.send(fake, request(8), true)) // the same request again, 1 s later
+  }))
+  expect(sends).toEqual([0, 1000])
+})
+
+
+test("a request waits for the end of the first reply when that comes later than READY, and an interrupt ends the wait", async () => {
+  const sends: Array<[number, number]> = []
+  const slow = (seconds: number): Wire => ({
+    send: (asked) =>
+      Stream.unwrap(Effect.gen(function*() {
+        sends.push([(asked.items[0] as any).blocks.length, yield* Clock.currentTimeMillis])
+        yield* Effect.sleep(seconds * 1000)
+        const reply: Reply = { output: [], text: "ok", calls: [], stop: "done", usage: usage(13000, 0), diagnosis: null, pick: asked.pick, id: "r", request: "q" }
+        return Stream.make<Array<Event>>({ type: "end", reply })
+      }))
+  })
+  await run(Effect.gen(function*() {
+    const cache = yield* Cache
+    const first = yield* Effect.forkChild(Stream.runDrain(cache.send(slow(8), request(8), true)))
+    yield* TestClock.adjust(100)
+    const follower = yield* Effect.forkChild(Stream.runDrain(cache.send(slow(0), request(8), true)))
+    yield* TestClock.adjust(READY + 1000) // past READY: the first request still runs
+    expect(sends.length).toBe(1)
+    yield* TestClock.adjust(2000) // the first reply ends at 8 s
+    yield* Fiber.join(first)
+    yield* TestClock.adjust(LOOK)
+    yield* Fiber.join(follower)
+    expect(sends[1]![1]).toBeGreaterThanOrEqual(8000)
+    expect(sends[1]![1]).toBeLessThanOrEqual(8000 + LOOK)
+
+    // A request that is interrupted is closed too: the next one goes, READY after it was sent.
+    const cut = yield* Effect.forkChild(Stream.runDrain(cache.send(slow(3600), request(8, { session: "chat-3" }), true)))
+    yield* TestClock.adjust(1000)
+    yield* Fiber.interrupt(cut)
+    const next = yield* Effect.forkChild(Stream.runDrain(cache.send(slow(0), request(8, { session: "chat-3" }), true)))
+    yield* TestClock.adjust(READY)
+    yield* Fiber.join(next)
+  }))
+  expect(sends.length).toBe(4)
 })

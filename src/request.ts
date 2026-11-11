@@ -122,7 +122,7 @@ export interface Reply {
   readonly diagnosis: Diagnosis | null // null: none was asked for, or the vendor gave none
   // Our own judgment of the cache (cache.ts): what the reply should have
   // read, and whether it did. Absent when no watch judged the reply.
-  readonly cache?: { readonly verdict: "first" | "hit" | "partial" | "miss"; readonly expected: number; readonly read: number } | undefined
+  readonly cache?: { readonly verdict: "first" | "small" | "hit" | "partial" | "miss"; readonly expected: number; readonly read: number } | undefined
   readonly pick: Pick // as it ran: the speed can differ from the one asked
   readonly id: string | null // the vendor's id of the reply
   readonly request: string | null // the vendor's id of the HTTP request

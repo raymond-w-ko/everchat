@@ -135,7 +135,7 @@ test("migration 2 adds usage.expected to a database of migration 1, and keeps it
   )
   expect(rows(file, "select input, expected from usage order by id")).toEqual([{ input: 10, expected: null }, { input: 10, expected: 9000 }])
   // The query that finds a miss: something to read was expected, and nothing was read.
-  expect(rows(file, "select id from usage where expected >= 1024 and cache_read = 0")).toEqual([{ id: 2 }])
+  expect(rows(file, "select id from usage where expected >= 2048 and cache_read = 0")).toEqual([{ id: 2 }])
 })
 
 // Rows that the refused writes below build on. Each one is valid.
