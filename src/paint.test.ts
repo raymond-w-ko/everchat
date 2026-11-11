@@ -3,7 +3,7 @@
 
 import { expect, test } from "bun:test"
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui"
-import { clean, LOOKS, message, MOST, Row, THOUGHT, TOLD, Wrapped, WRITING } from "./paint.ts"
+import { clean, LOOKS, message, MOST, Row, THOUGHT, TOLD, Wrapped, WRITING, written } from "./paint.ts"
 
 // The rows with no ink: what a person reads.
 const read = (rows: ReadonlyArray<string>) => rows.map((row) => stripTerminalSequences(row))
@@ -95,4 +95,20 @@ test("the one row of the status is never wrapped: what does not fit is left out"
   expect(row.render(40)).toEqual(["idle · gpt-test medium"])
   expect(read(row.render(10))).toEqual(["idle · gp…"])
   expect(row.render(10).length).toBe(1)
+})
+
+test("a message as plain text: its mark, its lines under the text, no ink, and nothing shortened", () => {
+  expect(written("user", "one line")).toBe("› one line")
+  expect(written("tool", "const a = 1\nreturn a")).toBe("▸ const a = 1\n  return a")
+  expect(written("echo", "a\n\nb")).toBe("◂ a\n  \n  b")
+  expect(written("note", "Stopped.")).toBe("· Stopped.")
+  // EverChat's words, and an agent's report, are as the model wrote them.
+  expect(written("asst", "It is **bold**.\n\n- one\n- two")).toBe("It is **bold**.\n\n- one\n- two")
+  expect(written("work", "[CalmOtter] `done`")).toBe("[CalmOtter] `done`")
+  // Every kind is cleaned, and none is shortened.
+  for (const kind of ["user", "asst", "tool", "echo", "work", "note"] as const) {
+    expect(written(kind, "a \u001b[31mred\u0007 word\tend")).toEndWith("a red word    end")
+  }
+  const long = Array.from({ length: 500 }, (_, k) => "row " + k).join("\n")
+  expect(written("echo", long).split("\n").length).toBe(500)
 })

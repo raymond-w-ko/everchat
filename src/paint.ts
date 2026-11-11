@@ -137,15 +137,19 @@ export class Row implements Component {
 // The things of the chat
 // ----------------------
 
+// The mark of each kind that is plain text. EverChat's words, and an
+// agent's report, have none.
+export const MARKS: Readonly<Record<Exclude<Kind, "asst" | "work">, string>> = { user: "› ", tool: "▸ ", echo: "◂ ", note: "· " }
+
 export const LOOKS: Readonly<Record<Exclude<Kind, "asst" | "work">, Look>> = {
-  user: { mark: bold("› "), ink: plain },
-  tool: { mark: dim("▸ "), ink: dim, most: MOST },
-  echo: { mark: dim("◂ "), ink: dim, most: MOST },
-  note: { mark: dim("· "), ink: (text) => dim(italic(text)) }
+  user: { mark: bold(MARKS.user), ink: plain },
+  tool: { mark: dim(MARKS.tool), ink: dim, most: MOST },
+  echo: { mark: dim(MARKS.echo), ink: dim, most: MOST },
+  note: { mark: dim(MARKS.note), ink: (text) => dim(italic(text)) }
 }
 
 // A program while the model writes it: its last rows.
-export const WRITING: Look = { mark: dim("▸ "), ink: dim, most: MOST, keep: "tail" }
+export const WRITING: Look = { mark: dim(MARKS.tool), ink: dim, most: MOST, keep: "tail" }
 
 // A thought while the model thinks it: its last rows.
 export const THOUGHT: Look = { mark: dim("  "), ink: (text) => dim(italic(text)), most: 6, keep: "tail" }
@@ -158,3 +162,9 @@ export const markdown = (text: string): Markdown => new Markdown(clean(text), 0,
 // A message of the log, as the terminal shows it.
 export const message = (kind: Kind, text: string): Component =>
   kind === "asst" || kind === "work" ? markdown(text) : new Wrapped(text, LOOKS[kind])
+
+// A message of the log as plain text, for pipe mode: no ink, not wrapped,
+// and whole. EverChat's words are as the model wrote them. Another kind has
+// its mark, and its lines after the first are indented under the text.
+export const written = (kind: Kind, text: string): string =>
+  kind === "asst" || kind === "work" ? clean(text) : MARKS[kind] + clean(text).split("\n").join("\n  ")
