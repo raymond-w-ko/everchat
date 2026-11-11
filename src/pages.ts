@@ -5,8 +5,8 @@
 // goes in pages (a message that is logged, a zoom).
 //
 // Ported from the old code (ref/src/clip.ts: clip_end, clip_pages,
-// clip_page). The head-and-tail form of a long result is not here: it comes
-// with the output limit.
+// clip_page). The head-and-tail form of a long result is not here: it is
+// the output limit (limit.ts).
 
 // The most characters of one page. It is also the most text that a model
 // gets in one piece.
