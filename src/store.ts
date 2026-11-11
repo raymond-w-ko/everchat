@@ -217,6 +217,21 @@ export interface Call {
   readonly status: "running" | "done" | "failed" | "denied" | "cut"
 }
 
+// One diagnostic: a line that the program writes about its own work.
+export type Level = "debug" | "info" | "warn" | "error"
+
+export interface NewDiagnostic {
+  readonly level: Level
+  readonly source: string // the module: memory, cache, turn, ...
+  readonly text: string
+  readonly created: number // when it happened, which is before it was written
+}
+
+export interface Diagnostic extends NewDiagnostic {
+  readonly seq: number
+  readonly launch: number
+}
+
 // Errors
 // ------
 
@@ -318,6 +333,16 @@ const CallRow = Schema.Struct({
   status: Schema.Literals(["running", "done", "failed", "denied", "cut"])
 })
 
+const DiagnosticRow = Schema.Struct({
+  seq: Schema.Int,
+  level: Schema.Literals(["debug", "info", "warn", "error"]),
+  source: Schema.String,
+  text: Schema.String,
+  launch: Schema.Int,
+  created: Schema.Int
+})
+
+const decodeDiagnostics = Schema.decodeUnknownEffect(Schema.Array(DiagnosticRow))
 const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow))
 const decodeTurnItems = Schema.decodeUnknownEffect(Schema.Array(TurnItemRow))
 const decodeCalls = Schema.decodeUnknownEffect(Schema.Array(CallRow))
@@ -404,6 +429,14 @@ export class Store extends Context.Service<Store, {
 
   // The run tags of the launches that ended. No process may still carry one.
   readonly endedRunTags: Effect.Effect<Array<string>, StoreError>
+
+  // Diagnostics (table `log`). `addDiagnostics` writes them in one
+  // transaction, in the order given. `diagnostics` gives those after `after`
+  // (a `seq`), oldest first. `dropDiagnostics` deletes those from before
+  // `before` (a time), and gives their number.
+  addDiagnostics(rows: ReadonlyArray<NewDiagnostic>): Effect.Effect<void, StoreError>
+  diagnostics(after?: number, limit?: number): Effect.Effect<Array<Diagnostic>, StoreError>
+  dropDiagnostics(before: number): Effect.Effect<number, StoreError>
 }>()("everchat/store/Store") {
   // The store over the `SqlClient` in the context.
   static readonly layerNoDatabase = (options: Options) => Layer.effect(Store, make(options))
@@ -817,6 +850,33 @@ const make = Effect.fnUntraced(function*(options: Options) {
     return rows.map((row) => row.tag)
   }).pipe(failed("endedRunTags"), Effect.withSpan("Store.endedRunTags"))
 
+  // Diagnostics
+  // -----------
+
+  const addDiagnostics = Effect.fn("Store.addDiagnostics")(function*(rows: ReadonlyArray<NewDiagnostic>) {
+    if (rows.length === 0) {
+      return
+    }
+    yield* sql.withTransaction(Effect.gen(function*() {
+      for (const row of rows) {
+        yield* sql`insert into log ${
+          sql.insert({ level: row.level, source: row.source, text: row.text.toWellFormed(), launch: launch.id, created: Math.trunc(row.created) })
+        }`
+      }
+    }))
+  }, failed("addDiagnostics"))
+
+  const diagnostics = Effect.fn("Store.diagnostics")(function*(after = 0, limit = 1000) {
+    return [...(yield* decodeDiagnostics(
+      yield* sql`select seq, level, source, text, launch, created from log where seq > ${after} order by seq limit ${limit}`
+    ))]
+  }, failed("diagnostics"))
+
+  const dropDiagnostics = Effect.fn("Store.dropDiagnostics")(function*(before: number) {
+    const rows = yield* sql<{ seq: number }>`delete from log where created < ${before} returning seq`
+    return rows.length
+  }, failed("dropDiagnostics"))
+
   const transaction = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | StoreError, R> =>
     Effect.mapError(
       sql.withTransaction(effect),
@@ -857,6 +917,9 @@ const make = Effect.fnUntraced(function*(options: Options) {
     calls,
     call,
     setCallPgid,
-    endedRunTags
+    endedRunTags,
+    addDiagnostics,
+    diagnostics,
+    dropDiagnostics
   })
 })
