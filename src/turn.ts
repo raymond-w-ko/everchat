@@ -68,6 +68,9 @@ import type { Call, Head, Item, Reply, Result } from "./request.ts"
 import { Sandbox } from "./sandbox.ts"
 import { type Call as CallRow, type Message, Store, StoreError, type Turn } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "turn")
+
 // The start of the block with the person's new message, after the view.
 export const HEAD = "Turn: the user's new message:\n\n"
 
@@ -412,7 +415,7 @@ export class Turns extends Context.Service<Turns, {
             Effect.catchCause((cause) =>
               Effect.gen(function*() {
                 running = null
-                yield* Effect.logError("the turn loop stopped", cause)
+                yield* diagnostic(Effect.logError("the turn loop stopped", cause))
               })
             )
           )
@@ -471,6 +474,7 @@ export class Turns extends Context.Service<Turns, {
         }
         const [cut] = yield* store.runningTurns(null)
         if (cut !== undefined) {
+          yield* diagnostic(Effect.logInfo(`turn ${cut.id} was cut, and continues`))
           yield* launch(cut)
         }
 

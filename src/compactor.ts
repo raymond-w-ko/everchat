@@ -24,6 +24,9 @@ import { head } from "./head.ts"
 import { Compactor, CompactorError } from "./memory.ts"
 import { type Pick, Store } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "compactor")
+
 export interface Options {
   readonly pick: Pick // the compactor's model: usually a cheap one
   readonly rules?: string | null | undefined // the person's own instructions, as in every head of the chat
@@ -55,7 +58,7 @@ export const layer = (options: Options) =>
             })),
             Effect.catch((error) =>
               error.kind === "input" || error.kind === "policy"
-                ? Effect.as(Effect.logWarning(`a compaction was refused (${error.kind}): ${error.message}`), { text: "" })
+                ? Effect.as(diagnostic(Effect.logWarning(`a compaction was refused (${error.kind}): ${error.message}`)), { text: "" })
                 : Effect.fail(new CompactorError({ cause: error }))
             )
           )

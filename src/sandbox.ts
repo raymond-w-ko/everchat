@@ -36,6 +36,9 @@ import { FunctionError, Functions } from "./functions.ts"
 import { capped, HARD } from "./limit.ts"
 import { Store } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "sandbox")
+
 // The most memory that a program's engine may take.
 export const MEMORY = 512 * 1024 * 1024
 
@@ -182,6 +185,9 @@ export class Sandbox extends Context.Service<Sandbox, {
               disarm()
             }))
           )
+          if (!result.ok && result.error.kind === "sandbox") {
+            yield* diagnostic(Effect.logError(`the sandbox failed: ${result.error.message}`))
+          }
           return render(result, [...working.values()])
         }, Effect.scoped)
 

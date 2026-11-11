@@ -25,6 +25,9 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { Store } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "limit")
+
 // The most characters of a result that the model is shown, when the config
 // gives no other number. Three harnesses agree on about this size.
 export const LIMIT = 30000
@@ -127,7 +130,11 @@ export class Limit extends Context.Service<Limit, {
           if (text.length <= limit) {
             return { text, shown: bytes(text) }
           }
-          const where = (yield* put(call, text))
+          const written = yield* put(call, text)
+          if (!written) {
+            yield* diagnostic(Effect.logWarning(`the whole result of call ${call} could not be written to ${file(call)}`))
+          }
+          const where = written
             ? "The whole result is in the file " + file(call) + ", and result(" + call + ") gives it to a program."
             : "result(" + call + ") gives the whole result to a program."
           const short = shorten(text, limit, where)

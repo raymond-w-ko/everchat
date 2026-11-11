@@ -40,6 +40,9 @@ import { page, pages } from "./pages.ts"
 import type { Block } from "./request.ts"
 import { type Kind, type Message, type NewMessage, type NewUsage, Store, type StoreError } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "memory")
+
 // Constants
 // ---------
 
@@ -715,7 +718,7 @@ export class Memory extends Context.Service<Memory, {
           for (;;) {
             const request = ask
             const got = yield* Effect.suspend(() => compactor.compact(request, { l: job.l, i: job.i })).pipe(
-              Effect.tapError((error) => Effect.logWarning(`the compaction of node ${job.l}/${job.i} failed, and is asked again`, error)),
+              Effect.tapError((error) => diagnostic(Effect.logWarning(`the compaction of node ${job.l}/${job.i} failed, and is asked again`, error))),
               Effect.retry(retry)
             )
             if (got.usage !== undefined) {
@@ -732,7 +735,7 @@ export class Memory extends Context.Service<Memory, {
             ask = [...job.blocks, { text: over(text), mark: false }]
           }
           if (lines.length === 0) {
-            yield* Effect.logWarning(`the compaction of node ${job.l}/${job.i} gave no line: its source is cut`)
+            yield* diagnostic(Effect.logWarning(`the compaction of node ${job.l}/${job.i} gave no line: its source is cut`))
           }
           const kept = lines.length === 0 ? cut(flat(job.text)) : lines.reduce((a, b) => (bytes(b) < bytes(a) ? b : a))
           yield* apply(() => {
@@ -749,7 +752,7 @@ export class Memory extends Context.Service<Memory, {
           Effect.catchCause((cause) =>
             Effect.gen(function*() {
               mem.busy.delete(slot(job.l, job.i))
-              yield* Effect.logError(`node ${job.l}/${job.i} is not built`, cause)
+              yield* diagnostic(Effect.logError(`node ${job.l}/${job.i} is not built`, cause))
               yield* wake
             })
           )

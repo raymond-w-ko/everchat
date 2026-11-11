@@ -50,6 +50,9 @@ import * as fs from "node:fs"
 import { HARD } from "./limit.ts"
 import { Store, type StoreError } from "./store.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "shell")
+
 // The environment variable that carries a launch's run tag.
 export const TAG = "EVERCHAT_RUN"
 
@@ -176,7 +179,10 @@ export class Shell extends Context.Service<Shell, {
         const shells = new Set<Bun.Subprocess>()
 
         // What a crash left behind.
-        yield* sweep(new Set((yield* store.endedRunTags).filter((old) => old !== tag)))
+        const left = yield* sweep(new Set((yield* store.endedRunTags).filter((old) => old !== tag)))
+        if (left > 0) {
+          yield* diagnostic(Effect.logWarning(`stopped ${left} processes that an earlier launch left behind`))
+        }
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function*() {

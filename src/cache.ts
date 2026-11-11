@@ -57,6 +57,9 @@
 import { Clock, Context, Effect, Layer, Stream } from "effect"
 import type { Event, Request, Usage, Wire, WireError } from "./request.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "cache")
+
 // A cached prefix lives at least this long (OpenAI: 30 minutes by default).
 export const ALIVE = 30 * 60_000
 
@@ -247,7 +250,7 @@ export class Cache extends Context.Service<Cache, {
             }
             const cache = judge(expectation, event.reply.usage)
             const said = cache.verdict === "miss" || cache.verdict === "partial"
-              ? Effect.logWarning(
+              ? diagnostic(Effect.logWarning(
                 `prompt cache ${cache.verdict}: read ${cache.read} of about ${cache.expected} tokens expected`,
                 {
                   model: request.pick.model,
@@ -259,7 +262,7 @@ export class Cache extends Context.Service<Cache, {
                   reply: event.reply.id,
                   request: event.reply.request
                 }
-              )
+              ))
               : Effect.void
             return Effect.as(said, { type: "end", reply: { ...event.reply, cache } })
           })

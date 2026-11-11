@@ -32,6 +32,9 @@ import { Cache } from "./cache.ts"
 import { OpenAI } from "./openai.ts"
 import { type Event, type Reply, type Request, type Wire, WireError } from "./request.ts"
 
+// This module's diagnostics name it as their source (diagnostics.ts).
+const diagnostic = Effect.annotateLogs("source", "ask")
+
 // The most tries of a request that is not patient.
 export const TRIES = 5
 
@@ -76,7 +79,7 @@ export class Ask extends Context.Service<Ask, {
               }
               return Stream.unwrap(Effect.gen(function*() {
                 const wait = error.after !== null ? error.after * 1000 : yield* delay(n)
-                yield* Effect.logWarning(`a request failed (${error.kind}), and is sent again in ${wait} ms: ${error.message}`)
+                yield* diagnostic(Effect.logWarning(`a request failed (${error.kind}), and is sent again in ${wait} ms: ${error.message}`))
                 yield* Effect.sleep(wait)
                 return attempt(n + 1)
               }))
