@@ -8,6 +8,12 @@
 //   bun tools/probe.ts cache <model>    which cache marks are written and read
 //   bun tools/probe.ts tool <model>     a program sent back as received
 //   bun tools/probe.ts watch <model>    our cache watch against the real vendor
+//   bun tools/probe.ts burst <model> <all|slow|late|groups> <b>
+//                                       one request, then b more with the
+//                                       same prefix, released in four ways
+//   bun tools/probe.ts compact <model> <count> <shorts>
+//                                       the real memory and compactor: `count`
+//                                       compactions that start together
 //   PROBE_EFFORT=high bun tools/probe.ts reason <model>
 //                                       a turn with thinking and two programs
 //   bun tools/probe.ts raw <model> <form> <count> <same|grow> <gap ms>
@@ -17,8 +23,17 @@
 
 import { Effect, Layer, Redacted, Stream } from "effect"
 import * as crypto from "node:crypto"
+import { Database as Sqlite } from "bun:sqlite"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+import { Ask } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
+import * as RealCompactor from "../src/compactor.ts"
+import { Memory } from "../src/memory.ts"
+import { Store } from "../src/store.ts"
 import { Gateway } from "../src/gateway.ts"
+import { head as realHead } from "../src/head.ts"
 import { Fetch, type Fetcher, OpenAI } from "../src/openai.ts"
 import type { Block, Head, Item, Reply, Request } from "../src/request.ts"
 
@@ -30,7 +45,17 @@ const nonce = hash(String(Date.now()) + Math.random()).slice(0, 12)
 let last: any = null
 // A change of the request's body, for a test of another form of request.
 let variant: (body: any) => any = (body) => body
+// A run stops itself when it has sent this many requests. Say how many a
+// run should need before you start it, and set PROBE_LIMIT to a little more.
+// The default is small on purpose: a probe once sent 313 requests where 63
+// were planned.
+const LIMIT = Number(process.env.PROBE_LIMIT ?? 20)
+let requests = 0
 const tee: Fetcher = async (url, init) => {
+  if (++requests > LIMIT) {
+    console.log(JSON.stringify({ stopped: `the limit of ${LIMIT} requests is reached (PROBE_LIMIT)` }))
+    process.exit(2)
+  }
   init = { ...init, body: JSON.stringify(variant(JSON.parse(init.body as string))) }
   const response = await fetch(url, init)
   response.clone().text().then((text) => {
@@ -239,6 +264,91 @@ if (mode === "models") {
     if (reply.calls.length === 0) break
     items = [...items, { kind: "turn", output: reply.output }, { kind: "back", results: reply.calls.map((call) => ({ id: call.id, output: results.shift() ?? "0" })) }]
   }
+} else if (mode === "compact" && model !== "") {
+  // The real stack on a new chat in a temporary home: 150 short messages
+  // make a view with no request, then `count` long messages are logged at
+  // once. Their compactions all start together on one prefix (the head and
+  // the whole view). It prints what each request read from the cache.
+  const count = Number(process.argv[4] ?? 32)
+  const shorts = Number(process.argv[5] ?? 150)
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-probe-")), "everchat.db")
+  const pick = { vendor: "openai", model, effort: "low", speed: "slow" }
+  const store = Store.layer(file, { launch: { pid: process.pid, host: "probe", cwd: process.cwd(), version: "probe", runTag: "probe" }, pick })
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, layer)))
+  const compactor = RealCompactor.layer({ pick }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const words = "the quick brown fox jumps over the lazy dog while a small boat drifts past an old stone bridge".split(" ")
+  const prose = (seed: string, n: number) => Array.from({ length: n }, (_, k) => words[parseInt(hash(seed + k).slice(0, 6), 16) % words.length]).join(" ")
+  const started = Date.now()
+  let pushed = 0
+  await Effect.runPromise(Effect.gen(function*() {
+    const memory = yield* Memory
+    yield* memory.push(Array.from({ length: shorts }, (_, k) => ({ kind: "user" as const, text: `${nonce} note ${k}: ` + prose("short" + k, 22) })))
+    yield* memory.idle
+    pushed = Date.now()
+    yield* memory.push(Array.from({ length: count }, (_, k) => ({ kind: "user" as const, text: `${nonce} report ${k}: ` + prose("long" + k, 140) })))
+    yield* memory.idle
+  }).pipe(Effect.provide(Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor))), Effect.provideService(Fetch, tee)))
+  const db = new Sqlite(file, { readonly: true })
+  const usage = db.query("select node_l as l, node_i as i, input, cache_read as read, expected, created from usage order by id").all() as Array<any>
+  const nodes = db.query("select count(*) as n, max(size) as big from node").get() as any
+  db.close()
+  const by = (rows: Array<any>) => ({ requests: rows.length, read: rows.filter((row) => row.read > 0).length, missed: rows.filter((row) => row.expected >= 1024 && row.read === 0).length, input: rows.reduce((n, row) => n + row.input, 0), cached: rows.reduce((n, row) => n + row.read, 0) })
+  console.log(JSON.stringify({ seconds: Math.round((Date.now() - pushed) / 1000), setup: Math.round((pushed - started) / 1000), nodes: nodes.n, longest: nodes.big, leaves: by(usage.filter((row) => row.l === 0)), merges: by(usage.filter((row) => row.l > 0)) }))
+  const first = usage[0]?.created ?? 0
+  console.log(usage.slice(0, 40).map((row) => `${row.l}/${row.i}@${((row.created - first) / 1000).toFixed(1)}s in=${row.input} read=${row.read} exp=${row.expected}`).join("\n"))
+} else if (mode === "burst" && model !== "") {
+  // One request goes first, and `b` more with the same long prefix follow
+  // in one of four ways. It shows which way lets the followers read the
+  // prefix from the cache. It sends 1 + b requests.
+  //   all     all together, 5 s after the first was sent
+  //   slow    one every 250 ms, from 5 s after the first was sent
+  //   late    all together, 5 s after the first reply ended
+  //   groups  four at a time, each group when the one before has ended
+  const [way = "all", size = "16"] = process.argv.slice(4)
+  const b = Number(size)
+  // PROBE_HEAD=real: the program's own head (src/head.ts) and an empty view,
+  // so that the followers share only the head. A line with the run's nonce
+  // goes at the end of the system prompt, so that an older run is not read.
+  const real = process.env.PROBE_HEAD === "real"
+  const head: Head = real ? realHead(`Run ${nonce}.`) : { system: system("burst-" + way), tools }
+  const blocks = view("burst", real ? 0 : 3)
+  const fire = async (k: number) => {
+    const sent = Date.now()
+    const result = await run(Effect.result(OpenAI.use((wire) => Stream.runCollect(wire.send(request(head, [user(blocks, `user: say ok ${k}`)]))))))
+    if (result._tag === "Failure") return { k, failed: (result.failure as any).kind, sent }
+    const end = result.success.at(-1)
+    const usage = end?.type === "end" ? end.reply.usage : null
+    return { k, read: usage?.cacheRead ?? 0, input: usage?.input ?? 0, sent, ms: Date.now() - sent }
+  }
+  const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms))
+  const zero = Date.now()
+  const first = await fire(0)
+  const ended = Date.now()
+  let rest: Array<any> = []
+  if (way === "late") {
+    await sleep(5000)
+    rest = await Promise.all(Array.from({ length: b }, (_, k) => fire(k + 1)))
+  } else {
+    await sleep(Math.max(0, zero + 5000 - Date.now()))
+    if (way === "all") {
+      rest = await Promise.all(Array.from({ length: b }, (_, k) => fire(k + 1)))
+    } else if (way === "slow") {
+      rest = await Promise.all(Array.from({ length: b }, async (_, k) => (await sleep(250 * k), fire(k + 1))))
+    } else {
+      for (let at = 0; at < b; at += 4) {
+        rest.push(...(await Promise.all(Array.from({ length: Math.min(4, b - at) }, (_, k) => fire(at + k + 1)))))
+      }
+    }
+  }
+  const all = (first as any).input + (first as any).read
+  console.log(JSON.stringify({
+    way,
+    tokens: all,
+    firstTook: ended - zero,
+    hits: rest.filter((one) => one.read > 0).length + "/" + b,
+    // For each follower: seconds after the first request was sent, and what it read.
+    followers: rest.map((one) => ((one.sent - zero) / 1000).toFixed(1) + "s:" + (one.failed ?? one.read)).join(" ")
+  }))
 } else if (mode === "tool" && model !== "") {
   const head: Head = { system: system("tool"), tools }
   const first = user(view("v", 4), "user: Call the tool `run` once, with exactly this program as its input: return 1 + 1\nThen tell me the result.")
