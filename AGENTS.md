@@ -233,6 +233,13 @@ What holds for both:
   interface, and do not show a message from an event alone.
 - No control character of a text reaches the terminal or the standard
   output (`clean` in `src/paint.ts`). Use it for every text that you show.
+- What streams (the thought, the text, the program that the model writes)
+  is never in the database. A step is written when it ends, whole. An
+  interface that shows what streams shows it paced (`src/pace.ts`): a
+  whole paragraph at a time, and not each word. That module knows no
+  terminal, so a later interface can use it as it is. The terminal shows
+  the thought and the text paced, and a program whole when it starts to
+  run. Pipe mode shows nothing that streams: only whole messages.
 
 How to test them:
 
