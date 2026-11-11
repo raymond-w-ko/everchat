@@ -10,3 +10,11 @@ test *args:
 # Check the types of the new code.
 check:
     bunx tsc --noEmit -p .
+
+# Run EverChat from its source, in this terminal.
+run *args:
+    bun src/main.ts {{args}}
+
+# Build EverChat as one executable, `everchat`.
+build:
+    bun build --compile src/main.ts --outfile everchat
