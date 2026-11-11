@@ -432,10 +432,12 @@ export class Store extends Context.Service<Store, {
 
   // Diagnostics (table `log`). `addDiagnostics` writes them in one
   // transaction, in the order given. `diagnostics` gives those after `after`
-  // (a `seq`), oldest first. `dropDiagnostics` deletes those from before
-  // `before` (a time), and gives their number.
+  // (a `seq`), oldest first. `lastDiagnostics` gives the newest `limit`,
+  // oldest first. `dropDiagnostics` deletes those from before `before` (a
+  // time), and gives their number.
   addDiagnostics(rows: ReadonlyArray<NewDiagnostic>): Effect.Effect<void, StoreError>
   diagnostics(after?: number, limit?: number): Effect.Effect<Array<Diagnostic>, StoreError>
+  lastDiagnostics(limit: number): Effect.Effect<Array<Diagnostic>, StoreError>
   dropDiagnostics(before: number): Effect.Effect<number, StoreError>
 }>()("everchat/store/Store") {
   // The store over the `SqlClient` in the context.
@@ -872,6 +874,12 @@ const make = Effect.fnUntraced(function*(options: Options) {
     ))]
   }, failed("diagnostics"))
 
+  const lastDiagnostics = Effect.fn("Store.lastDiagnostics")(function*(limit: number) {
+    return [...(yield* decodeDiagnostics(
+      yield* sql`select seq, level, source, text, launch, created from log order by seq desc limit ${limit}`
+    ))].reverse()
+  }, failed("lastDiagnostics"))
+
   const dropDiagnostics = Effect.fn("Store.dropDiagnostics")(function*(before: number) {
     const rows = yield* sql<{ seq: number }>`delete from log where created < ${before} returning seq`
     return rows.length
@@ -920,6 +928,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
     endedRunTags,
     addDiagnostics,
     diagnostics,
+    lastDiagnostics,
     dropDiagnostics
   })
 })

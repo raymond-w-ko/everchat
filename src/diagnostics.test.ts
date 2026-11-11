@@ -164,6 +164,9 @@ test("the store reads diagnostics after a place, oldest first", async () => {
       ])
       expect((yield* store.diagnostics(1)).map((one) => one.text)).toEqual(["two �", "three"])
       expect((yield* store.diagnostics(0, 2)).map((one) => one.text)).toEqual(["one", "two �"])
+      // The newest ones, oldest first.
+      expect((yield* store.lastDiagnostics(2)).map((one) => one.seq)).toEqual([2, 3])
+      expect((yield* store.lastDiagnostics(10)).map((one) => one.seq)).toEqual([1, 2, 3])
       // Only those from before the time given: the one of that time stays.
       expect(yield* store.dropDiagnostics(20)).toBe(1)
       expect((yield* store.diagnostics()).map((one) => one.text)).toEqual(["two \ufffd", "three"])
