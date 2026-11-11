@@ -9,6 +9,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { Ask, AskDelay } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
+import * as Diagnostics from "../src/diagnostics.ts"
 import { Functions } from "../src/functions.ts"
 import { Limit } from "../src/limit.ts"
 import { Memory } from "../src/memory.ts"
@@ -23,7 +24,8 @@ import { compactor, fakeWire, newFile, options, reply, rows, write } from "./hel
 // work directory in the home.
 const launch = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: Effect.Effect<A, E, Turns | Store | Limit>, limit = 2000) => {
   const cwd = path.dirname(file)
-  const store = Store.layer(file, options({ runTag: "tag-" + crypto.randomUUID() }))
+  // The logger is under every layer, and merged: see diagnostics.ts.
+  const store = Diagnostics.layer.pipe(Layer.provideMerge(Store.layer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
   const limits = Limit.layer({ dir: path.join(cwd, "results"), limit }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
@@ -57,6 +59,7 @@ const calls = (file: string) =>
     file,
     "select id, parent, fn, status, output, size, shown, pgid from call order by id"
   )
+const diagnostics = (file: string) => rows<{ level: string; source: string; text: string }>(file, "select level, source, text from log order by seq")
 const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from msg_read order by i")
 
 const eventually = (check: () => boolean) =>
@@ -115,6 +118,8 @@ test("a program changes files and runs commands, and only the program and its re
     [5, 1, "read", "done"]
   ])
   expect(calls(file)[4]).toMatchObject({ output: "goodbye\n", size: 8, shown: 8, pgid: null })
+  // A turn with no trouble writes no diagnostic.
+  expect(diagnostics(file)).toEqual([])
   expect(rows(file, "select status from turn")).toEqual([{ status: "done" }])
 })
 
@@ -216,6 +221,9 @@ test("a restart: the cut program is not run again, and the model is told which o
     { kind: "echo", text: told },
     { kind: "asst", text: "Done." }
   ])
+  // The restart says so in the diagnostics. The line is written while the
+  // turn loop's layer is built.
+  expect(diagnostics(file)).toEqual([{ level: "info", source: "turn", text: "turn 1 was cut, and continues" }])
   expect(rows(file, "select status from turn")).toEqual([{ status: "done" }])
 })
 
