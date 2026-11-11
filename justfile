@@ -19,3 +19,7 @@ run *args:
 # is the second entrypoint (src/worker.ts says why).
 build:
     bun build --compile src/main.ts src/worker.ts --outfile everchat
+
+# Build the executable, and run the tests of the whole program on it.
+test-build: build
+    EVERCHAT_BIN=./everchat bun test --isolate tests/main.test.ts tests/pipe.test.ts

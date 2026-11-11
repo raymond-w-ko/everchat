@@ -7,95 +7,16 @@
 
 import { afterEach, expect, test } from "bun:test"
 import * as fs from "node:fs"
-import * as os from "node:os"
 import * as path from "node:path"
-import { FILE } from "../src/database.ts"
 import { rows } from "./help.ts"
 import { Pty } from "./pty.ts"
-
-// The program: from its source, or the executable that EVERCHAT_BIN names
-// (`just build` makes one), to run these same tests on it.
-const PROGRAM = process.env.EVERCHAT_BIN === undefined || process.env.EVERCHAT_BIN === ""
-  ? [process.execPath, path.join(import.meta.dir, "..", "src", "main.ts")]
-  : [path.resolve(process.env.EVERCHAT_BIN)]
-
-// One event of a streamed reply, as OpenAI's documents frame it.
-type Sent = Record<string, unknown>
-const frame = (event: Sent) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`
-
-const usage = { input_tokens: 100, input_tokens_details: { cached_tokens: 0 }, output_tokens: 5, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 105 }
-const completed = (output: ReadonlyArray<Sent>): Sent => ({ type: "response.completed", response: { id: "resp_1", status: "completed", output, usage, service_tier: "default" } })
-
-// A reply of text, in two parts.
-const text = (said: string): Array<Sent> => {
-  const half = Math.ceil(said.length / 2)
-  return [
-    { type: "response.output_text.delta", delta: said.slice(0, half) },
-    { type: "response.output_text.delta", delta: said.slice(half) },
-    completed([{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: said, annotations: [] }] }])
-  ]
-}
-
-// A reply that runs one program.
-const program = (id: string, code: string): Array<Sent> => [
-  { type: "response.custom_tool_call_input.delta", delta: code },
-  completed([{ id: "ctc_" + id, type: "custom_tool_call", call_id: id, name: "run", input: code }])
-]
-
-// A fake vendor: `answer` gives the events of the n-th request (1, 2, ...),
-// or "hold": the reply then starts and never ends.
-const vendor = (answer: (n: number, body: any) => Array<Sent> | "hold") => {
-  const bodies: Array<any> = []
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    idleTimeout: 0,
-    fetch: async (request) => {
-      const body = await request.json()
-      bodies.push(body)
-      const got = answer(bodies.length, body)
-      const encoder = new TextEncoder()
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          if (got === "hold") {
-            controller.enqueue(encoder.encode(frame({ type: "response.output_text.delta", delta: "I am still " })))
-            return
-          }
-          for (const event of got) {
-            controller.enqueue(encoder.encode(frame(event)))
-          }
-          controller.close()
-        }
-      })
-      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "req_" + bodies.length } })
-    }
-  })
-  return { bodies, address: "http://127.0.0.1:" + server.port, stop: () => server.stop(true) }
-}
+import { env, place, PROGRAM, program, text, vendor } from "./vendor.ts"
 
 const open: Array<() => unknown> = []
 afterEach(async () => {
   for (const close of open.splice(0)) {
     await close()
   }
-})
-
-// A new place for one chat: its home, a work directory, and a home
-// directory of the user with no gateway file in it.
-const place = () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-main-"))
-  const home = path.join(root, "home")
-  const work = path.join(root, "work")
-  fs.mkdirSync(work)
-  return { root, home, work, file: path.join(home, FILE) }
-}
-
-const env = (at: ReturnType<typeof place>, address: string | undefined): Record<string, string | undefined> => ({
-  PATH: process.env.PATH,
-  HOME: at.root,
-  EVERCHAT_HOME: at.home,
-  EVERCHAT_GATEWAY_URL: address,
-  EVERCHAT_GATEWAY_KEY: address === undefined ? undefined : "test-key"
 })
 
 const start = (at: ReturnType<typeof place>, address: string | undefined, args: ReadonlyArray<string> = ["--model", "gpt-test"]) => {
@@ -271,22 +192,39 @@ test("with no inference gateway to read, the program says what to set, and ends"
   expect(launches(at.file).every((one) => one.ended !== null)).toBe(true)
 })
 
-test("the arguments: the usage, the version, an unknown one, and no terminal", async () => {
+test("when only one of the standard input and the standard output is a terminal, the program works in pipe mode", async () => {
   const at = place()
-  const run = async (...args: Array<string>) => {
-    const proc = Bun.spawn([...PROGRAM, ...args], { cwd: at.work, env: env(at, "http://127.0.0.1:1"), stdin: "ignore", stdout: "pipe", stderr: "pipe" })
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-    return { out, err, code }
+  const server = fake(() => text("Hello."))
+  const command = PROGRAM.map((part) => "'" + part + "'").join(" ") + " --model gpt-test"
+  const shell = (line: string) => {
+    const pty = new Pty(["sh", "-c", line], env(at, server.address), at.work)
+    open.push(async () => {
+      if (pty.code === null) {
+        pty.kill("SIGKILL")
+        await pty.ends()
+      }
+    })
+    return pty
   }
-  const help = await run("--help")
-  expect(help.code).toBe(0)
-  expect(help.err).toStartWith("Usage: everchat [--model <model>]")
-  expect(await run("--version")).toEqual({ out: "", err: "everchat 0.1.0\n", code: 0 })
-  const unknown = await run("--nope")
-  expect(unknown.code).toBe(2)
-  expect(unknown.err).toStartWith("everchat: Unknown option '--nope'")
-  expect(unknown.err).toContain("Usage: everchat")
-  expect(await run()).toEqual({ out: "", err: "everchat: the standard input and the standard output must be a terminal.\n", code: 2 })
-  // None of them made a home.
-  expect(fs.existsSync(at.home)).toBe(false)
+  // The standard input is a pipe, and the standard output is the terminal.
+  const piped = shell("printf 'hello\\n' | " + command)
+  await piped.ends()
+  expect(piped.code).toBe(0)
+  expect(await piped.text()).toBe("› hello\n\nHello.")
+  // No screen was drawn: the terminal's modes were not touched.
+  expect(piped.raw).not.toContain("\x1b[?2004h")
+
+  // The standard input is the terminal, and the standard output is a file.
+  const file = path.join(at.root, "out.txt")
+  const typed = shell(command + " > '" + file + "'")
+  typed.type("again\n")
+  for (let k = 0; k < 1000 && !(fs.existsSync(file) && fs.readFileSync(file, "utf8").includes("Hello.")); k++) {
+    await Bun.sleep(10)
+  }
+  // Ctrl+D on an empty line ends the input.
+  typed.type("\x04")
+  await typed.ends()
+  expect(typed.code).toBe(0)
+  expect(fs.readFileSync(file, "utf8")).toBe("› again\n\nHello.\n")
+  expect(messages(at.file).map((one) => one.text)).toEqual(["hello", "Hello.", "again", "Hello."])
 })

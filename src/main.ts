@@ -2,10 +2,20 @@
 // Main
 // ====
 // The program. It reads its arguments and its environment, it puts the
-// parts together, and it runs the terminal until the person quits or a
-// signal ends it.
+// parts together, and it runs one interface until the person quits, the
+// input ends, or a signal ends the process.
 //
-// Usage: USAGE (`everchat --help` prints it).
+// `everchat --help` prints the usage. The arguments are read with Effect's
+// own module (`effect/cli`), so the help, the version, the completions for
+// a shell and the errors of an argument come from there.
+//
+// The two interfaces
+//
+// - The terminal (terminal.ts), when the standard input and the standard
+//   output are both a terminal.
+// - Pipe mode (pipe.ts), when one of them is not: each line of the
+//   standard input is a message, and each message goes to the standard
+//   output as text.
 //
 // The parts, from the lowest
 //
@@ -15,39 +25,55 @@
 //   the compactor, the memory
 //   the output limit, the shell, the functions, the sandbox
 //   the turn loop
-//   the terminal
+//   the terminal, or pipe mode
 //
 // The diagnostics' layer is under every other layer but the store, and it
 // is merged into what each one gets, so that every fiber logs to the
 // table (diagnostics.ts says why).
 //
+// What runs outside that layer (this module, `effect/cli`, and the store
+// while it opens the database) has no logger at all: QUIET takes the place
+// of Effect's default logger, which writes to the console. So a line that
+// is logged there is dropped. `--log-level debug` showed why this is
+// needed: the database's migrator then logs a line, and it went to the
+// standard output.
+//
 // How the program ends
 //
-// - The person quits (terminal.ts), or the process gets SIGTERM, SIGHUP
-//   (its terminal closed) or SIGINT. Then the parts close, in the reverse
-//   order: the terminal gives the screen back, the turn loop leaves a turn
-//   that runs for the next launch, the shell stops its commands, and the
-//   store ends the launch.
+// - The person quits (terminal.ts), the input ends (pipe.ts), or the
+//   process gets SIGTERM, SIGHUP (its terminal closed) or SIGINT. Then the
+//   parts close, in the reverse order: the terminal gives the screen back,
+//   the turn loop leaves a turn that runs for the next launch, the shell
+//   stops its commands, and the store ends the launch.
 // - Then the process exits, and it does not wait for worker threads: a
 //   stop of a program is only a request to its thread (sandbox.ts).
 // - A second signal while the parts close ends the process at once. The
 //   next launch then finds a crash, and cleans up.
 //
+// Effect's own runner for Bun (`BunRuntime.runMain`) is not used, for
+// those rules: it does not hear SIGHUP, it has no second signal, and after
+// a clean end it waits for all threads.
+//
+// The exit code: 0 for a clean end, 1 for a failure (also a turn that
+// failed in pipe mode), 2 for a wrong argument, 130 for a signal.
+//
 // What it writes to the standard error
 //
 // The rule is that EverChat writes nothing to the standard output or the
-// standard error, because a line there breaks the screen. This module has
-// the two exceptions, both at a time when the screen is not up: the usage,
-// and the reason why the program could not start or go on.
+// standard error, because a line there breaks the screen. This module
+// writes only when the screen is not up: the usage and what else
+// `effect/cli` prints for an argument, and the reason why the program
+// could not start or go on. Pipe mode's output is pipe.ts's own.
 //
 // Not here yet: the config file. Until then the picks come from the
 // arguments, with fixed defaults.
 
-import { Cause, Effect, Layer, Runtime } from "effect"
-import * as fs from "node:fs"
+// Only this module of the package: its index loads all of it (an HTTP
+// server, sockets, a cluster), and each start would pay for that.
+import * as BunServices from "@effect/platform-bun/BunServices"
+import { Cause, Config, Console, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
+import { CliConfig, CliError, Command, Flag, GlobalFlag } from "effect/cli"
 import * as os from "node:os"
-import * as path from "node:path"
-import { parseArgs } from "node:util"
 import { Ask } from "./ask.ts"
 import { Cache } from "./cache.ts"
 import * as Compactor from "./compactor.ts"
@@ -58,6 +84,7 @@ import { Gateway } from "./gateway.ts"
 import { Limit } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { OpenAI } from "./openai.ts"
+import { Pipe } from "./pipe.ts"
 import { Sandbox } from "./sandbox.ts"
 import { Shell } from "./shell.ts"
 import { type Pick, Store } from "./store.ts"
@@ -66,34 +93,31 @@ import { Turns } from "./turn.ts"
 
 export const VERSION = "0.1.0"
 
-// The variable that names the home, and the home when it is not set.
+// The variable that names the home, and the home's name in the person's
+// own directory when it is not set.
 export const HOME_VARIABLE = "EVERCHAT_HOME"
-export const HOME = path.join(os.homedir(), ".everchat")
+export const HOME = ".everchat"
 
 // The picks when no argument gives them.
 export const MODEL = "gpt-6.1-sol"
 export const EFFORT = "medium"
 export const COMPACTOR = "gpt-6-luna"
 
-export const USAGE = `Usage: everchat [--model <model>] [--effort <effort>] [--compactor <model>]
+export const ABOUT = `EverChat: one chat that never ends.
 
-EverChat: one chat that never ends, in a terminal.
+In a terminal, it shows the chat and reads the keys. With no terminal (the
+standard input or the standard output is a pipe or a file), it works in pipe
+mode: each line of the standard input is a message, and each message goes to
+the standard output as text.
 
-  --model <model>       the model of the turns (default ${MODEL})
-  --effort <effort>     its reasoning effort (default ${EFFORT})
-  --compactor <model>   the model of the compactions (default ${COMPACTOR})
-  --version             prints the version
-  --help                prints this text
+The chat is in the home: the directory that ${HOME_VARIABLE} names (default
+~/${HOME}). Another home is another chat.`
 
-The chat is in the home: the directory that ${HOME_VARIABLE} names
-(default ~/.everchat). Another home is another chat.
-`
-
-// The whole program for one launch.
-export const layer = (given: { readonly home: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
+// The program but its interface, for one launch.
+export const layer = (given: { readonly home: string; readonly file: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
-    Layer.provideMerge(Store.layer(path.join(given.home, Database.FILE), { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
+    Layer.provideMerge(Store.layer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, OpenAI.layer.pipe(Layer.provide(Gateway.layer)))), Layer.provideMerge(base))
   const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor })), Layer.provideMerge(asking))
@@ -101,9 +125,12 @@ export const layer = (given: { readonly home: string; readonly cwd: string; read
   const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(limits))
   const functions = Functions.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(shell))
   const sandbox = Sandbox.layer().pipe(Layer.provideMerge(functions))
-  const turns = Turns.layer().pipe(Layer.provideMerge(sandbox))
-  return Terminal.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(turns))
+  return Turns.layer().pipe(Layer.provideMerge(sandbox))
 }
+
+// Pipe mode ended, and a turn of this launch had failed. The output holds
+// the turn's note, so nothing more is said: only the exit code tells it.
+export class TurnFailed extends Schema.TaggedError<TurnFailed>()("TurnFailed", {}) {}
 
 // What a failure says to the person, in one row.
 const reason = (cause: Cause.Cause<unknown>): string => {
@@ -123,7 +150,51 @@ const reason = (cause: Cause.Cause<unknown>): string => {
   return error instanceof Error ? error.message : String(error)
 }
 
-const say = (text: string) => void process.stderr.write(text)
+// One launch: the home, the picks, and then the interface that fits.
+const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Option<string>; readonly effort: Option.Option<string>; readonly compactor: string }) {
+  const stdio = yield* Stdio.Stdio
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  // An empty variable is as none: Effect's config reads it so.
+  const named = yield* Config.option(Config.String(HOME_VARIABLE))
+  const home = Option.match(named, { onNone: () => path.join(os.homedir(), HOME), onSome: (name) => path.resolve(name) })
+  // The home holds the chat: no other account may read it.
+  yield* fs.makeDirectory(home, { recursive: true, mode: 0o700 })
+  // The model and the effort of this launch only: with none, the chat's own pick.
+  const pick: Pick | undefined = Option.isNone(given.model) && Option.isNone(given.effort)
+    ? undefined
+    : { vendor: "openai", model: Option.getOrElse(given.model, () => MODEL), effort: Option.getOrElse(given.effort, () => EFFORT), speed: "slow" }
+  const compactor: Pick = { vendor: "openai", model: given.compactor, effort: "low", speed: "slow" }
+  const cwd = process.cwd()
+  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor })
+
+  if ((yield* stdio.stdinIsTerminal) && (yield* stdio.stdoutIsTerminal)) {
+    return yield* Terminal.use((terminal) => terminal.quit).pipe(Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts))))
+  }
+  const well = yield* Pipe.use((pipe) => pipe.end).pipe(Effect.provide(Pipe.layer.pipe(Layer.provideMerge(parts))))
+  if (!well) {
+    return yield* new TurnFailed()
+  }
+})
+
+export const command = Command.make(
+  "everchat",
+  {
+    model: Flag.String("model").pipe(Flag.withDescription(`The model of the turns, for this launch. With none: the chat's own, which is ${MODEL} at first`), Flag.optional),
+    effort: Flag.String("effort").pipe(Flag.withDescription(`Its reasoning effort, for this launch. With none: the chat's own, which is ${EFFORT} at first`), Flag.optional),
+    compactor: Flag.String("compactor").pipe(Flag.withDescription(`The model of the compactions (default: ${COMPACTOR})`), Flag.withDefault(COMPACTOR))
+  },
+  launch
+).pipe(Command.withDescription(ABOUT))
+
+// The flags that `effect/cli` adds to each command, but its wizard: that
+// one asks for each argument in turn, and this program has three.
+// `--log-level` sets the lowest level of the diagnostics that are written.
+const BUILT_INS = [GlobalFlag.Help, GlobalFlag.Version, GlobalFlag.Completions, GlobalFlag.LogLevel]
+
+// No logger: nothing that is logged outside the diagnostics' layer goes to
+// the console.
+const QUIET = Logger.layer([])
 
 // Runs `program` as the process: a signal interrupts it, and the process
 // exits when it has ended.
@@ -142,46 +213,28 @@ const runMain = Runtime.makeRunMain(({ fiber, teardown }) => {
   fiber.addObserver((exit) => teardown(exit, (code) => process.exit(code)))
 })
 
-const main = () => {
-  let args: { model?: string | undefined; effort?: string | undefined; compactor?: string | undefined; version?: boolean | undefined; help?: boolean | undefined }
-  try {
-    args = parseArgs({
-      args: process.argv.slice(2),
-      options: { model: { type: "string" }, effort: { type: "string" }, compactor: { type: "string" }, version: { type: "boolean" }, help: { type: "boolean" } },
-      strict: true,
-      allowPositionals: false
-    }).values
-  } catch (error) {
-    say("everchat: " + (error instanceof Error ? error.message : String(error)) + "\n\n" + USAGE)
-    process.exit(2)
-  }
-  if (args.help === true) {
-    say(USAGE)
-    process.exit(0)
-  }
-  if (args.version === true) {
-    say("everchat " + VERSION + "\n")
-    process.exit(0)
-  }
-  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-    say("everchat: the standard input and the standard output must be a terminal.\n")
-    process.exit(2)
-  }
-  const home = process.env[HOME_VARIABLE] === undefined || process.env[HOME_VARIABLE] === "" ? HOME : path.resolve(process.env[HOME_VARIABLE])
-  // The model and the effort of this launch only: with none, the chat's own pick.
-  const pick: Pick | undefined = args.model === undefined && args.effort === undefined
-    ? undefined
-    : { vendor: "openai", model: args.model ?? MODEL, effort: args.effort ?? EFFORT, speed: "slow" }
-  const compactor: Pick = { vendor: "openai", model: args.compactor ?? COMPACTOR, effort: "low", speed: "slow" }
+// A wrong argument is 2. The rest is Effect's own: 0, 130 for an
+// interrupt, and 1 for a failure.
+const teardown: Runtime.Teardown = (exit, onExit) =>
+  Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause) && CliError.isCliError(Cause.squash(exit.cause))
+    ? onExit(2)
+    : Runtime.defaultTeardown(exit, onExit)
 
-  const program = Effect.gen(function*() {
-    yield* Effect.try(() => fs.mkdirSync(home, { recursive: true, mode: 0o700 }))
-    yield* Terminal.use((terminal) => terminal.quit).pipe(Effect.provide(layer({ home, cwd: process.cwd(), pick, compactor })))
-  }).pipe(
+// What `effect/cli` or pipe mode has told the person already.
+const told = (cause: Cause.Cause<unknown>): boolean => {
+  const error = Cause.squash(cause)
+  return Cause.hasInterruptsOnly(cause) || CliError.isCliError(error) || error instanceof TurnFailed
+}
+
+const main = () => {
+  const program = Command.run(command, { version: VERSION }).pipe(
+    Effect.provide(CliConfig.layer({ builtIns: BUILT_INS })),
+    Effect.provide(BunServices.layer),
+    Effect.provide(QUIET),
     // The screen is given back by now.
-    Effect.tapCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.sync(() => say("everchat: " + reason(cause) + "\n"))))
+    Effect.tapCause((cause) => (told(cause) ? Effect.void : Console.error("everchat: " + reason(cause))))
   )
-  runMain(program, { disableErrorReporting: true })
+  runMain(program, { disableErrorReporting: true, teardown })
 }
 
 if (import.meta.main) {
