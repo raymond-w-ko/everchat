@@ -74,6 +74,7 @@ instead.
 | effort | noun | The reasoning level of a pick, for example `high`. |
 | speed | noun | The service level of a pick, for example the vendor's fast mode. |
 | request | noun | One message to a vendor's model, and its streamed reply. The old code calls it a call. |
+| ask | verb | To send a request and get its reply, with the tries that it needs. A wire sends a request once; to ask is to wait for the cache, send, and try again when that can help. |
 | reply | noun | What the model gave back for one request: its text, the programs it wants to run, the vendor's own items as received, and the usage. |
 | head | noun | The part of a request before the messages: the system prompt and the tool list. Table `head`. The chat's turns, its compactions, and its subagents all have the same head. |
 | block | noun | One piece of a view in a request: 4 lines. |
