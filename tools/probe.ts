@@ -14,6 +14,9 @@
 //   bun tools/probe.ts compact <model> <count> <shorts>
 //                                       the real memory and compactor: `count`
 //                                       compactions that start together
+//   bun tools/probe.ts turn <model> [message]
+//                                       one whole turn: the model's own
+//                                       programs in the real sandbox
 //   PROBE_EFFORT=high bun tools/probe.ts reason <model>
 //                                       a turn with thinking and two programs
 //   bun tools/probe.ts raw <model> <form> <count> <same|grow> <gap ms>
@@ -30,8 +33,13 @@ import * as path from "node:path"
 import { Ask } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
 import * as RealCompactor from "../src/compactor.ts"
-import { Memory } from "../src/memory.ts"
+import { Functions } from "../src/functions.ts"
+import { Limit } from "../src/limit.ts"
+import { Compactor, Memory } from "../src/memory.ts"
+import { Sandbox } from "../src/sandbox.ts"
+import { Shell } from "../src/shell.ts"
 import { Store } from "../src/store.ts"
+import { Turns } from "../src/turn.ts"
 import { Gateway } from "../src/gateway.ts"
 import { head as realHead } from "../src/head.ts"
 import { Fetch, type Fetcher, OpenAI } from "../src/openai.ts"
@@ -296,6 +304,38 @@ if (mode === "models") {
   console.log(JSON.stringify({ seconds: Math.round((Date.now() - pushed) / 1000), setup: Math.round((pushed - started) / 1000), nodes: nodes.n, longest: nodes.big, leaves: by(usage.filter((row) => row.l === 0)), merges: by(usage.filter((row) => row.l > 0)) }))
   const first = usage[0]?.created ?? 0
   console.log(usage.slice(0, 40).map((row) => `${row.l}/${row.i}@${((row.created - first) / 1000).toFixed(1)}s in=${row.input} read=${row.read} exp=${row.expected}`).join("\n"))
+} else if (mode === "turn" && model !== "") {
+  // The whole program but the terminal, on a new chat in a temporary home:
+  // one message, and the model's own programs in the real sandbox, with the
+  // real functions. The work directory is the temporary home. The message is
+  // short, so the memory asks for no compaction: a compactor that is asked
+  // ends the run. It prints the log, the calls, and the usage.
+  const text = process.argv[4] ?? "Write the file hello.txt with the text `hi from code mode`, then run the command `wc -c hello.txt`. Then tell me the number of bytes."
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-probe-"))
+  const file = path.join(home, "everchat.db")
+  const pick = { vendor: "openai", model, effort: process.env.PROBE_EFFORT ?? "low", speed: "slow" }
+  const store = Store.layer(file, { launch: { pid: process.pid, host: "probe", cwd: home, version: "probe", runTag: "probe-" + nonce }, pick })
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, layer)))
+  const none = Layer.succeed(Compactor, Compactor.of({ compact: () => Effect.die("the probe's message needed a compaction") }))
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(none))
+  const limit = Limit.layer({ dir: path.join(home, "results") }).pipe(Layer.provide(store))
+  const shell = Shell.layer({ cwd: home }).pipe(Layer.provide(store))
+  const functions = Functions.layer({ cwd: home }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limit)))
+  const sandbox = Sandbox.layer().pipe(Layer.provide(functions), Layer.provide(store))
+  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  const started = Date.now()
+  await Effect.runPromise(Effect.gen(function*() {
+    const service = yield* Turns
+    yield* service.say(text)
+    yield* service.idle
+  }).pipe(Effect.provide(turns), Effect.provideService(Fetch, tee)))
+  const db = new Sqlite(file, { readonly: true })
+  const short = (value: unknown) => (typeof value === "string" && value.length > 600 ? value.slice(0, 600) + "... (" + value.length + " characters)" : value)
+  for (const row of db.query("select kind, text from msg_read order by i").all() as Array<any>) console.log(JSON.stringify({ message: row.kind, text: short(row.text) }))
+  for (const row of db.query("select id, parent, fn, status, input, output, size, shown from call order by id").all() as Array<any>) console.log(JSON.stringify({ ...row, input: short(row.input), output: short(row.output) }))
+  for (const row of db.query("select input, cache_read as read, output, expected from usage order by id").all() as Array<any>) console.log(JSON.stringify({ usage: row }))
+  console.log(JSON.stringify({ turn: db.query("select status, why from turn").all(), requests, seconds: Math.round((Date.now() - started) / 1000), files: fs.readdirSync(home).filter((name) => !name.startsWith("everchat.db")) }))
+  db.close()
 } else if (mode === "burst" && model !== "") {
   // One request goes first, and `b` more with the same long prefix follow
   // in one of four ways. It shows which way lets the followers read the

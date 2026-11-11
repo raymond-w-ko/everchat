@@ -648,3 +648,28 @@ A flaw of the probe's own text: it is made of random words, which no model
 can make shorter without loss. So lines came back too long, and nodes took
 up to 5 tries. 12 nodes took 40 requests. A run with real text is needed
 before the number of tries says anything about real use.
+
+## One whole turn in code mode
+
+One run of the whole program but the terminal (`PROBE_LIMIT=6 bun
+tools/probe.ts turn gpt-6-luna`), through the author's inference gateway.
+Two requests were expected, and two were sent. The run took 5 seconds.
+
+The message asked for a file and a command. The tool's description was the
+real one: the rules of a program, then the functions as TypeScript
+declarations.
+
+- **The model wrote a program that ran as it was.** It called `write` and
+  `shell` with `await`, in one program, and returned both results in one
+  object. It needed no second try.
+- **The functions did their work**: the file was there, and the command's
+  result was `17 hello.txt`, then `(exit 0 in 0.0 s)`.
+- **The second request read the first from the cache**: 1,920 tokens.
+- **A returned object is JSON, so a text in it has its newlines as `\n`.**
+  The model read it with no trouble. A program that returns one text, or
+  prints with `console.log()`, gives plain lines. If the JSON form costs
+  tokens or errors in real use, the result's form is the place to change.
+
+This is one run of an easy task. It shows that the parts fit. It says
+nothing yet about long tasks, about errors that a model must recover from,
+or about a program that a model writes badly.
