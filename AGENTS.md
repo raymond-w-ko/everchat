@@ -438,6 +438,11 @@ The same holds for the file `.env` in this repository, which holds the keys
 of other services for probes (`OPENROUTER_API_KEY`). Git ignores it. Bun
 reads it into the environment of every `bun` command.
 
+The repository is public. Name the inference gateway only as "the author's
+inference gateway". Do not name its program or its host, and do not say how
+it routes requests or signs in, in any file, test or commit message. The
+owner makes the edits of the passages about the gateway.
+
 Signing in with a ChatGPT plan comes later. Its tokens will then go in the
 database, because the program writes them.
 
