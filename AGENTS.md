@@ -65,8 +65,7 @@ The new code:
 - `src/inspector.html`: the inspector's page (see "The inspector"). It is
   the one file of `src/` that a browser runs.
 
-Run `just test` and `just check` (the type check) before you say that a
-change is done.
+Run the full check (see "Checks") before you say that a change is done.
 
 File names are lowercase. Multi-word names are written as one word
 (`askai.ts`, `openai.ts`).
@@ -83,6 +82,13 @@ The rest:
   the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
   (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
   the old `README.md`, `ISSUES.md`, and `justfile`.
+
+## Checks
+
+- Full check: `just full`, about 70 s.
+- Scoped check: `just scoped <test files>`, for the files of one change.
+- Full check in a worktree: yes
+- Worktree setup: `bun install --frozen-lockfile`
 
 ## The original concept
 
@@ -153,16 +159,9 @@ So EverChat must:
 The terminal is the primary interface. The web and iOS clients are secondary.
 Keep them working where it is cheap, but do not let them shape the design.
 
-The factory (the `everturn` repository) has written down what it needs from a
-harness. Read these before you design a part that the factory touches (the
-launch, the hooks, the shell, the transcript):
-
-- `~/src/everturn/docs/decisions/0186-harness-interface.md`: the decision
-  (ADR 0186).
-- `~/src/everturn/packages/bridge/src/runtime/types.ts`: the interface,
-  `SeatRuntime`.
-- `~/src/everturn/docs/references/seat-runtime.md`: the requirements, R1 to
-  R34.
+The factory has written down what it needs from a harness: the launch, the
+hooks, the shell and the transcript. Read that interface before you design a
+part that the factory touches.
 
 EverChat must be able to meet this interface. It must also stay a good program
 when it runs alone, with no factory.
@@ -260,9 +259,11 @@ How to test them:
 - `just test-build` runs the whole-program files on the executable
   (`EVERCHAT_BIN=<file>` names the program to start).
 
-To run the program by hand against no real model, start a fake vendor and
-give its address as `EVERCHAT_GATEWAY_URL`, as these tests do. `just run`
-with the real address sends real requests.
+To run the program by hand against no real model, start a fake vendor, give
+its address as `EVERCHAT_GATEWAY_URL`, and name a new home with
+`EVERCHAT_HOME`, as these tests do. `just run` with neither sends real
+requests through the inference gateway and writes the chat in `~/.everchat`,
+the person's own chat.
 
 ### The inspector
 

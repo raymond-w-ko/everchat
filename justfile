@@ -29,3 +29,12 @@ build:
 # Build the executable, and run the tests of the whole program on it.
 test-build: build
     EVERCHAT_BIN=./everchat bun test --isolate tests/main.test.ts tests/pipe.test.ts tests/inspect.test.ts
+
+# The full check: the types, the tests from source, and the tests of the
+# whole program on the executable.
+full: check test test-build
+
+# The scoped check, for the files of one change: the types, and the test
+# files given.
+scoped +tests: check
+    bun test --isolate {{tests}}
