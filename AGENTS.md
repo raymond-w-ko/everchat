@@ -388,6 +388,18 @@ it. In particular, the core (the memory and the agent loop) must not depend on
 the server, the web, accounts, or billing. In the old code the chat logic
 lives in `ref/src/server.ts`, so this is a large change.
 
+### Greenfield: no backward compatibility
+
+- The project is greenfield. No user and no stored chat depends on today's
+  code, schema, file formats, commands or interfaces.
+- A full refactor or a rewrite of any part is authorized when it gives better
+  code. Do not keep an old interface, a shim, a flag or a migration path only
+  for compatibility.
+- Invest in good code now: a clean, modular design comes before a small change.
+- What still holds: the checks must pass, each schema change is designed and
+  tested ("All state in one SQLite file"), and the factory's harness interface
+  must still be met ("How EverChat will be used").
+
 ### A rewrite, in place
 
 We write a new, clean, modular implementation in this repository. We do not
@@ -408,7 +420,8 @@ refactor the old code step by step.
   `ref/` (for example `src/memory.ts`). Read such a path as a path in `ref/`.
   The line numbers stay exact, because `ref/` does not change.
 - This is greenfield. There are no existing chats to keep, so we do not read
-  the old file formats and we do not write a migration from them.
+  the old file formats and we do not write a migration from them (see
+  "Greenfield: no backward compatibility").
 - Importing the sessions of other harnesses (Claude Code, Codex) is out of
   scope. Do not port the old import code.
 - The kind of EverChat's own messages is `asst` (short for "assistant") in the
