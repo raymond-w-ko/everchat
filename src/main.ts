@@ -9,6 +9,12 @@
 // own module (`effect/cli`), so the help, the version, the completions for
 // a shell and the errors of an argument come from there.
 //
+// `everchat inspect` does not start the chat. It serves the inspector: a
+// page in a browser that shows the state of the chat in the home (the log,
+// the tree, the views, each turn's request, the usage). It only reads the
+// database, so it runs next to a launch of the chat, or with none. It
+// prints the page's address, and it runs until a signal ends it.
+//
 // The two interfaces
 //
 // - The terminal (terminal.ts), when the standard input and the standard
@@ -80,6 +86,7 @@ import * as Compactor from "./compactor.ts"
 import * as Database from "./database.ts"
 import * as Diagnostics from "./diagnostics.ts"
 import { Functions } from "./functions.ts"
+import { Inspect } from "./inspect.ts"
 import { Gateway } from "./gateway.ts"
 import { Limit } from "./limit.ts"
 import { Memory } from "./memory.ts"
@@ -87,7 +94,7 @@ import { OpenAI } from "./openai.ts"
 import { Pipe } from "./pipe.ts"
 import { Sandbox } from "./sandbox.ts"
 import { Shell } from "./shell.ts"
-import { type Pick, Store } from "./store.ts"
+import { type Pick, Reads, Store } from "./store.ts"
 import { Terminal } from "./terminal.ts"
 import { Turns } from "./turn.ts"
 
@@ -103,6 +110,9 @@ export const MODEL = "gpt-6.1-sol"
 export const EFFORT = "medium"
 export const COMPACTOR = "gpt-6-luna"
 
+// The inspector's port when no argument gives one.
+export const INSPECT_PORT = 4680
+
 export const ABOUT = `EverChat: one chat that never ends.
 
 In a terminal, it shows the chat and reads the keys. With no terminal (the
@@ -112,6 +122,15 @@ the standard output as text.
 
 The chat is in the home: the directory that ${HOME_VARIABLE} names (default
 ~/${HOME}). Another home is another chat.`
+
+export const ABOUT_INSPECT = `Serves the inspector: a page in a browser that shows the state of the chat in
+the home. It shows the log, the tree, the views, each turn's request, and the
+usage. It only reads the database, so it can run while EverChat runs, and it
+changes nothing.
+
+It prints the page's address. The address holds a token that is new at each
+start: only who has the address can read the chat. The server listens on this
+machine only (127.0.0.1).`
 
 // The program but its interface, for one launch.
 export const layer = (given: { readonly home: string; readonly file: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
@@ -140,6 +159,15 @@ const reason = (cause: Cause.Cause<unknown>): string => {
     if (tagged._tag === "LaunchLive") {
       return "another EverChat (process " + String(tagged.pid) + ") has this chat open. One chat is one process."
     }
+    if (tagged._tag === "DatabaseVersion") {
+      const { have, want } = tagged as unknown as { readonly have: number; readonly want: number }
+      return have < want
+        ? "the database is from an older EverChat. Start EverChat once on this home: it brings the database up to date."
+        : "the database is from a newer EverChat than this program."
+    }
+    if (tagged._tag === "NoPort") {
+      return String(tagged.message) + ". Give another port with --port."
+    }
     if (tagged._tag === "StoreError") {
       return "the database failed (" + String(tagged.op) + "): " + (tagged.cause instanceof Error ? tagged.cause.message : String(tagged.cause))
     }
@@ -150,14 +178,20 @@ const reason = (cause: Cause.Cause<unknown>): string => {
   return error instanceof Error ? error.message : String(error)
 }
 
+// The home's directory.
+const homeOf = Effect.gen(function*() {
+  const path = yield* Path.Path
+  // An empty variable is as none: Effect's config reads it so.
+  const named = yield* Config.option(Config.String(HOME_VARIABLE))
+  return Option.match(named, { onNone: () => path.join(os.homedir(), HOME), onSome: (name) => path.resolve(name) })
+})
+
 // One launch: the home, the picks, and then the interface that fits.
 const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Option<string>; readonly effort: Option.Option<string>; readonly compactor: string }) {
   const stdio = yield* Stdio.Stdio
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
-  // An empty variable is as none: Effect's config reads it so.
-  const named = yield* Config.option(Config.String(HOME_VARIABLE))
-  const home = Option.match(named, { onNone: () => path.join(os.homedir(), HOME), onSome: (name) => path.resolve(name) })
+  const home = yield* homeOf
   // The home holds the chat: no other account may read it.
   yield* fs.makeDirectory(home, { recursive: true, mode: 0o700 })
   // The model and the effort of this launch only: with none, the chat's own pick.
@@ -177,6 +211,37 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
   }
 })
 
+// The home has no chat to inspect.
+export class NoChat extends Schema.TaggedError<NoChat>()("NoChat", { message: Schema.String }) {}
+
+// The inspector, until a signal ends it. It takes no launch and makes no
+// home: it reads the database that is there.
+const inspect = Effect.fnUntraced(function*(given: { readonly port: number }) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const home = yield* homeOf
+  const file = path.join(home, Database.FILE)
+  if (!(yield* fs.exists(file))) {
+    return yield* new NoChat({ message: `no chat in ${home}: the inspector shows a chat that EverChat has started. ${HOME_VARIABLE} names another home.` })
+  }
+  // Loaded only here: the HTTP server is not part of a launch of the chat.
+  const { Inspector } = yield* Effect.promise(() => import("./inspector.ts"))
+  const serving = Inspector.layer({ port: given.port }).pipe(Layer.provide(Inspect.layer), Layer.provide(Reads.layer(file)))
+  yield* Effect.gen(function*() {
+    const inspector = yield* Inspector
+    // The address alone on the standard output, for a script. The rest is for the person.
+    yield* Console.log(inspector.url)
+    yield* Console.error(`The inspector shows the chat in ${home}. It only reads. Ctrl+C ends it.`)
+    return yield* Effect.never
+  }).pipe(Effect.provide(serving))
+})
+
+const inspectCommand = Command.make(
+  "inspect",
+  { port: Flag.Int("port").pipe(Flag.withDescription(`The port on this machine (default: ${INSPECT_PORT}). 0: any free port`), Flag.withDefault(INSPECT_PORT)) },
+  inspect
+).pipe(Command.withDescription(ABOUT_INSPECT))
+
 export const command = Command.make(
   "everchat",
   {
@@ -185,7 +250,7 @@ export const command = Command.make(
     compactor: Flag.String("compactor").pipe(Flag.withDescription(`The model of the compactions (default: ${COMPACTOR})`), Flag.withDefault(COMPACTOR))
   },
   launch
-).pipe(Command.withDescription(ABOUT))
+).pipe(Command.withDescription(ABOUT), Command.withSubcommands([inspectCommand]))
 
 // The flags that `effect/cli` adds to each command, but its wizard: that
 // one asks for each argument in turn, and this program has three.

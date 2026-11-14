@@ -22,4 +22,4 @@ build:
 
 # Build the executable, and run the tests of the whole program on it.
 test-build: build
-    EVERCHAT_BIN=./everchat bun test --isolate tests/main.test.ts tests/pipe.test.ts
+    EVERCHAT_BIN=./everchat bun test --isolate tests/main.test.ts tests/pipe.test.ts tests/inspect.test.ts
