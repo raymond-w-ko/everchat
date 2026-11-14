@@ -1,0 +1,888 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverChat inspector</title>
+<style>
+/* The inspector's page (inspector.ts serves it). One file: the build puts
+   it into the executable as text. It only reads: it asks the server for
+   JSON, and it puts every text of the chat on the page as text, never as
+   HTML. */
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --surface-2: #f3f2ee; --surface-3: #e7e5df; --border: #d8d6cf;
+  --text: #0b0b0b; --text-2: #52514e; --text-3: #7b7a74;
+  --cell: #cfcdc5; --hatch: rgba(0, 0, 0, 0.45);
+  --view: #6250d6; --on-view: #ffffff;
+  --user: #2a78d6; --asst: #eb6834; --tool: #1baf7a; --echo: #eda100; --work: #e87ba4; --note: #008300;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface: #1a1a19; --surface-2: #242422; --surface-3: #30302d; --border: #3d3d39;
+    --text: #f0efec; --text-2: #c3c2b7; --text-3: #8f8e86;
+    --cell: #55554f; --hatch: rgba(255, 255, 255, 0.55);
+    --view: #9085e9; --on-view: #0b0b0b;
+    --user: #3987e5; --asst: #d95926; --tool: #199e70; --echo: #c98500; --work: #d55181; --note: #008300;
+  }
+}
+* { box-sizing: border-box; }
+html { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { margin: 0; background: var(--surface); color: var(--text); }
+code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+h1, h2, h3 { margin: 0; font-weight: 600; }
+h1 { font-size: 15px; }
+h2 { font-size: 15px; }
+h3 { font-size: 13px; color: var(--text-2); }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 9px; cursor: pointer; }
+button:hover { background: var(--surface-3); }
+button.on { background: var(--text); color: var(--surface); border-color: var(--text); }
+button.link { background: none; border: none; padding: 0; color: inherit; text-decoration: underline; text-decoration-color: var(--text-3); text-underline-offset: 2px; }
+input[type="number"] { width: 84px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+header .fact { color: var(--text-2); }
+header .fact b { color: var(--text); font-weight: 600; }
+header .grow { flex: 1; }
+nav { display: flex; gap: 4px; padding: 8px 18px 0; border-bottom: 1px solid var(--border); }
+nav button { border-radius: 6px 6px 0 0; border-bottom: none; padding: 5px 14px; background: none; border-color: transparent; color: var(--text-2); }
+nav button[aria-selected="true"] { background: var(--surface-2); border-color: var(--border); color: var(--text); font-weight: 600; }
+#error { margin: 10px 18px 0; padding: 8px 12px; border: 1px solid var(--critical); border-radius: 6px; }
+main { padding: 16px 18px 60px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 22px; align-items: start; }
+.cols.left { grid-template-columns: 320px minmax(0, 1fr); }
+@media (max-width: 1000px) { .cols, .cols.left { grid-template-columns: minmax(0, 1fr); } }
+aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
+section { margin-bottom: 26px; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 10px; }
+.bar .grow { flex: 1; }
+.dim { color: var(--text-3); }
+.sub { color: var(--text-2); }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--surface); }
+.card + .card { margin-top: 10px; }
+.empty { color: var(--text-3); padding: 14px 0; }
+.tag { display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; white-space: nowrap; color: var(--text-2); background: var(--surface); }
+.tag .dot, .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+.kind-user { --c: var(--user); } .kind-asst { --c: var(--asst); } .kind-tool { --c: var(--tool); }
+.kind-echo { --c: var(--echo); } .kind-work { --c: var(--work); } .kind-note { --c: var(--note); }
+.tag .dot, .strip .m { background: var(--c, var(--text-3)); }
+.status-done { --c: var(--good); } .status-failed { --c: var(--critical); } .status-stopped, .status-cut, .status-denied { --c: var(--warning); } .status-running { --c: var(--user); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-2); font-size: 12.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch.built { background: var(--cell); } .swatch.chat { background: var(--view); }
+.swatch.seen { background: var(--cell) repeating-linear-gradient(45deg, transparent 0 2px, var(--hatch) 2px 3px); }
+.swatch.hole { border: 1px dashed var(--text-3); }
+/* The tree: one row for each level, the highest first. A node is as wide
+   as the messages that it covers. */
+.tree { display: grid; grid-template-columns: 74px minmax(0, 1fr) 96px; row-gap: 3px; align-items: center; }
+.tree .lab { color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.tree .cnt { color: var(--text-3); font-size: 12px; text-align: right; white-space: nowrap; }
+.tree .cnt.short { color: var(--text); }
+.row { position: relative; height: 22px; cursor: pointer; }
+.row .hole { position: absolute; top: 0; bottom: 0; left: 0; border: 1px dashed var(--text-3); border-radius: 3px; opacity: 0.6; }
+.cell { position: absolute; top: 0; bottom: 0; background: var(--cell); overflow: hidden; font-size: 11px; line-height: 22px; text-align: center; white-space: nowrap; color: var(--text); }
+.cell.gap { box-shadow: inset -2px 0 0 var(--surface); border-radius: 3px; }
+.cell.chat { background: var(--view); color: var(--on-view); }
+.cell.seen { background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--hatch) 3px 4px); }
+.cell.sel { outline: 2px solid var(--text); outline-offset: -2px; z-index: 2; border-radius: 3px; }
+.cell:hover { filter: brightness(1.12); }
+.strip { position: relative; height: 12px; }
+.strip .m { position: absolute; top: 0; bottom: 0; }
+.strip .m.gap { box-shadow: inset -1px 0 0 var(--surface); }
+.axis { display: flex; justify-content: space-between; color: var(--text-3); font-size: 11.5px; }
+.note { color: var(--text-3); font-size: 12.5px; margin-top: 6px; }
+#tip { position: fixed; z-index: 10; max-width: 420px; padding: 7px 10px; border-radius: 6px; background: var(--text); color: var(--surface); font-size: 12.5px; pointer-events: none; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); }
+#tip .t { opacity: 0.8; margin-top: 3px; overflow-wrap: anywhere; }
+.meter { height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; min-width: 120px; flex: 1; max-width: 280px; }
+.meter i { display: block; height: 100%; background: var(--text-2); }
+/* A line of a view, and a message of the log. */
+.block { border-left: 3px solid var(--view); padding-left: 9px; margin: 0 0 8px; }
+.block .head { color: var(--text-3); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+.line, .msg { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 10px; padding: 2px 4px; border-radius: 4px; cursor: pointer; align-items: baseline; }
+.line:hover, .msg:hover { background: var(--surface-2); }
+.line.sel, .msg.sel { background: var(--surface-3); }
+.line .ref, .msg .id { color: var(--text-2); white-space: nowrap; }
+.line .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.line.none .txt { color: var(--text-3); font-style: italic; font-family: inherit; }
+.msg { grid-template-columns: 48px 62px minmax(0, 1fr) auto; }
+.msg .txt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg .meta { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 10px 0; }
+dt { color: var(--text-3); }
+dd { margin: 0; }
+.text { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; max-height: 420px; overflow: auto; }
+.label { color: var(--text-3); font-size: 12px; margin: 12px 0 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-3); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.wrap { overflow-wrap: anywhere; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tiles .card { margin-top: 0; }
+.tile .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* The request of a turn: each part has its edge color and its name. */
+.turns .t { display: block; width: 100%; text-align: left; border: 1px solid transparent; background: none; border-radius: 6px; padding: 6px 8px; }
+.turns .t:hover { background: var(--surface-2); }
+.turns .t.sel { background: var(--surface-2); border-color: var(--border); }
+.turns .t .said { display: block; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.part { border-left: 3px solid var(--c, var(--text-3)); padding: 2px 0 2px 12px; margin: 0 0 14px; }
+.part > .name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; }
+.part > .name b { font-weight: 600; }
+.part-head { --c: var(--text-3); } .part-view { --c: var(--view); } .part-user { --c: var(--user); }
+.part-asst { --c: var(--asst); } .part-tool { --c: var(--tool); } .part-echo { --c: var(--echo); }
+.swatch.part-head, .swatch.part-view, .swatch.part-user, .swatch.part-asst, .swatch.part-tool, .swatch.part-echo { background: var(--c); }
+details > summary { cursor: pointer; color: var(--text-2); }
+details[open] > summary { margin-bottom: 6px; }
+.now { border: 1px solid var(--user); border-radius: 6px; padding: 7px 11px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<header id="top"><h1>EverChat inspector</h1></header>
+<nav id="tabs" role="tablist"></nav>
+<div id="error" role="alert" hidden></div>
+<main id="main"></main>
+<div id="tip" hidden></div>
+<script>
+"use strict"
+
+// Help
+// ----
+
+const ROOT = "/" + location.pathname.split("/")[1] + "/"
+const KINDS = { user: "the person", asst: "EverChat", tool: "a program", echo: "a program's result", work: "an agent's report", note: "the program itself" }
+const TABS = [["memory", "Memory"], ["requests", "Requests"], ["usage", "Usage"], ["diagnostics", "Diagnostics"]]
+const CLIP = 4000 // the most characters of a long text, until the person asks for all
+
+// An answer of the server. It fails with the server's own words.
+const get = async (path, params = {}) => {
+  const query = Object.entries(params).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => key + "=" + encodeURIComponent(value)).join("&")
+  const response = await fetch(ROOT + "api/" + path + (query === "" ? "" : "?" + query))
+  const data = await response.json().catch(() => null)
+  if (!response.ok) {
+    const error = new Error(data !== null && data.error ? data.error : "the server answered " + response.status)
+    error.status = response.status
+    throw error
+  }
+  return data
+}
+
+// An element. Every child that is not an element becomes text.
+const h = (tag, attrs, ...children) => {
+  const node = document.createElement(tag)
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === null || value === undefined || value === false) continue
+    if (key.startsWith("on")) node.addEventListener(key.slice(2), value)
+    else if (key === "style") node.style.cssText = value
+    else node.setAttribute(key, value === true ? "" : String(value))
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false) continue
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
+  }
+  return node
+}
+
+const $ = (id) => document.getElementById(id)
+
+// Puts `children` in the place of what an element holds.
+const put = (node, ...children) => {
+  node.replaceChildren()
+  node.append(...h("div", null, ...children).childNodes)
+}
+const num = (n) => Number(n).toLocaleString("en-US")
+const ref = (l, i) => i * 2 ** l + "+" + 2 ** l
+const pad = (n) => String(n).padStart(2, "0")
+const clock = (ms) => {
+  if (ms === null || ms === undefined) return ""
+  const at = new Date(ms)
+  const day = at.toDateString() === new Date().toDateString() ? "" : at.getFullYear() + "-" + pad(at.getMonth() + 1) + "-" + pad(at.getDate()) + " "
+  return day + pad(at.getHours()) + ":" + pad(at.getMinutes()) + ":" + pad(at.getSeconds())
+}
+const lasted = (from, to) => {
+  if (from === null || to === null || to === undefined) return ""
+  const ms = to - from
+  return ms < 1000 ? ms + " ms" : ms < 60000 ? (ms / 1000).toFixed(1) + " s" : Math.floor(ms / 60000) + " min " + Math.round((ms % 60000) / 1000) + " s"
+}
+const bytes = (text) => new TextEncoder().encode(text).length
+
+const kindTag = (kind) => h("span", { class: "tag kind-" + kind, title: KINDS[kind] || "" }, h("span", { class: "dot" }), kind)
+const MARKS = { done: "✓", failed: "✕", stopped: "■", cut: "✂", denied: "⊘", running: "●" }
+const statusTag = (status) => h("span", { class: "tag status-" + status }, h("span", { class: "dot" }), (MARKS[status] || "") + " " + status)
+
+// What the person opened, so that a new answer does not close it.
+const opened = new Set()
+const fold = (key, summary, make) => {
+  const body = h("div")
+  const node = h("details", { ontoggle: () => {
+    if (node.open) {
+      opened.add(key)
+      if (body.childNodes.length === 0) body.append(...[make()].flat())
+    } else opened.delete(key)
+  } }, h("summary", null, summary), body)
+  if (opened.has(key)) {
+    node.open = true
+    body.append(...[make()].flat())
+  }
+  return node
+}
+
+// A text of the chat, whole or its start.
+const text = (value, key) => {
+  const whole = value.length <= CLIP || opened.has(key)
+  const box = h("pre", { class: "text" }, whole ? value : value.slice(0, CLIP) + "…")
+  if (value.length <= CLIP) return box
+  const more = h("button", { class: "link", onclick: () => {
+    if (opened.has(key)) opened.delete(key)
+    else opened.add(key)
+    wrap.replaceWith(text(value, key))
+  } }, whole ? "show less" : "show all " + num(value.length) + " characters")
+  const wrap = h("div", null, box, h("div", { class: "note" }, more))
+  return wrap
+}
+
+// State
+// -----
+
+// What the page shows. It is also in the address, after the `#`, so that
+// a reload shows the same.
+const state = { tab: "memory", from: null, to: null, follow: true, view: "chat", node: null, turn: null, body: null }
+let overview = null
+let version = null
+let auto = true
+
+const readHash = () => {
+  const parts = new URLSearchParams(location.hash.slice(1))
+  if (TABS.some(([name]) => name === parts.get("tab"))) state.tab = parts.get("tab")
+  const whole = (name) => (/^\d+$/.test(parts.get(name) || "") ? Number(parts.get(name)) : null)
+  if (whole("from") !== null && whole("to") !== null) {
+    state.from = whole("from")
+    state.to = whole("to")
+    state.follow = false
+  } else if (whole("last") !== null) {
+    // The last messages of the chat, however many it has: `range` moves this to the end.
+    state.from = 1
+    state.to = 1 + whole("last")
+    state.follow = true
+  }
+  if (parts.get("view") === "chat" || parts.get("view") === "seen") state.view = parts.get("view")
+  const node = /^(\d+)\.(\d+)$/.exec(parts.get("node") || "")
+  state.node = node === null ? null : { l: Number(node[1]), i: Number(node[2]) }
+  state.turn = whole("turn")
+}
+
+const writeHash = () => {
+  const parts = new URLSearchParams({ tab: state.tab })
+  if (state.tab === "memory") {
+    if (!state.follow && state.from !== null) {
+      parts.set("from", state.from)
+      parts.set("to", state.to)
+    } else if (state.from !== null && state.from > 0) {
+      parts.set("last", state.to - state.from)
+    }
+    parts.set("view", state.view)
+    if (state.node !== null) parts.set("node", state.node.l + "." + state.node.i)
+  }
+  if (state.tab === "requests" && state.turn !== null) parts.set("turn", state.turn)
+  history.replaceState(null, "", "#" + parts.toString())
+}
+
+// One load at a time, in the order asked.
+let chain = Promise.resolve()
+const run = (load) => {
+  chain = chain.then(load).then(() => fail(null), fail)
+  return chain
+}
+const fail = (error) => {
+  // The page is gone: nothing can show the error.
+  if ($("error") === null) return
+  $("error").hidden = error === null
+  $("error").textContent = error === null ? "" : "The inspector did not answer (" + error.message + "). Does `everchat inspect` still run?"
+}
+
+const go = (change) => {
+  // The body that is open is of one turn's request.
+  if (change.turn !== undefined && change.turn !== state.turn && change.body === undefined) state.body = null
+  Object.assign(state, change)
+  writeHash()
+  return run(show)
+}
+
+// The top
+// -------
+
+const renderTop = () => {
+  const o = overview
+  const launch = o.launch
+  const runs = o.live
+    ? h("span", { class: "tag status-running" }, h("span", { class: "dot" }), "● runs now, process " + launch.pid)
+    : launch !== null && launch.ended === null
+    ? h("span", { class: "tag status-stopped" }, h("span", { class: "dot" }), "■ not running: its last launch did not end")
+    : h("span", { class: "tag" }, "not running")
+  const fact = (name, value) => h("span", { class: "fact" }, name + " ", h("b", null, value))
+  put($("top"), 
+    h("h1", null, "EverChat inspector"),
+    fact("chat", o.chat.uuid.slice(0, 8)),
+    fact("pick", o.chat.pick.model + " · " + o.chat.pick.effort + (o.chat.pick.speed === "slow" ? "" : " · " + o.chat.pick.speed)),
+    fact("messages", num(o.count)),
+    fact("nodes", num(o.levels.reduce((sum, level) => sum + level.built, 0))),
+    runs,
+    o.turn === null ? null : h("button", { class: "link", onclick: () => go({ tab: "requests", turn: o.turn }) }, "turn " + o.turn + " runs"),
+    h("span", { class: "grow" }),
+    h("label", { class: "sub" }, h("input", { type: "checkbox", id: "auto", checked: auto, onchange: (event) => { auto = event.target.checked } }), " follow the chat")
+  )
+  put($("tabs"), ...TABS.map(([name, title]) =>
+    h("button", { role: "tab", "aria-selected": String(state.tab === name), onclick: () => go({ tab: name }) }, title)
+  ))
+}
+
+// The memory
+// ----------
+
+const tip = (event, lines) => {
+  const box = $("tip")
+  if (lines === null) {
+    box.hidden = true
+    return
+  }
+  put(box, lines)
+  box.hidden = false
+  const width = box.offsetWidth || 300
+  box.style.left = Math.max(8, Math.min(event.clientX + 14, window.innerWidth - width - 8)) + "px"
+  box.style.top = event.clientY + 18 + "px"
+}
+
+const select = (l, i) => go({ node: { l, i } })
+
+// The range of messages that the tree shows.
+const range = () => {
+  const count = overview.count
+  if (state.from === null || state.follow) {
+    const width = state.from === null ? Math.min(count, 2048) : Math.max(1, state.to - state.from)
+    // A range that starts at the first message grows with the chat. Another one moves with its end.
+    state.from = state.from === 0 ? 0 : Math.max(0, count - width)
+    state.to = count
+    state.follow = true
+  }
+  state.to = Math.max(0, Math.min(count, state.to))
+  state.from = Math.max(0, Math.min(state.from, Math.max(0, state.to - 1)))
+}
+
+const setRange = (from, to) => {
+  const count = overview.count
+  const width = Math.max(1, Math.min(count, to - from))
+  const a = Math.max(0, Math.min(count - width, from))
+  return go({ from: a, to: a + width, follow: a + width >= count })
+}
+
+// The window with a node in it, with some messages on each side.
+const reveal = (l, i) => {
+  const [first, last] = [i * 2 ** l, (i + 1) * 2 ** l]
+  if (state.from !== null && first >= state.from && last <= state.to) return {}
+  const width = Math.max(64, 2 * (last - first))
+  const from = Math.max(0, first - Math.floor((width - (last - first)) / 2))
+  return { from, to: from + width, follow: false }
+}
+
+const renderTree = (win, messages) => {
+  const span = Math.max(1, win.to - win.from)
+  const holds = (parts) => new Set(parts.map(([l, i]) => l + "/" + i))
+  const [chat, seen] = [holds(win.chat), holds(win.seen)]
+  const built = new Map(win.nodes.map((node) => [node.l + "/" + node.i, node]))
+  const levels = new Map(overview.levels.map((level) => [level.l, level]))
+  const tree = h("div", { class: "tree" })
+  const width = () => (tree.clientWidth > 200 ? tree.clientWidth - 170 : 900)
+  const percent = (a, z) => "left:" + ((a - win.from) / span) * 100 + "%;width:" + ((z - a) / span) * 100 + "%"
+
+  const describe = (l, i) => {
+    const node = built.get(l + "/" + i)
+    const where = [chat.has(l + "/" + i) ? "in the chat view" : null, seen.has(l + "/" + i) ? "in the compaction view" : null].filter(Boolean).join(", ")
+    const [first, last] = [i * 2 ** l, (i + 1) * 2 ** l - 1]
+    return [
+      h("div", null, h("b", null, ref(l, i)), " · level " + l + " · " + (first === last ? "message " + first : "messages " + first + " to " + last)),
+      h("div", null, node === undefined ? "not built" : num(node.size) + " bytes" + (where === "" ? "" : " · " + where)),
+      node === undefined ? null : h("div", { class: "t" }, node.text.length > 220 ? node.text.slice(0, 220) + "…" : node.text)
+    ]
+  }
+
+  const fill = () => {
+    const wide = width()
+    tree.replaceChildren()
+    for (let l = win.top; l >= win.floor; l--) {
+      const size = 2 ** l
+      const level = levels.get(l) || { built: 0, whole: 0 }
+      const row = h("div", { class: "row", "data-l": l })
+      // Where the count allows a node of this level: a node not built shows as a hole.
+      const allowed = Math.min(win.to, Math.floor(win.count / size) * size)
+      if (allowed > win.from) row.append(h("div", { class: "hole", style: percent(win.from, allowed) }))
+      for (let i = Math.floor(win.from / size); i * size < win.to; i++) {
+        const node = built.get(l + "/" + i)
+        if (node === undefined) continue
+        const [a, z] = [Math.max(i * size, win.from), Math.min((i + 1) * size, win.to)]
+        const pixels = ((z - a) / span) * wide
+        const key = l + "/" + i
+        const selected = state.node !== null && state.node.l === l && state.node.i === i
+        row.append(h("div", {
+          class: "cell" + (pixels >= 5 ? " gap" : "") + (chat.has(key) ? " chat" : "") + (seen.has(key) ? " seen" : "") + (selected ? " sel" : ""),
+          style: percent(a, z),
+          "data-l": l,
+          "data-i": i
+        }, pixels >= 46 ? ref(l, i) : null))
+      }
+      tree.append(
+        h("div", { class: "lab", title: "A node of level " + l + " covers " + num(size) + (size === 1 ? " message" : " messages") }, "level " + l + " "),
+        row,
+        h("div", { class: "cnt" + (level.built < level.whole ? " short" : ""), title: "The nodes of this level that are built, of those that the count of the messages allows, in the whole chat" },
+          level.built < level.whole ? num(level.whole - level.built) + " not built" : num(level.built) + " built")
+      )
+    }
+    if (win.floor > 0) {
+      // The lower levels are not drawn. The parts of the views there still show, so that a view has no gap.
+      const row = h("div", { class: "row" })
+      const under = (parts, name) => parts.filter(([l]) => l < win.floor).forEach(([l, i]) => {
+        const [a, z] = [Math.max(i * 2 ** l, win.from), Math.min((i + 1) * 2 ** l, win.to)]
+        row.append(h("div", { class: "cell " + name, style: percent(a, z), "data-l": l, "data-i": i }))
+      })
+      under(win.chat, "chat")
+      under(win.seen.filter(([l, i]) => !chat.has(l + "/" + i)), "seen")
+      under(win.seen.filter(([l, i]) => chat.has(l + "/" + i)), "chat seen")
+      tree.append(h("div", { class: "lab", title: "Only the parts of the views are drawn for these levels" }, win.floor === 1 ? "level 0" : "levels 0–" + (win.floor - 1)), row, h("div", { class: "cnt" }, "parts only"))
+    }
+    if (messages !== null) {
+      const strip = h("div", { class: "strip" })
+      for (const message of messages) {
+        strip.append(h("div", { class: "m kind-" + message.kind + (wide / span >= 4 ? " gap" : ""), style: percent(message.i, message.i + 1), "data-m": message.i }))
+      }
+      tree.append(h("div", { class: "lab" }, "kind"), strip, h("div"))
+    }
+    tree.append(h("div"), h("div", { class: "axis" }, h("span", null, "message " + win.from), h("span", null, win.to - 1 > win.from ? "message " + (win.to - 1) : "")), h("div"))
+  }
+
+  const at = (event) => {
+    const cell = event.target.closest ? event.target.closest(".cell") : null
+    if (cell !== null) return { l: Number(cell.getAttribute("data-l")), i: Number(cell.getAttribute("data-i")) }
+    const dot = event.target.closest ? event.target.closest(".m") : null
+    if (dot !== null) return { l: 0, i: Number(dot.getAttribute("data-m")) }
+    const row = event.target.closest ? event.target.closest(".row") : null
+    if (row === null) return null
+    // A hole: the node of this level over the message under the pointer.
+    const l = Number(row.getAttribute("data-l"))
+    const box = row.getBoundingClientRect()
+    const message = win.from + Math.floor(((event.clientX - box.left) / Math.max(1, box.width)) * span)
+    const i = Math.floor(message / 2 ** l)
+    return (i + 1) * 2 ** l <= win.count ? { l, i } : null
+  }
+  tree.addEventListener("click", (event) => {
+    const hit = at(event)
+    if (hit !== null) select(hit.l, hit.i)
+  })
+  tree.addEventListener("mousemove", (event) => {
+    const hit = at(event)
+    tip(event, hit === null ? null : describe(hit.l, hit.i))
+  })
+  tree.addEventListener("mouseleave", (event) => tip(event, null))
+  return { tree, fill }
+}
+
+const lineRow = (one, block) => {
+  const selected = state.node !== null && state.node.l === one.l && state.node.i === one.i
+  return h("div", { class: "line" + (selected ? " sel" : "") + (one.text === null ? " none" : ""), "data-l": one.l, "data-i": one.i, onclick: () => go({ tab: "memory", node: { l: one.l, i: one.i }, ...reveal(one.l, one.i) }) },
+    h("span", { class: "ref mono", title: "Level " + one.l + ": " + num(2 ** one.l) + (one.l === 0 ? " message" : " messages") }, one.ref || ref(one.l, one.i)),
+    h("span", { class: "txt mono" }, one.text === null ? "not built yet: it is not in a request" : one.text.replace(/\s*\n\s*/g, " "))
+  )
+}
+
+const renderView = (view) => {
+  const out = []
+  const size = overview.block
+  const lines = view.lines.filter((one) => one.text !== null)
+  // The view's blocks: an opening one, the lines in blocks, and the closing one.
+  if (view.blocks[0] && view.blocks[0].mark) out.push(h("div", { class: "note" }, "The cache mark is on the opening tag: no block is whole yet."))
+  for (let k = 0; k * size < lines.length; k++) {
+    const block = view.blocks[k + 1]
+    const part = lines.slice(k * size, (k + 1) * size)
+    out.push(h("div", { class: "block" },
+      h("div", { class: "head" }, "block " + (k + 1), block && block.mark ? h("span", { class: "tag" }, "cache mark") : null, part.length < size ? "(not whole yet)" : null),
+      part.map((one) => lineRow(one))
+    ))
+  }
+  const waits = view.lines.filter((one) => one.text === null)
+  if (waits.length > 0) out.push(h("div", { class: "label" }, "Parts whose node is not built yet (" + waits.length + ")"), waits.map((one) => lineRow(one)))
+  if (view.lines.length === 0) out.push(h("div", { class: "empty" }, "The view has no part."))
+  return out
+}
+
+const renderNode = (node) => {
+  if (node === null) {
+    return h("div", { class: "card" }, h("h2", null, "Node"), h("p", { class: "sub" }, "Select a node in the tree, a line of the view, or a message of the log."),
+      h("p", { class: "dim" }, "A node of level l covers 2^l messages. Its name for the model is id+n: the n messages from message id on."))
+  }
+  const size = 2 ** node.l
+  const how = node.how === "source"
+    ? "It is its source: the source fits, so no request was needed."
+    : node.how === "summary"
+    ? "A compaction wrote it" + (node.requests.length > 0 ? " (" + node.requests.length + (node.requests.length === 1 ? " request)." : " requests).") : ".")
+    : node.how === "cut"
+    ? "The compaction gave no line: it is the start of its source."
+    : node.node === null ? "It is not built yet." : ""
+  const link = (one) => h("button", { class: "mono", onclick: () => go({ node: { l: one.l, i: one.i }, ...reveal(one.l, one.i) }) }, ref(one.l, one.i) + (one.built ? "" : " (not built)"))
+  const key = "node:" + node.l + "/" + node.i
+  return h("div", { class: "card" },
+    h("div", { class: "bar" }, h("h2", { class: "mono" }, node.ref), h("span", { class: "sub" }, node.l === 0 ? "a leaf" : "level " + node.l), h("span", { class: "grow" }), h("button", { onclick: () => go({ node: null }) }, "close")),
+    h("dl", null,
+      h("dt", null, "Covers"), h("dd", null, h("button", { class: "link", onclick: () => setRange(node.first - size, node.last + 1 + size) }, size === 1 ? "message " + node.first : num(size) + " messages, " + node.first + " to " + node.last)),
+      h("dt", null, "Built"), h("dd", null, how, node.node === null ? null : h("span", { class: "dim" }, " " + clock(node.node.created))),
+      node.node === null ? null : [h("dt", null, "Size"), h("dd", null, num(node.node.size) + " of " + num(overview.node) + " bytes")],
+      h("dt", null, "In a view"), h("dd", null, [node.chat ? "the chat view" : null, node.seen ? "the compaction view" : null].filter(Boolean).join(", ") || "no: a node above it or nodes below it are"),
+      h("dt", null, "Above"), h("dd", null, node.above === null ? "none: it is a root, or the chat is too short for the node above" : link(node.above)),
+      node.halves.length === 0 ? null : [h("dt", null, "Halves"), h("dd", null, node.halves.map((one) => [link(one), " "]))]
+    ),
+    node.node === null ? null : [h("div", { class: "label" }, "The node's text, as the model reads it after " + node.ref + "|"), text(node.node.text.replace(/\s*\n\s*/g, " "), key + ":text")],
+    node.source === null || node.how === "source" ? null : [h("div", { class: "label" }, node.l === 0 ? "Its source: the message as the model reads it (" + num(bytes(node.source)) + " bytes)" : "Its source: the lines of its halves (" + num(bytes(node.source)) + " bytes)"), text(node.source, key + ":source")],
+    node.requests.length === 0 ? null : [h("div", { class: "label" }, "The requests of its compaction"), node.requests.map((row) =>
+      h("div", { class: "sub" }, clock(row.created) + " · " + row.pick.model + " · input " + num(row.input) + " · cache read " + num(row.cacheRead) + " · cache write " + num(row.cacheWrite) + " · output " + num(row.output)))],
+    node.message === null ? null : [
+      h("div", { class: "label" }, "The message"),
+      h("div", { class: "bar" }, kindTag(node.message.kind), h("span", { class: "sub" }, num(node.message.size) + " bytes · " + clock(node.message.created)),
+        node.message.turn === null ? null : h("button", { class: "link", onclick: () => go({ tab: "requests", turn: node.message.turn }) }, "turn " + node.message.turn),
+        node.message.more ? h("span", { class: "tag" }, "goes on in the next message") : null,
+        node.message.line === null ? null : h("span", { class: "tag" }, "logged with its own line")),
+      text(node.message.text, key + ":message")
+    ]
+  )
+}
+
+const renderLog = (messages) =>
+  messages.map((message) => {
+    const selected = state.node !== null && state.node.l === 0 && state.node.i === message.i
+    return h("div", { class: "msg" + (selected ? " sel" : ""), onclick: () => select(0, message.i) },
+      h("span", { class: "id mono" }, message.i), kindTag(message.kind), h("span", { class: "txt" }, message.text.length > 600 ? message.text.slice(0, 600) + "…" : message.text),
+      h("span", { class: "meta" }, num(message.size) + " B" + (message.turn === null ? "" : " · turn " + message.turn)))
+  })
+
+let redraw = null
+
+const showMemory = async () => {
+  range()
+  const [from, to] = [state.from, state.to]
+  const shown = Math.max(from, to - 500)
+  const [win, view, messages, node] = await Promise.all([
+    get("window", { from, to }),
+    get("view", { name: state.view }),
+    get("messages", { from: shown, to }),
+    state.node === null ? null : get("node", state.node).catch((error) => (error.status === 404 ? null : Promise.reject(error)))
+  ])
+  if (state.node !== null && node === null) state.node = null
+  const o = overview
+  const span = to - from
+  const { fill, tree } = renderTree(win, shown === from ? messages : null)
+  const zoom = (factor) => {
+    const width = Math.max(4, Math.round(span * factor))
+    const middle = from + span / 2
+    return setRange(Math.round(middle - width / 2), Math.round(middle - width / 2) + width)
+  }
+  let [a, z] = [from, to]
+  put($("main"), h("div", { class: "cols" },
+    h("div", null,
+      h("section", null,
+        h("div", { class: "bar" },
+          h("h2", null, "The tree"),
+          h("span", { class: "sub" }, "messages " + from + " to " + Math.max(from, to - 1) + " of " + num(o.count)),
+          h("span", { class: "grow" }),
+          h("button", { onclick: () => setRange(0, o.count), title: "The whole chat" }, "all"),
+          h("button", { onclick: () => setRange(o.count - 64, o.count) }, "last 64"),
+          h("button", { onclick: () => zoom(2), title: "Twice as many messages" }, "−"),
+          h("button", { onclick: () => zoom(0.5), title: "Half as many messages" }, "+"),
+          h("button", { onclick: () => setRange(from - Math.ceil(span / 2), to - Math.ceil(span / 2)), title: "Older messages" }, "◀"),
+          h("button", { onclick: () => setRange(from + Math.ceil(span / 2), to + Math.ceil(span / 2)), title: "Newer messages" }, "▶"),
+          h("input", { type: "number", min: 0, value: from, "aria-label": "From message", onchange: (event) => { a = Number(event.target.value) } }),
+          h("input", { type: "number", min: 1, value: to, "aria-label": "Up to message", onchange: (event) => { z = Number(event.target.value) } }),
+          h("button", { onclick: () => setRange(a, Math.max(a + 1, z)) }, "show")
+        ),
+        h("div", { class: "legend", style: "margin-bottom:10px" },
+          h("span", null, h("i", { class: "swatch built" }), "a node"),
+          h("span", null, h("i", { class: "swatch chat" }), "a part of the chat view"),
+          h("span", null, h("i", { class: "swatch seen" }), "a part of the compaction view"),
+          h("span", null, h("i", { class: "swatch hole" }), "not built yet"),
+          h("span", { class: "dim" }, "A node is as wide as the messages that it covers.")
+        ),
+        tree,
+        win.floor > 0 ? h("div", { class: "note" }, "Below level " + win.floor + ", only the parts of the views are drawn at this width. Show fewer messages to see each node.") : null,
+        shown === from ? h("div", { class: "legend", style: "margin-top:8px" }, Object.keys(KINDS).map((kind) => h("span", { class: "kind-" + kind }, h("i", { class: "swatch", style: "background:var(--c)" }), kind + ": " + KINDS[kind]))) : null,
+        h("div", { class: "note" }, "Roots: ", o.roots.length === 0 ? "none" : o.roots.map((root) => [h("button", { class: "link mono", onclick: () => go({ node: { l: root.l, i: root.i }, ...reveal(root.l, root.i) }) }, ref(root.l, root.i)), root.built ? " " : " (not built) "]))
+      ),
+      h("section", null,
+        h("div", { class: "bar" },
+          h("h2", null, "The view"),
+          h("button", { class: state.view === "chat" ? "on" : "", onclick: () => go({ view: "chat" }) }, "chat view"),
+          h("button", { class: state.view === "seen" ? "on" : "", onclick: () => go({ view: "seen" }) }, "compaction view"),
+          h("span", { class: "sub" }, num(view.parts) + " parts · " + num(view.size) + " of " + num(view.high) + " bytes"),
+          h("div", { class: "meter", title: "Past " + num(view.high) + " bytes, a batch of merges makes the view half as large" }, h("i", { style: "width:" + Math.min(100, (view.size / view.high) * 100) + "%" })),
+          view.batch ? h("span", { class: "tag" }, "a batch is under way") : null
+        ),
+        h("div", { class: "note", style: "margin:0 0 10px" },
+          state.view === "chat" ? "What a turn's request shows the model, oldest first. " : "What a compaction's request shows the compactor. It ends before the first message whose leaf is not built. ",
+          num(view.kept) + (view.kept === 1 ? " part is" : " parts are") + " from the last batch, and " + num(view.parts - view.kept) + (view.parts - view.kept === 1 ? " is a leaf" : " are leaves") + " that came since."),
+        renderView(view)
+      ),
+      h("section", null,
+        h("div", { class: "bar" }, h("h2", null, "The log"), h("span", { class: "sub" }, messages.length === 0 ? "" : "messages " + messages[0].i + " to " + messages[messages.length - 1].i)),
+        shown > from ? h("div", { class: "note", style: "margin:0 0 8px" }, "Only the last 500 messages of the range are listed.") : null,
+        messages.length === 0 ? h("div", { class: "empty" }, "The chat has no message yet.") : renderLog(messages)
+      )
+    ),
+    h("aside", null, renderNode(node),
+      h("div", { class: "card" },
+        h("h3", null, "Levels"),
+        h("table", null,
+          h("tr", null, h("th", null, "level"), h("th", { class: "n" }, "messages per node"), h("th", { class: "n" }, "built"), h("th", { class: "n" }, "of")),
+          [...o.levels].reverse().map((level) => h("tr", null, h("td", null, level.l), h("td", { class: "n" }, num(2 ** level.l)), h("td", { class: "n" }, num(level.built)), h("td", { class: "n" }, num(level.whole))))
+        )
+      )
+    )
+  ))
+  fill()
+  redraw = fill
+}
+
+// The requests
+// ------------
+
+const usageTable = (rows, served) =>
+  h("table", null,
+    h("tr", null, h("th", null, "time"), served ? h("th", null, "for") : null, h("th", null, "model"), h("th", { class: "n" }, "input"), h("th", { class: "n" }, "cache read"), h("th", { class: "n" }, "cache write"), h("th", { class: "n" }, "output"), h("th", { class: "n" }, "expected read"), h("th", null, "")),
+    rows.map((row) => {
+      // cache.ts: a request that should have read at least 2048 tokens and read none missed the cache.
+      const missed = row.expected !== null && row.expected >= 2048 && row.cacheRead === 0
+      const target = row.served === "turn" && row.turn !== null
+        ? h("button", { class: "link", onclick: () => go({ tab: "requests", turn: row.turn }) }, "turn " + row.turn)
+        : row.node !== null
+        ? h("button", { class: "link mono", onclick: () => go({ tab: "memory", node: { l: row.node[0], i: row.node[1] }, ...reveal(row.node[0], row.node[1]) }) }, "node " + ref(row.node[0], row.node[1]))
+        : row.served
+      return h("tr", null,
+        h("td", null, clock(row.created)), served ? h("td", null, target) : null, h("td", null, row.pick.model),
+        h("td", { class: "n" }, num(row.input)), h("td", { class: "n" }, num(row.cacheRead)), h("td", { class: "n" }, num(row.cacheWrite)), h("td", { class: "n" }, num(row.output)),
+        h("td", { class: "n" }, row.expected === null ? "" : num(row.expected)),
+        h("td", null, missed ? h("span", { class: "tag status-failed" }, h("span", { class: "dot" }), "✕ missed the cache") : null))
+    })
+  )
+
+const part = (kind, name, ...children) => h("div", { class: "part part-" + kind }, h("div", { class: "name" }, name), children)
+
+const renderTurn = (detail, body) => {
+  const turn = detail.turn
+  const key = "turn:" + turn.id
+  const programs = detail.calls.filter((call) => call.parent === null)
+  const bodyButton = (upto) => h("button", { onclick: () => go({ body: state.body === upto ? null : upto }) }, state.body === upto ? "hide the request's body" : "the request's body")
+  const bodyBox = (upto) => {
+    if (state.body !== upto || body === null) return null
+    return h("div", { style: "margin:8px 0" },
+      h("div", { class: "note", style: "margin:0 0 4px" }, "The body as the wire builds it now from the kept items: the head, and the first " + body.upto + (body.upto === 1 ? " item." : " items.")),
+      body.error !== null ? h("div", { class: "empty" }, "No body: " + body.error) : text(JSON.stringify(body.body, null, 2), key + ":body:" + upto))
+  }
+  const out = [
+    h("div", { class: "bar" },
+      h("h2", null, "Turn " + turn.id), statusTag(turn.status),
+      h("span", { class: "sub" }, turn.pick.model + " · " + turn.pick.effort + " · " + clock(turn.created) + (turn.ended === null ? "" : " · " + lasted(turn.created, turn.ended))),
+      h("button", { class: "link", onclick: () => go({ tab: "memory", node: { l: 0, i: turn.firstMsg }, ...reveal(0, turn.firstMsg) }) }, "starts at message " + turn.firstMsg)),
+    turn.why === null ? null : h("p", { class: "sub" }, "Why it ended so: " + turn.why),
+    turn.status !== "running" ? null : h("div", { class: "now" },
+      detail.asked !== null
+        ? ["A request with these " + detail.asked + (detail.asked === 1 ? " item" : " items") + " is asked now, or is about to be. What streams is not in the database. ", bodyButton(detail.asked), bodyBox(detail.asked)]
+        : detail.items.length === 0 ? "The turn waits for its first request: the memory builds the leaves of the messages before it." : "A program of the last step runs now, or its results are being written."),
+    h("div", { class: "legend", style: "margin-bottom:14px" },
+      [["head", "the head: system prompt and tool"], ["view", "the view"], ["user", "the person's messages"], ["asst", "the model's reply"], ["tool", "a program"], ["echo", "a result"]]
+        .map(([kind, name]) => h("span", null, h("i", { class: "swatch part-" + kind }), name))),
+    part("head", [h("b", null, "System prompt"), h("span", { class: "sub" }, num(bytes(detail.head.system)) + " bytes · with a cache mark")],
+      fold(key + ":system", "show the system prompt", () => text(detail.head.system, key + ":system:text"))),
+    detail.head.tools.map((tool, k) => part("head", [h("b", null, "Tool "), h("span", { class: "mono" }, tool.name), h("span", { class: "sub" }, num(bytes(tool.description)) + " bytes · " + (tool.schema === undefined ? "its input is free text: the program" : "its input is JSON"))],
+      fold(key + ":tool:" + k, "show the tool's description", () => [text(tool.description, key + ":tool:" + k + ":text"), tool.schema === undefined ? null : text(JSON.stringify(tool.schema, null, 2), key + ":tool:" + k + ":schema")])))
+  ]
+  for (const item of detail.items) {
+    if (item.kind === "user") {
+      const view = item.blocks.filter((block) => block.lines !== null)
+      const lines = view.flatMap((block) => block.lines)
+      if (view.length > 0) {
+        out.push(part("view", [h("b", null, "The view"), h("span", { class: "sub" }, num(lines.length) + (lines.length === 1 ? " line" : " lines") + " · " + num(view.reduce((sum, block) => sum + bytes(block.text), 0)) + " bytes · as it was sent")],
+          view[0].mark ? h("div", { class: "note", style: "margin:0 0 6px" }, "The cache mark is on the opening tag.") : null,
+          // One key for every turn: who opened the view once sees it in each turn.
+          lines.length === 0
+            ? h("div", { class: "dim" }, "The view was empty: no message came before this turn, or all of them go whole below.")
+            : fold("turn:view", "show its lines, each with its node", () => view.filter((block) => block.lines.length > 0).map((block, k) => h("div", { class: "block" },
+              h("div", { class: "head" }, "block " + (k + 1), block.mark ? h("span", { class: "tag" }, "cache mark") : null),
+              block.lines.map((one) => lineRow(one)))))))
+      }
+      const rest = item.blocks.filter((block) => block.lines === null)
+      out.push(part("user", [h("b", null, item.n === 0 ? "The new messages, whole" : "Messages that steered the turn"), h("span", { class: "sub" }, "item " + item.n + " · " + clock(item.created)), rest.some((block) => block.mark) ? h("span", { class: "tag" }, "cache mark") : null],
+        rest.map((block, k) => text(block.text, key + ":item:" + item.n + ":" + k))))
+    } else if (item.kind === "turn") {
+      const usage = item.usage
+      out.push(part("asst", [h("b", null, "Step " + item.step + ": the model's reply"), h("span", { class: "sub" }, "item " + item.n + " · " + clock(item.created)),
+        usage === null ? null : h("span", { class: "sub" }, "input " + num(usage.input) + " · cache read " + num(usage.cacheRead) + " · cache write " + num(usage.cacheWrite) + " · output " + num(usage.output)),
+        bodyButton(item.n)],
+        bodyBox(item.n),
+        item.output.filter((one) => one && one.type === "message" && Array.isArray(one.content)).map((one, k) =>
+          text(one.content.map((piece) => (piece && typeof piece.text === "string" ? piece.text : "")).join(""), key + ":said:" + item.n + ":" + k)),
+        fold(key + ":output:" + item.n, "the vendor's items, as received (" + item.output.length + ")", () => text(JSON.stringify(item.output, null, 2), key + ":output:" + item.n + ":text"))))
+      for (const call of item.calls) {
+        const row = programs.find((one) => one.vendorId === call.id)
+        out.push(part("tool", [h("b", null, "Program"), h("span", { class: "mono sub" }, call.id), row === undefined ? h("span", { class: "sub" }, "not started yet") : [statusTag(row.status), h("span", { class: "sub" }, "call " + row.id + (row.ended === null ? "" : " · " + lasted(row.created, row.ended)))]],
+          text(call.input, key + ":program:" + call.id),
+          row === undefined ? null : functions(detail.calls.filter((one) => one.parent === row.id), key)))
+      }
+    } else {
+      for (const result of item.results) {
+        const row = programs.find((one) => one.vendorId === result.id)
+        const shortened = row !== undefined && row.size !== null && row.shown !== null && row.shown < row.size
+        out.push(part("echo", [h("b", null, "Result"), h("span", { class: "mono sub" }, result.id), h("span", { class: "sub" }, "item " + item.n + " · " + clock(item.created)),
+          shortened ? h("span", { class: "tag" }, "shortened: " + num(row.shown) + " of " + num(row.size) + " bytes") : null],
+          text(result.output, key + ":result:" + result.id)))
+      }
+    }
+  }
+  if (detail.usage.length > 0) out.push(h("h3", { style: "margin:18px 0 6px" }, "The usage of this turn's requests"), usageTable(detail.usage, false))
+  return out
+}
+
+const functions = (rows, key) => {
+  if (rows.length === 0) return h("div", { class: "note" }, "It called no function.")
+  return fold(key + ":functions:" + rows[0].parent, "the functions that it called (" + rows.length + ")", () =>
+    h("table", null,
+      h("tr", null, h("th", null, "call"), h("th", null, "function"), h("th", null, "arguments"), h("th", null, "status"), h("th", { class: "n" }, "time"), h("th", { class: "n" }, "result")),
+      rows.map((row) => h("tr", null,
+        h("td", null, row.id), h("td", { class: "mono" }, row.fn), h("td", { class: "mono wrap" }, row.input.length > 300 ? row.input.slice(0, 300) + "…" : row.input),
+        h("td", null, statusTag(row.status)), h("td", { class: "n" }, lasted(row.created, row.ended)), h("td", { class: "n" }, row.size === null ? "" : num(row.size) + " B")))))
+}
+
+let listed = []
+
+const showRequests = async () => {
+  if (listed.length === 0 || listed.fresh !== overview.version) {
+    const turns = await get("turns", { limit: Math.max(50, listed.length) })
+    listed = turns
+    listed.fresh = overview.version
+  }
+  if (state.turn === null && listed.length > 0) state.turn = overview.turn !== null ? overview.turn : listed[0].id
+  const detail = state.turn === null ? null : await get("turn", { id: state.turn }).catch((error) => (error.status === 404 ? null : Promise.reject(error)))
+  const body = detail !== null && state.body !== null ? await get("body", { id: state.turn, upto: state.body }) : null
+  const older = async () => {
+    const last = listed[listed.length - 1]
+    const more = await get("turns", { before: last.id, limit: 50 })
+    const fresh = listed.fresh
+    listed = [...listed, ...more]
+    listed.fresh = fresh
+    listed.end = more.length < 50
+    run(show)
+  }
+  put($("main"), h("div", { class: "cols left" },
+    h("div", { class: "turns" },
+      h("div", { class: "bar" }, h("h2", null, "Turns")),
+      listed.length === 0 ? h("div", { class: "empty" }, "The chat has no turn yet.") : listed.map((turn) =>
+        h("button", { class: "t" + (turn.id === state.turn ? " sel" : ""), onclick: () => go({ turn: turn.id, body: null }) },
+          h("span", { class: "bar", style: "margin:0" }, h("b", null, "Turn " + turn.id), statusTag(turn.status), h("span", { class: "grow" }), h("span", { class: "dim" }, clock(turn.created))),
+          h("span", { class: "said" }, turn.said))),
+      listed.length >= 50 && !listed.end ? h("div", { class: "note" }, h("button", { onclick: older }, "older turns")) : null
+    ),
+    h("div", null, detail === null ? h("div", { class: "empty" }, listed.length === 0 ? "" : "Select a turn.") : renderTurn(detail, body))
+  ))
+}
+
+// The usage and the diagnostics
+// -----------------------------
+
+let used = []
+
+const showUsage = async () => {
+  if (used.length === 0 || used.fresh !== overview.version) {
+    used = await get("usage", { limit: Math.max(200, used.length) })
+    used.fresh = overview.version
+  }
+  const older = async () => {
+    const more = await get("usage", { before: used[used.length - 1].id, limit: 200 })
+    const fresh = used.fresh
+    used = [...used, ...more]
+    used.fresh = fresh
+    used.end = more.length < 200
+    run(show)
+  }
+  const names = { turn: "Turns", compaction: "Compactions", goal: "Goal checks" }
+  put($("main"), 
+    h("div", { class: "tiles" }, overview.usage.length === 0 ? h("div", { class: "empty" }, "No request has been sent yet.") : overview.usage.map((total) => {
+      const all = total.input + total.cacheRead + total.cacheWrite
+      return h("div", { class: "card tile" },
+        h("h3", null, names[total.served] || total.served),
+        h("div", { class: "big" }, num(total.requests) + (total.requests === 1 ? " request" : " requests")),
+        h("dl", null,
+          h("dt", null, "Input, not cached"), h("dd", null, num(total.input) + " tokens"),
+          h("dt", null, "Read from the cache"), h("dd", null, num(total.cacheRead) + " tokens" + (all === 0 ? "" : " (" + Math.round((total.cacheRead / all) * 100) + "% of the input)")),
+          h("dt", null, "Written to the cache"), h("dd", null, num(total.cacheWrite) + " tokens"),
+          h("dt", null, "Output"), h("dd", null, num(total.output) + " tokens")))
+    })),
+    h("div", { class: "bar" }, h("h2", null, "Each request"), h("span", { class: "sub" }, "newest first")),
+    used.length === 0 ? null : usageTable(used, true),
+    used.length >= 200 && !used.end ? h("div", { class: "note" }, h("button", { onclick: older }, "older requests")) : null
+  )
+}
+
+const showDiagnostics = async () => {
+  const [rows, launches] = await Promise.all([get("diagnostics", { limit: 500 }), get("launches", { limit: 20 })])
+  put($("main"), 
+    h("section", null,
+      h("div", { class: "bar" }, h("h2", null, "Diagnostics"), h("span", { class: "sub" }, "what the program wrote about its own work: the newest " + rows.length + ", newest first")),
+      rows.length === 0 ? h("div", { class: "empty" }, "None.") : h("table", null,
+        h("tr", null, h("th", null, "time"), h("th", null, "level"), h("th", null, "source"), h("th", null, "launch"), h("th", null, "text")),
+        [...rows].reverse().map((row) => h("tr", null, h("td", null, clock(row.created)),
+          h("td", null, h("span", { class: "tag status-" + (row.level === "error" ? "failed" : row.level === "warn" ? "stopped" : "none") }, h("span", { class: "dot" }), row.level)),
+          h("td", null, row.source), h("td", { class: "n" }, row.launch), h("td", { class: "wrap mono" }, row.text))))),
+    h("section", null,
+      h("div", { class: "bar" }, h("h2", null, "Launches"), h("span", { class: "sub" }, "newest first")),
+      h("table", null,
+        h("tr", null, h("th", null, "launch"), h("th", null, "started"), h("th", null, "ended"), h("th", null, "how"), h("th", null, "process"), h("th", null, "host"), h("th", null, "version"), h("th", null, "work directory")),
+        launches.map((row) => h("tr", null, h("td", null, row.id), h("td", null, clock(row.created)), h("td", null, row.ended === null ? "" : clock(row.ended) + " (" + lasted(row.created, row.ended) + ")"),
+          h("td", null, row.why === null ? (row.ended === null ? "open" : "") : row.why), h("td", { class: "n" }, row.pid), h("td", null, row.host), h("td", null, row.version), h("td", { class: "wrap mono" }, row.cwd)))))
+  )
+}
+
+// The page
+// --------
+
+const show = async () => {
+  overview = await get("overview")
+  version = overview.version
+  renderTop()
+  redraw = null
+  $("tip").hidden = true
+  if (state.tab === "memory") await showMemory()
+  else if (state.tab === "requests") await showRequests()
+  else if (state.tab === "usage") await showUsage()
+  else await showDiagnostics()
+}
+
+// Asks the server whether the database changed, and shows the page again when it did.
+const watch = async () => {
+  if (auto && !document.hidden) {
+    await run(async () => {
+      const got = await get("version")
+      if (got.version !== version) await show()
+    })
+  }
+  setTimeout(watch, 1500)
+}
+
+window.addEventListener("hashchange", () => {
+  readHash()
+  run(show)
+})
+let resized = null
+window.addEventListener("resize", () => {
+  clearTimeout(resized)
+  resized = setTimeout(() => redraw !== null && redraw(), 120)
+})
+
+readHash()
+run(show).then(() => setTimeout(watch, 1500))
+</script>
+</body>
+</html>

@@ -2,19 +2,21 @@
 // with the store.
 
 import { Database as Sqlite } from "bun:sqlite"
-import { Effect, Layer, Semaphore, Stream } from "effect"
+import { Context, Effect, Exit, Layer, Scope, Semaphore, Stream } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { Ask, AskDelay } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
 import * as Database from "../src/database.ts"
+import { Inspect } from "../src/inspect.ts"
+import { Inspector } from "../src/inspector.ts"
 import { Limit } from "../src/limit.ts"
 import { OpenAI } from "../src/openai.ts"
 import { type Event, type Reply, type Request, type Wire, WireError } from "../src/request.ts"
 import { type Block, type Compaction, Compactor, type CompactorError, Memory, type Part } from "../src/memory.ts"
 import { Sandbox } from "../src/sandbox.ts"
-import { type LaunchInput, type Options, type Pick, ProcessAlive, Store } from "../src/store.ts"
+import { type LaunchInput, type Options, type Pick, ProcessAlive, Reads, Store } from "../src/store.ts"
 import { Turns } from "../src/turn.ts"
 
 export const PICK: Pick = { vendor: "openai", model: "gpt-test", effort: "medium", speed: "slow" }
@@ -157,4 +159,12 @@ export const withChat = <A, E>(
   const limit = Limit.layer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
   const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
+}
+
+// The inspector over the chat in `file`, on a free port, until `close`.
+export const inspector = async (file: string) => {
+  const scope = Effect.runSync(Scope.make())
+  const serving = Inspector.layer({ port: 0 }).pipe(Layer.provide(Inspect.layer), Layer.provide(Reads.layer(file)))
+  const context = await Effect.runPromise(Layer.buildWithScope(serving, scope))
+  return { url: Context.get(context, Inspector).url, close: () => Effect.runPromise(Scope.close(scope, Exit.void)) }
 }
