@@ -172,7 +172,7 @@ Cloudflare, then Node and Bun (pages read 2026-11-14):
 | --- | --- | --- | --- |
 | S1. `bun:sqlite` file (today) | Bun | The local use | Anything but Bun |
 | S2. `node:sqlite` file (`@effect/sql-sqlite-node`) | Node and Bun (run) | One driver for both | `node:sqlite` is a release candidate only since Node 25.7.0; `unstable` |
-| S3. Durable Object SQLite (`@effect/sql-sqlite-do`) | Cloudflare | The rule "state lives in the chat's database": one object, one database; the schema, triggers and transactions run (Facts) `synchronous = full` (src/database.ts:33) and `journal_mode` (`SQLITE_AUTH`; `foreign_keys = on`, src/database.ts:34, works and reads 1); rows over 8 MB (the `image` table keeps bytes); 100 parameters for each query |
+| S3. Durable Object SQLite (`@effect/sql-sqlite-do`) | Cloudflare | The rule "state lives in the chat's database": one object, one database; the schema, triggers and transactions run (Facts) | `synchronous = full` (src/database.ts:33) and `journal_mode` (`SQLITE_AUTH`; `foreign_keys = on`, src/database.ts:34, works and reads 1); rows over 8 MB (the `image` table keeps bytes); 100 parameters for each query |
 | S4. D1 | Cloudflare | — | No transactions; the store opens many (src/store.ts:911) |
 | S5. Shared MySQL or MariaDB (`@effect/sql-mysql2`) | Bun; Cloudflare through Hyperdrive | Many chats in shared tables (`store.md`, B3) | Through Hyperdrive: `disablePreparedStatements`, one statement for each query, no session state; `disableEval` is a pool option that Effect passes only without `url` (not run) |
 
