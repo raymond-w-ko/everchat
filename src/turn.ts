@@ -116,7 +116,7 @@ export type TurnEvent =
 // A turn's items as they are kept. A `turn` item also keeps the calls that
 // the wire read from the vendor's output, so that a restart does not have
 // to read a vendor's format again.
-const Kept = Schema.Union([
+export const Kept = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("user"), blocks: Schema.Array(Schema.Struct({ text: Schema.String, mark: Schema.Boolean })) }),
   Schema.Struct({
     kind: Schema.Literal("turn"),
@@ -125,7 +125,7 @@ const Kept = Schema.Union([
   }),
   Schema.Struct({ kind: Schema.Literal("back"), results: Schema.Array(Schema.Struct({ id: Schema.String, output: Schema.String })) })
 ])
-type Kept = typeof Kept.Type
+export type Kept = typeof Kept.Type
 
 const KeptHead = Schema.fromJsonString(Schema.Struct({
   system: Schema.String,
@@ -136,10 +136,12 @@ const KeptHead = Schema.fromJsonString(Schema.Struct({
   }))
 }))
 
-const decodeKept = Schema.decodeUnknownEffect(Schema.fromJsonString(Kept))
-const decodeHead = Schema.decodeUnknownEffect(KeptHead)
+// A turn item's body, and a turn's head, from their JSON in the database.
+export const decodeKept = Schema.decodeUnknownEffect(Schema.fromJsonString(Kept))
+export const decodeHead = Schema.decodeUnknownEffect(KeptHead)
 
-const item = (kept: Kept): Item =>
+// A kept item as it goes into a request.
+export const item = (kept: Kept): Item =>
   kept.kind === "turn" ? { kind: "turn", output: kept.output } : kept.kind === "user" ? { kind: "user", blocks: kept.blocks } : { kind: "back", results: kept.results }
 
 export interface Options {
