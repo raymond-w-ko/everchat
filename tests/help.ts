@@ -6,11 +6,16 @@ import { Effect, Layer, Semaphore, Stream } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { Ask, AskDelay } from "../src/ask.ts"
+import { Cache } from "../src/cache.ts"
 import * as Database from "../src/database.ts"
+import { Limit } from "../src/limit.ts"
 import { OpenAI } from "../src/openai.ts"
 import { type Event, type Reply, type Request, type Wire, WireError } from "../src/request.ts"
 import { type Block, type Compaction, Compactor, type CompactorError, Memory, type Part } from "../src/memory.ts"
+import { Sandbox } from "../src/sandbox.ts"
 import { type LaunchInput, type Options, type Pick, ProcessAlive, Store } from "../src/store.ts"
+import { Turns } from "../src/turn.ts"
 
 export const PICK: Pick = { vendor: "openai", model: "gpt-test", effort: "medium", speed: "slow" }
 
@@ -134,3 +139,22 @@ export const fakeWire = (answer: (asked: Request, n: number) => Reply | WireErro
 
 export const wireError = (kind: WireError["kind"], over: Partial<WireError> = {}) =>
   new WireError({ kind, message: "it failed", retry: kind === "busy" || kind === "cut", began: false, after: null, status: null, code: null, request: null, ...over })
+
+// One launch of a whole chat with no real model: the store, the memory, the
+// ask service over a fake wire, a fake sandbox (`run` gives a program's
+// result), and the turn loop. `summaries` answers the compactions.
+export const withChat = <A, E>(
+  file: string,
+  wire: ReturnType<typeof fakeWire>,
+  run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>,
+  effect: Effect.Effect<A, E, Turns | Memory | Store>,
+  summaries: Parameters<typeof compactor>[0] = () => "a summary"
+) => {
+  const store = Store.layer(file, options())
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
+  const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
+  const limit = Limit.layer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
+  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
+}
