@@ -14,9 +14,11 @@ import type { Reply, Request } from "../src/request.ts"
 import { Turns } from "../src/turn.ts"
 import { fakeWire, inspector, newFile, reply, withChat } from "./help.ts"
 
-// A child that is null, undefined or a boolean, given to an element. A real
-// browser writes it on the page as a word ("null", "false"), but happy-dom
-// drops a null child itself, so what the page shows cannot tell. So every
+// A child that is null, undefined or a boolean, given to an element. A
+// browser writes it on the page as a word ("null", "false"), and happy-dom
+// does too. But what the page shows cannot always tell: the word can be
+// joined to the text next to it ("not runningnull"), where a check for the
+// word alone does not find it, and not every tab has such a check. So every
 // function that puts children in a node records such a child here, in every
 // window of this file, before the page's script runs. `h` in the page's
 // script drops them, and none must reach a node.
