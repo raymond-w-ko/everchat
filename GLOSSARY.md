@@ -53,6 +53,7 @@ instead.
 | level | noun | The `l` of a node. A node of level `l` covers `2^l` messages. |
 | leaf | noun | A node of level 0. It covers one message. |
 | halves | noun | The two nodes one level below a node: `(l-1, 2i)` and `(l-1, 2i+1)`. |
+| root | noun | A node with no node above it yet. The tree has one root for each power of two in the count of the messages, the largest first: 13 messages have the roots `0+8`, `8+4`, and `12+1`. |
 | source | noun | The text that a node is built from. For a leaf, it is the message as the model reads it. For a higher node, it is the lines of its halves. |
 | build | verb | To write a node. A source of at most 512 bytes is the node as it is, with no request. A longer source needs a compaction. |
 | compaction | noun | A request that builds one node: it compresses one message into a line, or two lines into one. It never replaces or deletes a message. |
@@ -133,7 +134,7 @@ instead.
 | home | noun | The directory of one chat. The variable `EVERCHAT_HOME` names it. It holds the database, the config file, the hooks file, the skills, and the transcripts. |
 | database | noun | The one SQLite file that holds almost all state of a chat. |
 | state | noun | Data that the program writes and needs again later. State lives in the database, and nowhere else. |
-| store | noun | The part of the program that reads and writes the database. No other part uses SQL. |
+| store | noun | The part of the program that reads and writes the database. No other part uses SQL. The launch that owns the database gets all of it (`Store`). A process that does not own the database gets only its reads (`Reads`), over a connection that cannot write. |
 | migration | noun | One change of the database's tables, with a number. At each launch, the program runs the migrations that the database has not run yet. |
 | config file | noun | The file of settings that a person writes by hand. The program only reads it. |
 | launch | noun | One start of the program, until it ends or crashes. Table `launch`. At most one launch of a chat is live. |
@@ -155,6 +156,7 @@ instead.
 | input | noun | The box at the bottom of the terminal where the person types. Its text is the draft until it is sent. |
 | status row | noun | The last row of the terminal. It says what EverChat does (`idle`, or the turn that runs), and then the pick. |
 | slash command | noun | What the person sends in the terminal when its first word is a slash and letters only, for example `/help`. It tells the program what to do. It is not a message: it does not enter the log, and the model never reads it. |
+| inspector | noun | A page in a browser that shows the state of a chat: the log, the tree, the views, each turn's request, and the usage. It is for the person who studies the memory or looks for a fault. It only reads the database: it sends no message, and it changes nothing. `everchat inspect` serves it, as a process of its own. It is not an interface. |
 
 ## The factory
 
