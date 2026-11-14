@@ -62,6 +62,8 @@ The new code:
 - `src/main.ts`: the program's entry. `just run` starts it from its source,
   and `just build` makes the executable `everchat`. `just test-build`
   builds it and runs the tests of the whole program on it.
+- `src/inspector.html`: the inspector's page (see "The inspector"). It is
+  the one file of `src/` that a browser runs.
 
 Run `just test` and `just check` (the type check) before you say that a
 change is done.
@@ -75,7 +77,8 @@ The rest:
 - `tools/`: scripts that are not part of the program, of the type check, or
   of the tests. `tools/golden.ts` makes `tests/golden.json` from the old
   code. `tools/probe.ts` sends real requests to a vendor (see "Model access
-  through the author's inference gateway").
+  through the author's inference gateway"). `tools/sample.ts` makes a chat
+  with no model, to look at in the inspector (`just sample <home>`).
 - `ref/`: the old code, for reading only. See "A rewrite, in place". It has
   the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
   (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
@@ -254,12 +257,72 @@ How to test them:
 - `tests/pty.ts` runs the whole program as a process in a real
   pseudo-terminal (`tests/main.test.ts`). Use it for what only a real
   terminal shows: the launch of the screen, the signals, a closed window.
-- `just test-build` runs the two whole-program files on the executable
+- `just test-build` runs the whole-program files on the executable
   (`EVERCHAT_BIN=<file>` names the program to start).
 
 To run the program by hand against no real model, start a fake vendor and
 give its address as `EVERCHAT_GATEWAY_URL`, as these tests do. `just run`
 with the real address sends real requests.
+
+### The inspector
+
+The inspector is a page in a browser that shows the state of a chat: the
+log, the tree, the two views, each turn's request, the usage, and the
+diagnostics. It is for the person who studies the memory, or who looks for
+a fault. `everchat inspect` serves it. It is not an interface: it sends no
+message, and it changes nothing.
+
+How it is built, in four parts that each know only the one before:
+
+- The store's reads (`Reads` in `src/store.ts`): the store with no launch
+  and no write, over a connection that cannot write. So the inspector is a
+  process of its own. It runs next to a launch of the chat, or with none,
+  and the chat's process has no server in it. A new query for the
+  inspector goes here, because no other module uses SQL.
+- The read module (`src/inspect.ts`): it turns the reads into what the
+  page shows, as plain data. It knows no HTTP. Test it directly.
+- The server (`src/inspector.ts`): the page, and the read module's answers
+  as JSON. Every route is a GET. Only `everchat inspect` loads this module
+  (a dynamic import in `src/main.ts`), so a launch of the chat does not
+  load an HTTP server.
+- The page (`src/inspector.html`): one file with its style and its script,
+  no framework and no build step. The build puts it into the executable as
+  text.
+
+The rules that it keeps:
+
+- It only reads. Do not add a route that changes the chat: to send a
+  message from a browser is a third interface, and that needs its own
+  design.
+- The chat is private, and a port is not. The server listens on
+  127.0.0.1 only, and every path starts with a token that is new at each
+  start. Keep both.
+- The page puts every text of the chat on the page as text, never as HTML
+  (`h` in the page's script makes each element). The content security
+  policy lets only the page's own script run, by its hash. So the page has
+  exactly one `<script>`, and it loads nothing from another place.
+- A view is shown as it is now, which is more than the database's row. The
+  row is written only when a batch changes a view. Between batches, a view
+  grows by one leaf for each new message (`grown` in `src/memory.ts`).
+- The body of a request is the one that the wire builds now from the kept
+  turn items. It is not a copy of the bytes that were sent.
+- What streams is not in the database, so the inspector does not show it.
+  The request of a compaction is not kept either: only its node and its
+  usage.
+
+How to test it:
+
+- `src/inspect.test.ts` asks the read module about a chat that a fake wire
+  made (`withChat` in `tests/help.ts`).
+- `src/inspector.test.ts` asks the server: who may read, and what each
+  route answers.
+- `tests/page.test.ts` runs the page's script in a browser with no window
+  (the library `happy-dom`) against the real server, and reads what a
+  person would see. That browser has no layout. After a change to how the
+  page looks, look at it in a real browser: `just sample <home>` makes a
+  chat to look at, with no model.
+- `tests/inspect.test.ts` runs `everchat inspect` as a process, next to a
+  launch of the chat. `just test-build` runs it on the executable too.
 
 ### One system prompt for every kind of request
 
@@ -449,9 +512,9 @@ Write the new code with Effect. In particular:
 - Do not write to stdout or stderr (`console.log`, `process.stderr`).
   EverChat is one process in a terminal, and such a line breaks the screen.
   Two modules may: `src/main.ts`, and only when the screen is not up (the
-  usage and what else `effect/cli` prints, and the reason why the program
-  could not start), and `src/pipe.ts`, whose output is the standard
-  output.
+  usage and what else `effect/cli` prints, the reason why the program
+  could not start, and the inspector's address), and `src/pipe.ts`, whose
+  output is the standard output.
   To say something about the program's own work, log it with Effect
   (`Effect.logWarning`, `Effect.logError`), with the module's name as the
   annotation `source`. The logger writes it to the table `log`
