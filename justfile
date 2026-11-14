@@ -15,6 +15,12 @@ check:
 run *args:
     bun src/main.ts {{args}}
 
+# Make a sample chat in a new home, with no model, to look at in the
+# inspector (tools/sample.ts): `just sample /tmp/sample`, and then
+# `EVERCHAT_HOME=/tmp/sample just run inspect`.
+sample home turns="200":
+    bun tools/sample.ts {{home}} {{turns}}
+
 # Build EverChat as one executable, `everchat`. The sandbox's worker thread
 # is the second entrypoint (src/worker.ts says why).
 build:
