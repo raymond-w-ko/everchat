@@ -285,6 +285,7 @@ create trigger node_no_delete before delete on node
   updated integer not null
 ) strict, without rowid;</code></pre>
 <p>A view changes when a merge is accepted (<code>Memory.fit</code>). That write goes in the same transaction as the nodes that made the merge possible.</p>
+<p>Between merges, a view grows only at its end: one leaf for each new message. That growth is not written. So the row holds the view as the last batch left it, and a reader adds a leaf for each message after the row's last part (<code>grown</code> in <code>memory.ts</code>). The chat view grows to the last message. The compaction view grows to the first message whose leaf is not built. The inspector shows a view so.</p>
 </div>
 
 <div class="card">

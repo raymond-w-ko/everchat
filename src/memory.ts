@@ -184,6 +184,32 @@ export const task = (l: number, i: number): string => {
   return fill.reduce((text, [key, value]) => text.replace(key, value), l === 0 ? LEAF : MERGE)
 }
 
+// A view's lines as the blocks of a request: an opening block, then the
+// lines in blocks of BLOCK (the last cut short, with the closing tag). One
+// is marked: the last whole one, else the opening one.
+export const inBlocks = (lines: ReadonlyArray<string>): Array<Block> => {
+  const whole = Math.floor(lines.length / BLOCK)
+  const out: Array<Block> = [{ text: "<chat>\n", mark: whole === 0 }]
+  for (let k = 0; k < whole; k++) {
+    out.push({ text: lines.slice(k * BLOCK, (k + 1) * BLOCK).map((one) => one + "\n").join(""), mark: k === whole - 1 })
+  }
+  out.push({ text: lines.slice(whole * BLOCK).map((one) => one + "\n").join("") + "</chat>\n", mark: false })
+  return out
+}
+
+// A view as it is now, from the view as the database keeps it: the kept
+// parts, then a leaf for each message from their end up to `upto`. The
+// database's row is written only when a batch changes a view, because
+// between batches a view grows only so, at its end.
+export const grown = (kept: ReadonlyArray<Part>, upto: number): Array<Part> => {
+  const out = [...kept]
+  const last = kept[kept.length - 1]
+  for (let i = last === undefined ? 0 : span(last)[1] + 1; i < upto; i++) {
+    out.push({ l: 0, i })
+  }
+  return out
+}
+
 // The node for "id+n", if the chat has it.
 export const partOf = (count: number, id: number, n: number): Part | null => {
   const l = Math.log2(n)
@@ -309,21 +335,14 @@ const todo = (mem: Mem, part: Part): Array<Part> => {
   return [...here, ...under.flatMap((half) => todo(mem, half))]
 }
 
-// The view's lines built before message `upto`, in blocks (the last cut
-// short), one marked: the last whole one, else the opening one.
-const blocks = (mem: Mem, upto: number, parts: ReadonlyArray<Part>): Array<Block> => {
-  const lines = parts
-    .filter((part) => span(part)[1] < upto)
-    .filter((part) => built(mem, part.l, part.i))
-    .map((part) => line(part, text(mem, part)) + "\n")
-  const whole = Math.floor(lines.length / BLOCK)
-  const out: Array<Block> = [{ text: "<chat>\n", mark: whole === 0 }]
-  for (let k = 0; k < whole; k++) {
-    out.push({ text: lines.slice(k * BLOCK, (k + 1) * BLOCK).join(""), mark: k === whole - 1 })
-  }
-  out.push({ text: lines.slice(whole * BLOCK).join("") + "</chat>\n", mark: false })
-  return out
-}
+// The view's lines built before message `upto`, as the blocks of a request.
+const blocks = (mem: Mem, upto: number, parts: ReadonlyArray<Part>): Array<Block> =>
+  inBlocks(
+    parts
+      .filter((part) => span(part)[1] < upto)
+      .filter((part) => built(mem, part.l, part.i))
+      .map((part) => line(part, text(mem, part)))
+  )
 
 // Nodes built: written in the change's transaction, and kept.
 const store = (mem: Mem, parts: ReadonlyArray<Part & { readonly text: string }>): void => {
