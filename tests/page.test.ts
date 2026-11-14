@@ -8,17 +8,45 @@
 
 import { afterEach, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { Browser } from "happy-dom"
+import { Browser, Document, DocumentFragment, Element, Node, Text } from "happy-dom"
 import { Memory } from "../src/memory.ts"
 import type { Reply, Request } from "../src/request.ts"
 import { Turns } from "../src/turn.ts"
 import { fakeWire, inspector, newFile, reply, withChat } from "./help.ts"
+
+// A child that is null, undefined or a boolean, given to an element. A real
+// browser writes it on the page as a word ("null", "false"), but happy-dom
+// drops a null child itself, so what the page shows cannot tell. So every
+// function that puts children in a node records such a child here, in every
+// window of this file, before the page's script runs. `h` in the page's
+// script drops them, and none must reach a node.
+const nothings: Array<string> = []
+const PUTS = ["append", "prepend", "replaceChildren", "before", "after", "replaceWith", "appendChild", "insertBefore", "replaceChild"]
+for (const kind of [Node, Element, Document, DocumentFragment, Object.getPrototypeOf(Text.prototype).constructor]) {
+  const proto = kind.prototype as Record<string, unknown>
+  for (const name of PUTS) {
+    const put = Object.getOwnPropertyDescriptor(proto, name)?.value
+    if (typeof put !== "function") {
+      continue
+    }
+    proto[name] = function(this: { nodeName?: string }, ...children: Array<unknown>) {
+      for (const child of children) {
+        if (child === null || child === undefined || typeof child === "boolean") {
+          nothings.push(this.nodeName + "." + name + "(" + String(child) + ")")
+        }
+      }
+      return put.apply(this, children)
+    }
+  }
+}
 
 const open: Array<() => Promise<unknown>> = []
 afterEach(async () => {
   for (const close of open.splice(0)) {
     await close()
   }
+  // Every test that shows a tab, and every click in it, is checked here.
+  expect(nothings.splice(0)).toEqual([])
 })
 
 type Found = { textContent: string; click(): void; getAttribute(name: string): string | null; querySelectorAll(selector: string): ArrayLike<Found>; querySelector(selector: string): Found | null }

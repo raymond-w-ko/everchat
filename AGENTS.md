@@ -73,6 +73,8 @@ File names are lowercase. Multi-word names are written as one word
 The rest:
 
 - `docs/`: the design documents.
+- `docs/notes.md`: facts about the tools that cost time to find. Read it
+  before you work on the store, the inspector, or their tests.
 - `tools/`: scripts that are not part of the program, of the type check, or
   of the tests. `tools/golden.ts` makes `tests/golden.json` from the old
   code. `tools/probe.ts` sends real requests to a vendor (see "Model access
