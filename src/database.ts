@@ -36,6 +36,24 @@ const ready = (all: Parameters<typeof SqliteMigrator.fromRecord>[0]) =>
     })
   )
 
+// The count of the migrations that this program knows. A database that has
+// run them all is of this program's version.
+export const VERSION = Object.keys(migrations).length
+
+// The count of the migrations that the database has run.
+export const version = Effect.gen(function*() {
+  const sql = yield* SqlClient.SqlClient
+  const rows = yield* sql<{ n: number }>`select count(*) as n from effect_sql_migrations`
+  return rows[0]?.n ?? 0
+})
+
+// The database in the file `filename`, for reads only: for a process that
+// does not own the file. The file must be there. Nothing is set and no
+// migration runs, because this connection cannot write. A transaction on it
+// starts with `BEGIN` (the driver does that), so it is a snapshot that takes
+// no lock from the launch that writes.
+export const readonly = (filename: string) => SqliteClient.layer({ filename, readonly: true })
+
 // The layer for the database in the file `filename`. It makes the file when
 // it is not there. `all`: the migrations to run (a test gives fewer, to make
 // a database as an older version of the program left it).

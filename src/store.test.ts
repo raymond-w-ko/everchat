@@ -3,9 +3,13 @@
 
 import { expect, test } from "bun:test"
 import { Effect, Exit, Option, Schema } from "effect"
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { newFile, options, PICK, rows, withStore, write } from "../tests/help.ts"
+import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
-import { LaunchLive, type Part, ProcessAlive, Store, StoreError } from "./store.ts"
+import { migrations } from "./migrations.ts"
+import { DatabaseVersion, LaunchLive, type Part, ProcessAlive, Reads, Store, StoreError } from "./store.ts"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
@@ -405,4 +409,155 @@ test("a restart finds the log, the tree and the views as they were, and the ids 
   expect(after.nodes).toEqual(before.nodes)
   expect(Option.getOrUndefined(after.view)?.parts).toEqual(parts)
   expect(after.next[0]).toMatchObject({ i: 3, launch: 2 })
+})
+
+// The reads, for a process that does not own the file
+// ---------------------------------------------------
+
+// Runs `effect` with the store's reads over `file`, as a second process does.
+const withReads = <A, E>(file: string, effect: Effect.Effect<A, E, Reads>) => Effect.runPromise(effect.pipe(Effect.provide(Reads.layer(file))))
+
+// The error that the reads over `file` fail to start with.
+const noReads = (file: string) => Effect.runPromise(Effect.flip(Reads.use((reads) => reads.count).pipe(Effect.provide(Reads.layer(file)))))
+
+test("the reads take no launch, also while a launch has the file, and they see what it wrote", async () => {
+  const file = newFile()
+  await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.append([{ kind: "user", text: "one" }])
+    const seen = yield* Effect.promise(() => withReads(file, Effect.gen(function*() {
+      const reads = yield* Reads
+      return { count: yield* reads.count, texts: (yield* reads.messages(0, 9)).map((message) => message.text), pick: (yield* reads.chat).pick, launches: yield* reads.launches(9) }
+    })))
+    expect(seen.count).toBe(1)
+    expect(seen.texts).toEqual(["one"])
+    expect(seen.pick).toEqual(PICK)
+    // The one launch is the store's, and it still runs.
+    expect(seen.launches.map((one) => [one.id, one.pid, one.ended, one.why])).toEqual([[1, process.pid, null, null]])
+    // The launch writes on, with the reads' connection closed or open.
+    yield* store.append([{ kind: "user", text: "two" }])
+  }))
+  expect(launches(file)).toEqual([{ id: 1, pid: process.pid, ended: 1, why: "exit" }])
+  // With no launch at all, the reads still work, and they leave the launches as they are.
+  expect(await withReads(file, Reads.use((reads) => reads.count))).toBe(2)
+  expect(launches(file)).toEqual([{ id: 1, pid: process.pid, ended: 1, why: "exit" }])
+})
+
+test("the reads do not make a file that is not there", async () => {
+  const file = newFile()
+  const failed = await noReads(file)
+  expect(failed).toBeInstanceOf(StoreError)
+  expect(failed._tag === "StoreError" ? failed.op : null).toBe("open")
+  expect(fs.readdirSync(path.dirname(file))).toEqual([])
+})
+
+test("the reads refuse a database of another version of the program", async () => {
+  const file = newFile()
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(file, { "0001_schema": migrations["0001_schema"] }))))
+  const older = await noReads(file)
+  expect(older).toBeInstanceOf(DatabaseVersion)
+  expect(older._tag === "DatabaseVersion" ? [older.have, older.want] : null).toEqual([1, Object.keys(migrations).length])
+  // A database that ran a migration that this program does not know.
+  const newer = newFile()
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(newer, { ...migrations, "0099_later": Effect.void }))))
+  const failed = await noReads(newer)
+  expect(failed._tag === "DatabaseVersion" ? failed.have : null).toBe(Object.keys(migrations).length + 1)
+})
+
+test("the reads' connection cannot write", async () => {
+  const file = newFile()
+  await withStore(file, Store.use((store) => store.append([{ kind: "user", text: "one" }])))
+  const failed = await Effect.runPromise(
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      return yield* Effect.flip(sql`insert into msg (i, kind, text, size, launch, created) values (1, 1, 'two', 3, 1, 1)`)
+    }).pipe(Effect.provide(Database.readonly(file)))
+  )
+  expect(String(failed.reason.cause)).toContain("readonly database")
+  expect(rows(file, "select count(*) as n from msg")).toEqual([{ n: 1 }])
+})
+
+test("a snapshot is one state of the database: a write of the launch shows only after it", async () => {
+  const file = newFile()
+  await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.append([{ kind: "user", text: "one" }])
+    const seen = yield* Effect.promise(() => withReads(file, Effect.gen(function*() {
+      const reads = yield* Reads
+      const first = yield* reads.version
+      const still = yield* reads.version
+      const inside = yield* reads.snapshot(Effect.gen(function*() {
+        const before = yield* reads.count
+        // The launch writes while the snapshot is open: the reader does not block it.
+        yield* Effect.promise(() => Effect.runPromise(store.append([{ kind: "user", text: "two" }])))
+        return [before, yield* reads.count, (yield* reads.messages(0, 9)).length]
+      }))
+      return { first, still, inside, after: yield* reads.count, later: yield* reads.version }
+    })))
+    expect(seen.inside).toEqual([1, 1, 1])
+    expect(seen.after).toBe(2)
+    // The version changes with a write of another connection, and only then.
+    expect(seen.still).toBe(seen.first)
+    expect(seen.later).not.toBe(seen.first)
+  }))
+})
+
+test("the tree by level, the turns, the calls, the usage and the launches are read as they were written", async () => {
+  const file = newFile()
+  await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.append(Array.from({ length: 5 }, (_, k) => ({ kind: "user" as const, text: "m" + k })))
+    yield* store.putNodes([{ l: 0, i: 0, text: "a" }, { l: 0, i: 1, text: "b" }, { l: 0, i: 3, text: "d" }, { l: 1, i: 0, text: "ab" }, { l: 2, i: 0, text: "abcd" }])
+    const first = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    expect([first.ended, first.why]).toEqual([null, null])
+    const program = yield* store.startCall({ turn: first.id, vendorId: "call_1", fn: "run", input: "return 1" })
+    const inner = yield* store.startCall({ turn: first.id, parent: program, fn: "shell", input: "[\"ls\"]" })
+    yield* store.endCall(inner, { status: "done", output: "a\nb" })
+    yield* store.endCall(program, { status: "done", output: "a long result", shown: 6 })
+    yield* store.addTurnItem(first.id, "user", "{}")
+    yield* store.endTurn(first.id, "failed", "it broke")
+    const second = yield* store.startTurn({ pick: { ...PICK, model: "other" }, head: "{}", firstMsg: 3 })
+    yield* store.addUsage({ served: "turn", turn: first.id, pick: PICK, request: "req_1", input: 10, cacheRead: 20, cacheWrite: 30, output: 4, expected: 25 })
+    yield* store.addUsage({ served: "turn", turn: second.id, pick: PICK, input: 1, cacheRead: 2, cacheWrite: 3, output: 4 })
+    yield* store.addUsage({ served: "compaction", node: [1, 0], pick: PICK, input: 100, cacheRead: 0, cacheWrite: 0, output: 9, micros: 7 })
+    // Two more nodes that share a level or a number with that one.
+    yield* store.addUsage({ served: "compaction", node: [1, 5], pick: PICK, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 })
+    yield* store.addUsage({ served: "compaction", node: [2, 0], pick: PICK, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 })
+  }))
+  await withReads(file, Effect.gen(function*() {
+    const reads = yield* Reads
+    expect(yield* reads.levels).toEqual([{ l: 0, built: 3 }, { l: 1, built: 1 }, { l: 2, built: 1 }])
+    expect((yield* reads.nodesIn(0, 0, 4)).map((node) => [node.i, node.text])).toEqual([[0, "a"], [1, "b"], [3, "d"]])
+    expect((yield* reads.nodesIn(0, 1, 3)).map((node) => node.i)).toEqual([1])
+    expect(yield* reads.nodesIn(3, 0, 9)).toEqual([])
+    // Turns, newest first.
+    const turns = yield* reads.turns(null, 10)
+    expect(turns.map((turn) => [turn.id, turn.status, turn.why, turn.ended !== null, turn.pick.model, turn.firstMsg])).toEqual([[2, "running", null, false, "other", 3], [1, "failed", "it broke", true, PICK.model, 0]])
+    expect((yield* reads.turns(2, 10)).map((turn) => turn.id)).toEqual([1])
+    expect((yield* reads.turns(null, 1)).map((turn) => turn.id)).toEqual([2])
+    expect(Option.getOrNull(yield* reads.turn(1))?.why).toBe("it broke")
+    expect(Option.isNone(yield* reads.turn(3))).toBe(true)
+    expect((yield* reads.turnItems(1)).map((one) => [one.n, one.kind, one.body, one.created > 0])).toEqual([[0, "user", "{}", true]])
+    // A call has its sizes and its times.
+    const calls = yield* reads.calls(1)
+    expect(calls.map((call) => [call.fn, call.status, call.size, call.shown, call.created > 0, call.ended !== null])).toEqual([["run", "done", 13, 6, true, true], ["shell", "done", 3, 3, true, true]])
+    // The usage, newest first, and by turn or node.
+    const usage = (yield* reads.usage()).slice(2)
+    expect(usage.map((one) => [one.id, one.served, one.turn, one.node, one.input, one.cacheRead, one.cacheWrite, one.output, one.expected, one.micros, one.request])).toEqual([
+      [3, "compaction", null, [1, 0], 100, 0, 0, 9, null, 7, null],
+      [2, "turn", 2, null, 1, 2, 3, 4, null, null, null],
+      [1, "turn", 1, null, 10, 20, 30, 4, 25, null, "req_1"]
+    ])
+    expect(usage[0]!.pick).toEqual(PICK)
+    expect((yield* reads.usage({ turn: 1 })).map((one) => one.id)).toEqual([1])
+    expect((yield* reads.usage({ node: [1, 0] })).map((one) => one.id)).toEqual([3])
+    expect((yield* reads.usage()).map((one) => one.id)).toEqual([5, 4, 3, 2, 1])
+    expect((yield* reads.usage({ node: [0, 1] })).length).toBe(0)
+    expect((yield* reads.usage({ before: 3, limit: 1 })).map((one) => one.id)).toEqual([2])
+    expect(yield* reads.usageTotals).toEqual([
+      { served: "compaction", requests: 3, input: 102, cacheRead: 0, cacheWrite: 0, output: 11 },
+      { served: "turn", requests: 2, input: 11, cacheRead: 22, cacheWrite: 33, output: 8 }
+    ])
+    expect((yield* reads.launches(5)).map((one) => [one.id, one.host, one.cwd, one.version, one.why])).toEqual([[1, "test-host", "/work", "0.0.0-test", "exit"]])
+  }))
 })
