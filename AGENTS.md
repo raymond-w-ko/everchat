@@ -604,7 +604,10 @@ The rules that keep the boundaries:
   on the script's list `NOT_CODE` (`.html`, `.txt`: the inspector's page),
   since the script cannot follow another one),
   `entry` (an import of a workspace package names an entry of its
-  `exports`), `built-in` (a `node:` or `bun:` module is on its package's
+  `exports`; each target of `exports` is a string, and any other, such as
+  an object of conditions, is a fault at line 1 of the manifest, since Bun
+  may load another file than the one that the script checks),
+  `built-in` (a `node:` or `bun:` module is on its package's
   list: for the core's tests, `node:assert/strict`, `node:crypto`,
   `node:path` and `node:test`, and no `bun:` module, so that they run on
   Node too; for the core's files, `node:crypto` only; which of its names the
@@ -627,11 +630,16 @@ The rules that keep the boundaries:
   tree lacks is a fault. A row is also a fault at `tools/graph.ts:1`, and
   is not walked, when its `from`, `forbid` or `only` is given and empty,
   or when an entry of its `from` is not in the package's `exports` or
-  names a file that the script cannot read. A row that lists entries
-  names each entry of the package's `exports`, so that a new entry cannot
-  slip past it. A file that is not a test imports no test's file, relative
-  or by an entry such as `./testing` (`manifest`): that would bring the
-  tests' development packages into run-time code. A source whose real
+  names a file that the script cannot read, or when an entry of its
+  `forbid` or `only` does not name what is there: a path from the root
+  with no leading `./`, of a file, or of a directory when it ends in `/`,
+  written as its real path (no link in any part, the case of letters that
+  the file system holds).
+  A row that lists entries names each entry of the package's `exports`, so
+  that a new entry cannot slip past it. A file that is not a test imports
+  no test's file, relative or by an entry such as `./testing`
+  (`manifest`): that would bring the tests' development packages into
+  run-time code. A source whose real
   path is not a `.ts` file (a link `zz.test.ts` to a file `zztest`, which
   `bun test` still runs) is a `way out` fault at its line 1, since no rule
   can read it. So is any other file found under a package's directory,

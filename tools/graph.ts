@@ -30,7 +30,9 @@
 //   directory, by a link into another package too (its `.d.ts` files, its
 //   `node_modules`); ownership decides only whose member a file is.
 // - entry (K3): an import of a workspace package names a path of its
-//   `exports`.
+//   `exports`. Each target of `exports` is a string: any other (an object
+//   of conditions, a list, null) is a fault at line 1 of the manifest, for
+//   each key, since Bun's order of conditions is not this script's.
 // - built-in (K3): a `node:` or `bun:` module is on its package's list
 //   (BUILTINS). The list names modules only. Which names of `node:crypto`
 //   the core may use (`createHash`) is the core's type check's rule
@@ -45,8 +47,12 @@
 //   `tools/graph.ts:1`, and is not walked: a package that the tree lacks,
 //   no `forbid` and no `only`, an empty `from`, `forbid` or `only`, an
 //   entry of `from` that is not in the exports, or whose file the script
-//   cannot read; and a `from` that lists entries but not each entry of the
-//   package's `exports`, so that a new entry cannot slip past the row.
+//   cannot read; a `from` that lists entries but not each entry of the
+//   package's `exports`, so that a new entry cannot slip past the row; and
+//   an entry of `forbid` or `only` that does not name what is there (a
+//   file, or a directory that ends in "/"), or that is not written as its
+//   real path (through a link, or in another case of letters), since it
+//   would match nothing.
 //
 // `check` takes the tables (BUILTINS, BUDGETS) as a parameter, so that a
 // test gives tables that fit its fixture; the command uses the real ones.
@@ -104,10 +110,12 @@ export type Builtins = Readonly<Record<string, { readonly src: Rule; readonly te
 // the root; a file under one of them must not be reached. `only`: paths
 // from the root, each a file or a directory that ends in "/"; each file
 // that the starts reach must be under one of them, or in the row's own
-// package. A row has `forbid`, `only`, or both, none of them empty; a
-// `from` that lists entries names each of the package's. A row for a
-// package that the tree does not have is a fault, and so is each other
-// row that breaks these: a wrong name must not turn a budget off.
+// package. A row has `forbid`, `only`, or both, none of them empty, each
+// entry a path from the root (no leading "./") that names a file, or a
+// directory when it ends in "/", written as its real path; a `from` that
+// lists entries names each of the package's. A row for a package that the
+// tree does not have is a fault, and so is each other row that breaks
+// these: a wrong name must not turn a budget off.
 export type Budget = {
   readonly package: string
   readonly from: "files" | ReadonlyArray<string>
@@ -207,6 +215,9 @@ const nameOf = (specifier: string) => specifier.split("/").slice(0, specifier.st
 
 const isFile = (file: string) => fs.existsSync(file) && fs.statSync(file).isFile()
 
+// An object of JSON that is not a list and not null.
+const isMap = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+
 // The kinds of file that are not code, by extension, matched exactly: the
 // script follows an import of one as a leaf, which imports nothing. Bun runs
 // as code a name that it does not know (no extension, `.JS`, `.TS`), so a
@@ -231,6 +242,7 @@ const plain = (file: string): string | null => {
 }
 
 const NO_FILE = "names no .ts file (write the file's path, with .ts)"
+const NOT_STRING = "a target that is not a string, in the exports of "
 const UNCHECKED = "a kind of file that the script cannot check"
 const TEST = "manifest, a test's file, which only a test may import"
 
@@ -282,6 +294,29 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
   const fault = (file: string, line: number, rule: string, specifier: string) =>
     faults.push(path.relative(root, file) + ":" + line + ": " + rule + ": " + specifier)
   const relative = (file: string) => path.relative(root, file).split(path.sep).join("/")
+  // What is wrong with an entry of `forbid` or `only`, or null: it is a
+  // path from the root with no `.`, `..` or empty part, it names a file, or
+  // a directory when it ends in "/", and it is written as its own real path
+  // from the real root, byte for byte. `forbidden` and `outside` compare an
+  // entry as text with real paths, so an entry through a link (in any of
+  // its parts), or in another case of letters than the file system holds,
+  // would match nothing.
+  const named = (entry: string): string | null => {
+    const bare = entry.endsWith("/") ? entry.slice(0, -1) : entry
+    if (bare === "" || path.posix.isAbsolute(entry) || bare.split("/").some((part) => part === "" || part === "." || part === "..")) return "is not a path from the root"
+    let stat: fs.Stats
+    try {
+      stat = fs.statSync(path.join(root, bare))
+    } catch {
+      return "names nothing"
+    }
+    if (entry.endsWith("/") && !stat.isDirectory()) return "ends in / and is no directory"
+    if (!entry.endsWith("/")) {
+      if (stat.isDirectory()) return "names a directory with no / at its end"
+      if (!stat.isFile()) return "names nothing"
+    }
+    return relative(fs.realpathSync.native(path.join(root, bare))) === bare ? null : "is not the real path of what it names"
+  }
   const parsed = new Map<string, Array<Import>>()
   const read = (file: string) => {
     let got = parsed.get(file)
@@ -303,12 +338,24 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
     const pkg = byName.get(nameOf(specifier))
     if (pkg === undefined) return null
     const entry = "." + specifier.slice(pkg.name.length)
-    const target = typeof pkg.manifest.exports === "string" && entry === "." ? pkg.manifest.exports : pkg.manifest.exports?.[entry]
-    const file = typeof target === "string" ? target : target?.import ?? target?.default
-    return typeof file === "string" ? real(path.resolve(pkg.dir, file)) : null
+    const exports = pkg.manifest.exports
+    // A string target only: an object of conditions, a list or null is an
+    // `entry` fault of the manifest, and no file of this script's.
+    const target = typeof exports === "string" ? (entry === "." ? exports : undefined) : isMap(exports) && Object.hasOwn(exports, entry) ? exports[entry] : undefined
+    return typeof target === "string" ? real(path.resolve(pkg.dir, target)) : null
   }
 
   for (const pkg of packages) {
+    // Each target of `exports` is a string: Bun takes the first key of an
+    // object of conditions that is one of its own (`bun` is one), and this
+    // script does not follow that order, so it would check one file while
+    // Bun loads another. Once for each key, imported or not.
+    const exports = pkg.manifest.exports
+    const manifestFile = path.join(pkg.dir, "package.json")
+    if (exports !== undefined && typeof exports !== "string") {
+      if (!isMap(exports)) fault(manifestFile, 1, "entry, " + NOT_STRING + pkg.name, ".")
+      else for (const [key, target] of Object.entries(exports)) if (typeof target !== "string") fault(manifestFile, 1, "entry, " + NOT_STRING + pkg.name, key)
+    }
     // The files that no rule can read, at the real file's line 1, each
     // once for each package that it is found under: every file found under
     // the package's directory, by a link into another package too. One
@@ -420,6 +467,15 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
     }
     if (budget.forbid !== undefined && budget.forbid.length === 0) wrong("an empty forbid", budget.package)
     if (budget.only !== undefined && budget.only.length === 0) wrong("an empty only", budget.package)
+    // Each entry of forbid and of only names what is there, as the table
+    // writes a path from the root: a file, or a directory that ends in "/".
+    // A wrong entry matches nothing, and so turns its part of the row off.
+    for (const [list, entries] of [["forbid", budget.forbid], ["only", budget.only]] as const) {
+      for (const entry of entries ?? []) {
+        const why = named(entry)
+        if (why !== null) wrong("an entry of " + list + " that " + why, budget.package + " " + entry)
+      }
+    }
     if (row.length > 0) {
       faults.push(...row)
       continue

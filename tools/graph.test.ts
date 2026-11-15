@@ -301,8 +301,10 @@ test("budget, only: a start that reaches, through another package's file, a file
   expect(run(root, only)).toEqual([
     B + ":2: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/a.ts: ./a.ts"
   ])
-  // A directory that does not hold it is no better; one that does is.
-  expect(run(root, { ...only, budgets: [{ ...only.budgets[0]!, only: ["packages/core/src/b/"] }] })).toEqual([
+  // A directory that does not hold it is no better; one that does is. (The
+  // directory is there: an entry that names nothing is a fault of the row.)
+  const dir = workspace({ [B]: `export const b = 1\nimport "./a.ts"\n`, "packages/core/src/b/notes.txt": `notes\n` })
+  expect(run(dir, { ...only, budgets: [{ ...only.budgets[0]!, only: ["packages/core/src/b/"] }] })).toEqual([
     "packages/local/src/x.ts:3: budget, @everchat/local may reach only packages/core/src/b/, and reaches " + B + ": @everchat/core/b"
   ])
   expect(run(root, { ...only, budgets: [{ ...only.budgets[0]!, only: ["packages/core/src/"] }] })).toEqual([])
@@ -519,6 +521,103 @@ test("budget: a row with entries names each entry of the exports, so that a new 
   ])
 })
 
+test("budget: each entry of forbid and of only names what is there, or the row is a fault at tools/graph.ts:1 and is not walked", () => {
+  const with_ = (budget: object) => ({ ...FIXTURE, budgets: [budget] }) as unknown as Tables
+  const line = (list: string, why: string, pkg: string, entry: string) => "tools/graph.ts:1: budget, an entry of " + list + " that " + why + ": " + pkg + " " + entry
+  const BAD: ReadonlyArray<readonly [string, string]> = [
+    ["./packages/local/", "is not a path from the root"],
+    ["packages/locale/", "names nothing"],
+    ["packages/local", "names a directory with no / at its end"],
+    [B + "/", "ends in / and is no directory"]
+  ]
+  // forbid: the core's files reach local, and the good row faults there.
+  const core = JSON.stringify({ name: "@everchat/core", exports: { ".": "./src/a.ts", "./b": "./src/b.ts" }, dependencies: { effect: "1", "@everchat/local": "workspace:*" } })
+  const reach = workspace({ "packages/core/package.json": core, [B]: `import { x } from "@everchat/local/x"\nexport const b = x\n` })
+  const forbid = (entries: ReadonlyArray<string>) => run(reach, with_({ package: "@everchat/core", from: "files", forbid: entries }))
+  expect(forbid(["packages/local/"])).toEqual([B + ":1: budget, @everchat/core must not reach packages/local/: @everchat/local/x"])
+  for (const [entry, why] of BAD) {
+    expect(forbid([entry])).toEqual([line("forbid", why, "@everchat/core", entry)])
+    expect(forbid(["packages/local/", entry])).toEqual([line("forbid", why, "@everchat/core", entry)])
+  }
+  // only: local's ./x reaches b.ts, which reaches a.ts, outside only.
+  const root = workspace({ [B]: `export const b = 1\nimport "./a.ts"\n` })
+  const only = (entries: ReadonlyArray<string>) => run(root, with_({ package: "@everchat/local", from: ["./x"], only: entries }))
+  expect(only([B])).toEqual([B + ":2: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/a.ts: ./a.ts"])
+  for (const [entry, why] of BAD) {
+    expect(only([entry])).toEqual([line("only", why, "@everchat/local", entry)])
+    expect(only([B, entry])).toEqual([line("only", why, "@everchat/local", entry)])
+  }
+  // A file and a directory with "/": no fault from this rule, and the row
+  // is walked (forbid finds its reach; only lets it pass).
+  expect(forbid(["packages/local/src/x.ts", "packages/local/"])).toEqual([B + ":1: budget, @everchat/core must not reach packages/local/src/x.ts, packages/local/: @everchat/local/x"])
+  expect(only([B, "packages/core/src/"])).toEqual([])
+})
+
+test("budget: an entry of forbid or only is written as its own real path: a link, in any part of it, is a fault, and the row is not walked", () => {
+  const with_ = (budget: object) => ({ ...FIXTURE, budgets: [budget] }) as unknown as Tables
+  const line = (list: string, pkg: string, entry: string) => "tools/graph.ts:1: budget, an entry of " + list + " that is not the real path of what it names: " + pkg + " " + entry
+  // Links at the root to each package, and a link to a file in each.
+  const links = { linklocal: "packages/local", linkcore: "packages/core", "packages/local/src/link.ts": "x.ts", "packages/core/src/blink.ts": "b.ts" }
+  // forbid: the core's files reach local's x.ts.
+  const core = JSON.stringify({ name: "@everchat/core", exports: { ".": "./src/a.ts", "./b": "./src/b.ts" }, dependencies: { effect: "1", "@everchat/local": "workspace:*" } })
+  const reach = workspace({ "packages/core/package.json": core, [B]: `import { x } from "@everchat/local/x"\nexport const b = x\n` }, links)
+  const forbid = (entries: ReadonlyArray<string>, root = reach) => run(root, with_({ package: "@everchat/core", from: "files", forbid: entries }))
+  const caught = [B + ":1: budget, @everchat/core must not reach packages/local/: @everchat/local/x"]
+  expect(forbid(["packages/local/"])).toEqual(caught)
+  // only: local's ./x reaches b.ts, which reaches a.ts, outside only.
+  const root = workspace({ [B]: `export const b = 1\nimport "./a.ts"\n` }, links)
+  const only = (entries: ReadonlyArray<string>, at = root) => run(at, with_({ package: "@everchat/local", from: ["./x"], only: entries }))
+  const outside = [B + ":2: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/a.ts: ./a.ts"]
+  expect(only([B])).toEqual(outside)
+  // A link to a file, a link to a directory, and an entry under a parent
+  // that is a link: each is the one fault of the row, beside a good entry
+  // too, and no reach is reported.
+  for (const entry of ["packages/local/src/link.ts", "linklocal/", "linklocal/src/x.ts"]) {
+    expect(forbid([entry])).toEqual([line("forbid", "@everchat/core", entry)])
+    expect(forbid(["packages/local/", entry])).toEqual([line("forbid", "@everchat/core", entry)])
+  }
+  for (const entry of ["packages/core/src/blink.ts", "linkcore/", "linkcore/src/b.ts"]) {
+    expect(only([entry])).toEqual([line("only", "@everchat/local", entry)])
+    expect(only([B, entry])).toEqual([line("only", "@everchat/local", entry)])
+  }
+  // A real file and a real directory pass, also when the root is reached
+  // through a link: the base is the real path of the root.
+  const via = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-graph-")), "root")
+  made.push(path.dirname(via))
+  fs.symlinkSync(reach, via)
+  expect(forbid(["packages/local/src/x.ts"], via)).toEqual([B + ":1: budget, @everchat/core must not reach packages/local/src/x.ts: @everchat/local/x"])
+  expect(forbid(["packages/local/"], via)).toEqual(caught)
+  const onlyVia = path.join(path.dirname(via), "only")
+  fs.symlinkSync(root, onlyVia)
+  expect(only([B], onlyVia)).toEqual(outside)
+  expect(only([B, "packages/core/src/"], onlyVia)).toEqual([])
+})
+
+test("entry: each target of exports is a string; any other is a fault at the manifest's line 1, and so is each import and each start of it", () => {
+  const local = (y: unknown) => JSON.stringify({ name: "@everchat/local", exports: { "./x": "./src/x.ts", "./y": y }, dependencies: { "@everchat/core": "workspace:*", effect: "1" }, devDependencies: { "happy-dom": "1" } })
+  const files = { "packages/local/src/y.ts": `export const y = 1\n`, "packages/local/src/i.ts": `export const i = 1\n` }
+  const manifest = "packages/local/package.json:1: entry, a target that is not a string, in the exports of @everchat/local: ./y"
+  for (const y of [{ bun: "./src/y.ts", import: "./src/i.ts" }, ["./src/y.ts"], null]) {
+    // Imported or not, once.
+    expect(run(workspace({ ...files, "packages/local/package.json": local(y) }))).toEqual([manifest])
+    // An import of it: the entry is not in the exports, as this script reads them.
+    expect(run(workspace({ ...files, "packages/local/package.json": local(y), "packages/local/src/z.ts": `import "@everchat/local/y"\n` }))).toEqual([
+      manifest,
+      "packages/local/src/z.ts:1: entry, not in the exports of @everchat/local: @everchat/local/y"
+    ])
+    // A row that starts from it.
+    const row: Tables = { ...FIXTURE, budgets: [{ package: "@everchat/local", from: ["./x", "./y"], only: [B] }] }
+    expect(run(workspace({ ...files, "packages/local/package.json": local(y) }), row)).toEqual([
+      manifest,
+      "tools/graph.ts:1: budget, cannot read the start of @everchat/local: ./y"
+    ])
+  }
+  // An object of strings, and a string: no fault from this rule.
+  expect(run(workspace({ ...files, "packages/local/package.json": local("./src/y.ts") }))).toEqual([])
+  const one = JSON.stringify({ name: "@everchat/local", exports: "./src/x.ts", dependencies: { "@everchat/core": "workspace:*", effect: "1" }, devDependencies: { "happy-dom": "1" } })
+  expect(run(workspace({ "packages/local/package.json": one, "packages/core/src/a.test.ts": `import { test } from "node:test"\ntest("a", () => {})\n` }))).toEqual([])
+})
+
 test("a file that no rule can read is a fault at its line 1: a source whose real path is not .ts, a file of a kind off the list", () => {
   // A link zz.test.ts to a file with no extension, which imports a built-in
   // off the list of the core's tests: bun test runs it by its name.
@@ -641,29 +740,47 @@ test("check takes the real tables when it is given none", () => {
 
 // A package for each row of the real BUDGETS whose package the fixture
 // does not have: its name, an entry for each of the row's entries, and a
-// file that imports nothing. So the real tables find every package that
-// they name, whichever rows they have.
-const stubs = (): Record<string, string> => {
+// file that imports nothing, or, with `reach`, that imports local's x.ts,
+// which each real row other than local's forbids or leaves outside `only`.
+// And each path that a row's `forbid` or `only` names, when the fixture
+// does not have it: an entry must name what is there. So the real tables
+// find every package and path that they name, whichever rows they have.
+const stubs = (reach = false): Record<string, string> => {
   const files: Record<string, string> = {}
   for (const row of BUDGETS) {
     if (row.package === "@everchat/core" || row.package === "@everchat/local") continue
     const dir = "packages/" + row.package.split("/").pop()
     const entries = row.from === "files" ? ["."] : row.from
     files[dir + "/package.json"] = JSON.stringify({ name: row.package, exports: Object.fromEntries(entries.map((entry) => [entry, "./src/stub.ts"])) })
-    files[dir + "/src/stub.ts"] = `export const stub = 1\n`
+    files[dir + "/src/stub.ts"] = reach ? `import "../../local/src/x.ts"\n` : `export const stub = 1\n`
+  }
+  const base = workspace()
+  for (const row of BUDGETS) {
+    for (const entry of [...(row.forbid ?? []), ...(row.only ?? [])]) {
+      if (fs.existsSync(path.join(base, entry)) || Object.keys(files).some((one) => one.startsWith(entry))) continue
+      files[entry.endsWith("/") ? entry + "stub.txt" : entry] = `export const stub = 1\n`
+    }
   }
   return files
 }
 
 test("the script prints the faults and fails, and passes a clean workspace", () => {
   // The command uses the real tables: what it prints is what `check` gives
-  // with them.
+  // with them. The failing tree tries each real row: the core's b.ts, and
+  // each stub, reach local's x.ts.
   const script = path.join(import.meta.dir, "graph.ts")
-  const failing = workspace({ ...stubs(), [B]: `import "typescript"\n` })
+  const failing = workspace({ ...stubs(true), [B]: `import "typescript"\nimport "../../local/src/x.ts"\n` })
   const bad = Bun.spawnSync(["bun", script, failing], { stderr: "pipe", stdout: "pipe" })
   expect(bad.exitCode).toBe(1)
-  expect(bad.stderr.toString()).toBe(B + ":1: manifest, not declared by @everchat/core: typescript\n")
-  expect(check(failing)).toEqual([B + ":1: manifest, not declared by @everchat/core: typescript"])
+  const faults = check(failing)
+  const core = BUDGETS.find((row) => row.package === "@everchat/core")!
+  const reach = B + ":2: budget, @everchat/core must not reach " + core.forbid!.join(", ") + ": ../../local/src/x.ts"
+  expect(faults).toContain(B + ":1: manifest, not declared by @everchat/core: typescript")
+  expect(faults).toContain(reach)
+  expect(bad.stderr.toString().split("\n")).toContain(reach)
+  // Each real row gives its budget line, through the process too.
+  for (const row of BUDGETS) expect(faults.some((line) => line.includes(": budget, " + row.package + " "))).toBe(true)
+  expect(bad.stderr.toString()).toBe(faults.map((line) => line + "\n").join(""))
   const clean = workspace(stubs())
   const good = Bun.spawnSync(["bun", script, clean], { stderr: "pipe", stdout: "pipe" })
   expect(good.exitCode).toBe(0)
