@@ -20,7 +20,7 @@
 // whether another try can help (`retry`), and whether the model had already
 // begun to answer (`began`). The code that owns the request decides.
 
-import { Schema } from "effect"
+import { Context, Schema } from "effect"
 import type { Stream } from "effect"
 import type { Pick } from "./store.ts"
 
@@ -162,3 +162,15 @@ export class WireError extends Schema.TaggedError<WireError>()("WireError", {
 export interface Wire {
   send(request: Request): Stream.Stream<Event, WireError>
 }
+
+// The wire of one vendor, as a service under the vendor's name (`Pick.vendor`).
+// Ask finds the wire of a pick's vendor by it (ask.ts). Each vendor's file
+// gives the layer of its own wire (openai.ts), so a second vendor adds a
+// layer and changes no file of the core. All vendors' wires share the one
+// identifier: a layer that needs `VendorWire` needs at least one wire.
+export interface VendorWire {
+  readonly VendorWire: unique symbol
+}
+
+export const VendorWire = (vendor: string): Context.Service<VendorWire, Wire> =>
+  Context.Service<VendorWire, Wire>("everchat/request/VendorWire/" + vendor)

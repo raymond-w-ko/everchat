@@ -7,6 +7,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, write } from "../tests/help.ts"
 import { Shell, sweep, TAG } from "./shell.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
 
 const withShell = <A, E>(
@@ -14,7 +15,7 @@ const withShell = <A, E>(
   effect: Effect.Effect<A, E, Shell | Store>,
   over: { hard?: number; runTag?: string } = {}
 ) => {
-  const store = Store.layer(file, options({ runTag: over.runTag ?? "tag-" + crypto.randomUUID() }))
+  const store = storeLayer(file, options({ runTag: over.runTag ?? "tag-" + crypto.randomUUID() }))
   const shell = Shell.layer({ cwd: path.dirname(file), shell: "/bin/sh", hard: over.hard }).pipe(Layer.provideMerge(store))
   return Effect.runPromise(effect.pipe(Effect.provide(shell)))
 }

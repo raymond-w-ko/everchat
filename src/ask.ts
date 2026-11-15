@@ -4,7 +4,8 @@
 // needs. A wire sends a request once and says what happened. This service
 // owns the request from its start to its end:
 //
-// - It finds the wire for the pick's vendor.
+// - It finds the wire for the pick's vendor (`VendorWire`, request.ts). It
+//   knows no vendor: each wire is a layer that the program gives it.
 // - It puts the request through the cache watch (cache.ts): a request that
 //   can wait does so for a prefix that is not readable yet, and each reply
 //   gets a judgment of its cache read.
@@ -29,8 +30,7 @@
 
 import { Context, Effect, Layer, Option, Random, Stream } from "effect"
 import { Cache } from "./cache.ts"
-import { OpenAI } from "./openai.ts"
-import { type Event, type Reply, type Request, type Wire, WireError } from "./request.ts"
+import { type Event, type Reply, type Request, VendorWire, WireError } from "./request.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "ask")
@@ -60,18 +60,19 @@ export class Ask extends Context.Service<Ask, {
     Effect.gen(function*() {
       const cache = yield* Cache
       const delay = yield* AskDelay
-      const wires: Record<string, Wire> = { openai: yield* OpenAI }
+      // The wires that the layer was given, one for each vendor.
+      const wires = yield* Effect.context<VendorWire>()
 
       const stream = (request: Request, how: Asking = {}): Stream.Stream<Event, WireError> => {
         const patient = how.patient === true
-        const wire = wires[request.pick.vendor]
-        if (wire === undefined) {
+        const found = Context.getOption(wires, VendorWire(request.pick.vendor))
+        if (Option.isNone(found)) {
           return Stream.fail(
             new WireError({ kind: "input", message: `no wire for the vendor "${request.pick.vendor}"`, retry: false, began: false, after: null, status: null, code: null, request: null })
           )
         }
         const attempt = (n: number): Stream.Stream<Event, WireError> =>
-          cache.send(wire, request, patient).pipe(
+          cache.send(found.value, request, patient).pipe(
             Stream.catch((error) => {
               const again = error.retry && (patient || (!error.began && n < TRIES))
               if (!again) {

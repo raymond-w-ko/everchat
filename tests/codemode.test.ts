@@ -10,13 +10,16 @@ import * as path from "node:path"
 import { Ask, AskDelay } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
 import * as Diagnostics from "../src/diagnostics.ts"
-import { Functions } from "../src/functions.ts"
 import { Limit } from "../src/limit.ts"
+import { limitLayer } from "../src/limitfile.ts"
+import { DECLARATIONS, functionsLayer } from "../src/localfunctions.ts"
 import { Memory } from "../src/memory.ts"
 import type { Reply, Request } from "../src/request.ts"
-import { Sandbox, STOPPED as FUNCTION_STOPPED } from "../src/sandbox.ts"
+import { STOPPED as FUNCTION_STOPPED } from "../src/sandbox.ts"
 import { Shell } from "../src/shell.ts"
+import { storeLayer } from "../src/sqlite.ts"
 import { Store } from "../src/store.ts"
+import { threadLayer } from "../src/thread.ts"
 import { CUT, CUT_FUNCTION, STOPPED, Turns } from "../src/turn.ts"
 import { compactor, fakeWire, newFile, options, reply, rows, write } from "./help.ts"
 
@@ -25,14 +28,14 @@ import { compactor, fakeWire, newFile, options, reply, rows, write } from "./hel
 const launch = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: Effect.Effect<A, E, Turns | Store | Limit>, limit = 2000) => {
   const cwd = path.dirname(file)
   // The logger is under every layer, and merged: see diagnostics.ts.
-  const store = Diagnostics.layer.pipe(Layer.provideMerge(Store.layer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
+  const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
-  const limits = Limit.layer({ dir: path.join(cwd, "results"), limit }).pipe(Layer.provide(store))
+  const limits = limitLayer({ dir: path.join(cwd, "results"), limit }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = Functions.layer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
-  const sandbox = Sandbox.layer().pipe(Layer.provide(functions), Layer.provide(store))
+  const functions = functionsLayer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
+  const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
+  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 

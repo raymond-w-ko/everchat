@@ -6,20 +6,23 @@ import { Effect, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { compactor, newFile, options, PICK, rows } from "../tests/help.ts"
-import { type Caller, DECLARATIONS, Functions } from "./functions.ts"
+import { type Caller, Functions } from "./functions.ts"
 import { Limit } from "./limit.ts"
+import { limitLayer } from "./limitfile.ts"
+import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
 import { Memory } from "./memory.ts"
 import { Shell } from "./shell.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
 
 // One launch with the real functions. The work directory is the home.
 const withFunctions = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory | Limit>) => {
   const cwd = path.dirname(file)
-  const store = Store.layer(file, options({ runTag: "tag-" + crypto.randomUUID() }))
+  const store = storeLayer(file, options({ runTag: "tag-" + crypto.randomUUID() }))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
-  const limit = Limit.layer({ dir: path.join(cwd, "results"), limit: 1000 }).pipe(Layer.provide(store))
+  const limit = limitLayer({ dir: path.join(cwd, "results"), limit: 1000 }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = Functions.layer({ cwd }).pipe(Layer.provideMerge(Layer.mergeAll(memory, shell, limit)))
+  const functions = functionsLayer({ cwd }).pipe(Layer.provideMerge(Layer.mergeAll(memory, shell, limit)))
   return Effect.runPromise(effect.pipe(Effect.provide(functions)))
 }
 

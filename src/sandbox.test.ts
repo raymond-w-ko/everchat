@@ -7,7 +7,9 @@ import { Effect, Fiber, Layer } from "effect"
 import { newFile, options, PICK, rows } from "../tests/help.ts"
 import { type Caller, FunctionError, Functions } from "./functions.ts"
 import { Sandbox, STOPPED } from "./sandbox.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
+import { threadLayer } from "./thread.ts"
 
 type Fake = (args: ReadonlyArray<unknown>, caller: Caller) => Effect.Effect<unknown, FunctionError>
 
@@ -42,6 +44,7 @@ const fakes = () => {
   const layer = Layer.succeed(
     Functions,
     Functions.of({
+      declarations: Object.keys(table).map((name) => ({ name, signature: "()", description: name })),
       names: Object.keys(table),
       call: (name, args, caller) => {
         seen.push({ name, args, caller })
@@ -59,8 +62,8 @@ const withSandbox = <A, E>(
   effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
   over: { memory?: number; compute?: number } = {}
 ) => {
-  const store = Store.layer(file, options())
-  const sandbox = Sandbox.layer(over).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
+  const store = storeLayer(file, options())
+  const sandbox = threadLayer(over).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
   let n = 0
   const body = Effect.gen(function*() {
     const db = yield* Store

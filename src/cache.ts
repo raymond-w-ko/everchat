@@ -55,10 +55,14 @@
 // than the vendor can give.
 
 import { Clock, Context, Effect, Layer, Stream } from "effect"
+import { createHash } from "node:crypto"
 import type { Event, Request, Usage, Wire, WireError } from "./request.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "cache")
+
+// The bytes of a part, in UTF-8.
+const encoder = new TextEncoder()
 
 // A cached prefix lives at least this long (OpenAI: 30 minutes by default).
 export const ALIVE = 30 * 60_000
@@ -112,7 +116,7 @@ export const parts = (request: Request): Array<string> => {
   for (const item of request.items) {
     if (item.kind === "user") {
       for (const block of item.blocks) out.push(block.text)
-      for (const picture of item.pictures ?? []) out.push(picture.type + ":" + new Bun.CryptoHasher("sha256").update(picture.bytes).digest("hex"))
+      for (const picture of item.pictures ?? []) out.push(picture.type + ":" + createHash("sha256").update(picture.bytes).digest("hex"))
     } else if (item.kind === "turn") {
       for (const one of item.output) out.push(JSON.stringify(one))
     } else {
@@ -168,10 +172,10 @@ export class Cache extends Context.Service<Cache, {
       }
       let [bytes, total, age]: [number, number, number | null] = [0, 0, null]
       let flying: { readonly bytes: number; readonly wait: number } | null = null
-      const hasher = new Bun.CryptoHasher("sha256")
+      const hasher = createHash("sha256")
       const prints: Array<string> = []
       for (const part of parts(request)) {
-        total += Buffer.byteLength(part, "utf8")
+        total += encoder.encode(part).length
         hasher.update(part).update("\u0000")
         const print = hasher.copy().digest("hex")
         prints.push(print)

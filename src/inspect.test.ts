@@ -7,17 +7,19 @@ import * as os from "node:os"
 import { compactor, fakeWire, newFile, options, reply, wireError, withChat, withMemory, withStore, write } from "../tests/help.ts"
 import * as Diagnostics from "./diagnostics.ts"
 import { head } from "./head.ts"
+import { DECLARATIONS } from "./localfunctions.ts"
 import { CELLS, Inspect, type ItemShown, ROWS } from "./inspect.ts"
 import { Memory, NODE } from "./memory.ts"
 import { body } from "./openai.ts"
 import type { Reply, Request } from "./request.ts"
-import { ProcessAlive, Reads, Store } from "./store.ts"
+import { ProcessAlive, readsLayer } from "./sqlite.ts"
+import { Store } from "./store.ts"
 import { HEAD, Turns } from "./turn.ts"
 
 // Asks the inspector about the chat in `file`, as a process of its own.
 const inspect = <A, E>(file: string, ask: (inspect: Inspect["Service"]) => Effect.Effect<A, E>, alive = false) =>
   Effect.runPromise(
-    Inspect.use(ask).pipe(Effect.provide(Inspect.layer.pipe(Layer.provide(Reads.layer(file)))), Effect.provideService(ProcessAlive, () => alive))
+    Inspect.use(ask).pipe(Effect.provide(Inspect.layer.pipe(Layer.provide(readsLayer(file)))), Effect.provideService(ProcessAlive, () => alive))
   )
 
 const runs = (asked: Request, id: string, program: string): Reply =>
@@ -266,7 +268,7 @@ test("a turn's request: the head, the view's lines with their nodes, the steps, 
   expect((await inspect(file, (ask) => ask.turns(null, 1))).map((turn) => turn.id)).toEqual([2])
 
   const first = (await inspect(file, (ask) => ask.turn(1)))!
-  expect(first.head).toEqual(head())
+  expect(first.head).toEqual(head(DECLARATIONS))
   expect(first.turn.said).toBe("what is 1 + 1?")
   expect(first.asked).toBe(null)
   expect(first.items.map((one) => one.kind)).toEqual(["user", "turn", "back", "turn"])
@@ -356,7 +358,7 @@ test("a request that is asked now is the turn's items so far", async () => {
   await withStore(file, Effect.gen(function*() {
     const store = yield* Store
     yield* store.append([{ kind: "user", text: "are you there?" }])
-    const turn = yield* store.startTurn({ pick: options().pick, head: JSON.stringify(head()), firstMsg: 0 })
+    const turn = yield* store.startTurn({ pick: options().pick, head: JSON.stringify(head(DECLARATIONS)), firstMsg: 0 })
     const blocks = [{ text: "<chat>\n", mark: true }, { text: "</chat>\n", mark: false }, { text: HEAD + "are you there?", mark: true }]
     yield* store.addTurnItem(turn.id, "user", JSON.stringify({ kind: "user", blocks }))
   }))

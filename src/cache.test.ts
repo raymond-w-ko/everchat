@@ -33,6 +33,12 @@ test("the parts of a request are its head with all that the vendor matches, then
   expect(turn.slice(1)).toEqual(["{\"id\":\"a\"}", "{\"id\":\"b\"}", "[\"c\",\"2\",0]"])
 })
 
+test("a picture's part is its type and the SHA-256 of its bytes, in hex: the cache's fingerprints depend on these bytes", () => {
+  const pictures = [{ type: "image/png", bytes: new Uint8Array([0, 1, 2, 250, 251, 255]) }]
+  const one = parts(request(0, { items: [{ kind: "user", blocks: [{ text: "user: see", mark: false }], pictures }] }))
+  expect(one.slice(1)).toEqual(["user: see", "image/png:8a093e615781748bc6c04956a5a729eddd74643ddaf3da4afdf3da3a1801750f"])
+})
+
 test("a request should read the longest prefix that an earlier request sent, once that one is old enough", async () => {
   await run(Effect.gen(function*() {
     const cache = yield* Cache

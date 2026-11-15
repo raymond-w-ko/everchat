@@ -122,7 +122,12 @@ export const CompactionRetry = Context.Reference<Schedule.Schedule<unknown>>("ev
 // The tree's math
 // ---------------
 
-export const bytes = (text: string): number => Buffer.byteLength(text, "utf8")
+// UTF-8, as the vendors count a text. A lone surrogate is written as U+FFFD,
+// in 3 bytes. The decoder keeps a byte order mark at the start of a text.
+const encoder = new TextEncoder()
+const decoder = new TextDecoder("utf-8", { ignoreBOM: true })
+
+export const bytes = (text: string): number => encoder.encode(text).length
 
 // A message as the model reads it.
 export const show = (kind: Kind, text: string): string => kind + ": " + text
@@ -165,7 +170,7 @@ export const line = (part: Part, text: string): string => ref(part) + "|" + flat
 
 // A text's first NODE bytes.
 export const cut = (text: string): string =>
-  Buffer.from(text, "utf8").subarray(0, NODE).toString("utf8").replace(/�+$/, "")
+  decoder.decode(encoder.encode(text).subarray(0, NODE)).replace(/�+$/, "")
 
 export const over = (text: string): string =>
   `Too long: your last line for this <input> was ${bytes(text)} bytes,

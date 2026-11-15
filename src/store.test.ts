@@ -9,7 +9,8 @@ import { newFile, options, PICK, rows, withStore, write } from "../tests/help.ts
 import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
 import { migrations } from "./migrations.ts"
-import { DatabaseVersion, LaunchLive, type Part, ProcessAlive, Reads, Store, StoreError } from "./store.ts"
+import { ProcessAlive, readsLayer, storeLayer } from "./sqlite.ts"
+import { DatabaseVersion, LaunchLive, type Part, Reads, Store, StoreError } from "./store.ts"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
@@ -69,7 +70,7 @@ test("a launch records its pick from the command line", async () => {
 
 test("a launch that fails ends with why = error, and one that is interrupted with why = signal", async () => {
   const file = newFile()
-  const layer = Store.layer(file, options())
+  const layer = storeLayer(file, options())
   const failed = await Effect.runPromiseExit(Effect.fail("boom").pipe(Effect.provide(layer)))
   expect(Exit.isFailure(failed)).toBe(true)
   const interrupted = await Effect.runPromiseExit(Effect.interrupt.pipe(Effect.provide(layer)))
@@ -93,7 +94,7 @@ test("a start stops when another process of this host has the file, and writes n
   const file = newFile()
   await crash(file, 4242)
   const error = await Effect.runPromise(
-    Effect.flip(Effect.void.pipe(Effect.provide(Store.layer(file, options())))).pipe(
+    Effect.flip(Effect.void.pipe(Effect.provide(storeLayer(file, options())))).pipe(
       Effect.provideService(ProcessAlive, (pid) => pid === 4242)
     )
   )
@@ -415,10 +416,10 @@ test("a restart finds the log, the tree and the views as they were, and the ids 
 // ---------------------------------------------------
 
 // Runs `effect` with the store's reads over `file`, as a second process does.
-const withReads = <A, E>(file: string, effect: Effect.Effect<A, E, Reads>) => Effect.runPromise(effect.pipe(Effect.provide(Reads.layer(file))))
+const withReads = <A, E>(file: string, effect: Effect.Effect<A, E, Reads>) => Effect.runPromise(effect.pipe(Effect.provide(readsLayer(file))))
 
 // The error that the reads over `file` fail to start with.
-const noReads = (file: string) => Effect.runPromise(Effect.flip(Reads.use((reads) => reads.count).pipe(Effect.provide(Reads.layer(file)))))
+const noReads = (file: string) => Effect.runPromise(Effect.flip(Reads.use((reads) => reads.count).pipe(Effect.provide(readsLayer(file)))))
 
 test("the reads take no launch, also while a launch has the file, and they see what it wrote", async () => {
   const file = newFile()

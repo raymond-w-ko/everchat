@@ -7,6 +7,7 @@ import { Cause, Effect, Layer, References, Schedule } from "effect"
 import { compactor, newFile, options, rows, write } from "../tests/help.ts"
 import * as Diagnostics from "./diagnostics.ts"
 import { CompactionRetry, CompactorError, Memory } from "./memory.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store, StoreError } from "./store.ts"
 
 interface Line {
@@ -19,7 +20,7 @@ const lines = (file: string) => rows<Line>(file, "select level, source, text fro
 
 // One launch with the store and the logger.
 const withDiagnostics = <A, E>(file: string, effect: Effect.Effect<A, E, Store>) => {
-  const store = Store.layer(file, options())
+  const store = storeLayer(file, options())
   return Effect.runPromise(effect.pipe(Effect.provide(Diagnostics.layer.pipe(Layer.provideMerge(store)))))
 }
 
@@ -115,7 +116,7 @@ test("a launch deletes the diagnostics that are older than 30 days", async () =>
 test("a batch that the database refuses is counted, and the next batch says how many were lost", async () => {
   const file = newFile()
   let refuse = true
-  const real = Store.layer(file, options())
+  const real = storeLayer(file, options())
   // The same store, but its first writes of diagnostics fail.
   const flaky = Layer.effect(
     Store,
@@ -172,7 +173,7 @@ test("the store reads diagnostics after a place, oldest first", async () => {
       expect((yield* store.diagnostics()).map((one) => one.text)).toEqual(["two \ufffd", "three"])
       expect(yield* store.dropDiagnostics(21)).toBe(1)
       expect((yield* store.diagnostics()).map((one) => one.text)).toEqual(["three"])
-    }).pipe(Effect.provide(Store.layer(file, options())))
+    }).pipe(Effect.provide(storeLayer(file, options())))
   )
 })
 
@@ -186,7 +187,7 @@ test("a fiber that a service forks logs to the table, when the logger is merged 
     yield* service.push([{ kind: "user", text: "long ".repeat(200) }])
     yield* service.idle
   })
-  const base = Diagnostics.layer.pipe(Layer.provideMerge(Store.layer(file, options())))
+  const base = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options())))
   const memory = Memory.layer.pipe(Layer.provide(failing), Layer.provideMerge(base))
   await Effect.runPromise(pushLong.pipe(Effect.provide(memory), Effect.provideService(CompactionRetry, Schedule.spaced("1 millis"))))
   expect(asked).toBe(2)
@@ -200,7 +201,7 @@ test("a fiber that a service forks logs to the table, when the logger is merged 
   // a method, with the caller's context, so its line goes to the console.
   const other = newFile()
   asked = 0
-  const store = Store.layer(other, options())
+  const store = storeLayer(other, options())
   const under = Memory.layer.pipe(Layer.provide(failing), Layer.provide(Diagnostics.layer.pipe(Layer.provide(store))), Layer.provideMerge(store))
   await Effect.runPromise(pushLong.pipe(Effect.provide(under), Effect.provideService(CompactionRetry, Schedule.spaced("1 millis"))))
   expect(lines(other)).toEqual([])

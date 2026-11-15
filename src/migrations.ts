@@ -13,17 +13,7 @@
 
 import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
-
-// The kinds of message. The model reads each message as `<kind>: <text>`.
-// The ids are the ones in the table `kind`. Never change or reuse an id.
-export const KINDS = {
-  user: 1, // the person
-  asst: 2, // EverChat
-  tool: 3, // a program that the model ran
-  echo: 4, // that program's result
-  work: 5, // an agent's report
-  note: 6 // the program itself
-} as const
+import { KINDS } from "./store.ts"
 
 const refuse = (table: string, on: "update" | "delete", message: string) =>
   `create trigger ${table}_no_${on} before ${on} on ${table}

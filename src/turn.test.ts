@@ -11,8 +11,10 @@ import { Cache } from "./cache.ts"
 import { head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import type { Item, Reply, Request } from "./request.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
-import { Limit } from "./limit.ts"
+import { limitLayer } from "./limitfile.ts"
+import { DECLARATIONS } from "./localfunctions.ts"
 import { Sandbox } from "./sandbox.ts"
 import { CUT, cutText, HEAD, STOPPED, type TurnEvent, Turns } from "./turn.ts"
 import { Stream } from "effect"
@@ -28,12 +30,12 @@ const withTurns = <A, E>(
   effect: Effect.Effect<A, E, Turns | Memory | Store>,
   summaries: Parameters<typeof compactor>[0] = () => "a summary"
 ) => {
-  const store = Store.layer(file, options())
+  const store = storeLayer(file, options())
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
-  const limit = Limit.layer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
-  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
+  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
@@ -88,7 +90,7 @@ test("a message starts a turn: one request with the view and the message, and th
   expect(wire.sent.length).toBe(1)
   const sent = wire.sent[0]!
   expect(sent.session).toBe(uuid)
-  expect(sent.head).toEqual(head())
+  expect(sent.head).toEqual(head(DECLARATIONS))
   expect(sent.items.length).toBe(1)
   // The message itself goes whole, after a view that does not hold it yet.
   expect(lastText(sent.items[0])).toEqual({ text: HEAD + "hello", mark: true })

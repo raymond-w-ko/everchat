@@ -2,7 +2,7 @@
 // ========
 // Opens the one SQLite file of a chat, and makes it ready: it sets the
 // pragmas, and it runs the migrations that the file has not run yet. The
-// result is Effect's `SqlClient` over one connection. `store.ts` is the only
+// result is Effect's `SqlClient` over one connection. `sqlite.ts` is the only
 // module that uses it.
 //
 // The driver (`@effect/sql-sqlite-bun`) sets `journal_mode = wal`, waits up

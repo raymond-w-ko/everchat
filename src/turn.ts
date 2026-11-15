@@ -61,7 +61,7 @@
 
 import { Context, Effect, Fiber, Layer, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
-import { head as makeHead, TOOL } from "./head.ts"
+import { type Declaration, head as makeHead, TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
@@ -145,6 +145,7 @@ export const item = (kept: Kept): Item =>
   kept.kind === "turn" ? { kind: "turn", output: kept.output } : kept.kind === "user" ? { kind: "user", blocks: kept.blocks } : { kind: "back", results: kept.results }
 
 export interface Options {
+  readonly declarations: ReadonlyArray<Declaration> // the functions of the chat, for the head (the sandbox's, in the same order)
   readonly rules?: string | null | undefined // the person's own instructions, for the head
 }
 
@@ -161,7 +162,7 @@ export class Turns extends Context.Service<Turns, {
   // the subscription is made when this effect ends, not when a stream starts.
   readonly subscribe: Effect.Effect<PubSub.Subscription<TurnEvent>, never, Scope.Scope>
 }>()("everchat/turn/Turns") {
-  static readonly layer = (options: Options = {}) =>
+  static readonly layer = (options: Options) =>
     Layer.effect(
       Turns,
       Effect.gen(function*() {
@@ -382,7 +383,7 @@ export class Turns extends Context.Service<Turns, {
           Effect.gen(function*() {
             const chat = yield* store.chat
             yield* store.setDraft(null)
-            return yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(makeHead(options.rules ?? null)), firstMsg })
+            return yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(makeHead(options.declarations, options.rules ?? null)), firstMsg })
           })
 
         // Turns, one after the other, while messages wait. A turn that

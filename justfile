@@ -7,9 +7,11 @@ default:
 test *args:
     bun test --isolate {{args}}
 
-# Check the types of the new code.
+# Check the types of the new code: all of it, and the core alone, with no Bun
+# and no Node types (tsconfig.core.json).
 check:
     bunx tsc --noEmit -p .
+    bunx tsc --noEmit -p tsconfig.core.json
 
 # Run EverChat from its source, in this terminal.
 run *args:

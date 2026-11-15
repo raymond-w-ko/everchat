@@ -7,6 +7,7 @@ import { Effect, Option } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { storeLayer } from "../src/sqlite.ts"
 import { LaunchLive, Store } from "../src/store.ts"
 import { newFile, options, rows, withStore } from "./help.ts"
 
@@ -61,7 +62,7 @@ test("a start while another process has the file stops, and a start after its de
   const file = newFile()
   const child = await start("idle", file)
   try {
-    const error = await Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(Store.layer(file, options())))))
+    const error = await Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(storeLayer(file, options())))))
     expect(error).toBeInstanceOf(LaunchLive)
     expect(error).toMatchObject({ pid: child.pid })
   } finally {

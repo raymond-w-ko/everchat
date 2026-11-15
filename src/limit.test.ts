@@ -7,11 +7,13 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options } from "../tests/help.ts"
 import { capped, Limit, LIMIT, shorten } from "./limit.ts"
+import { limitLayer } from "./limitfile.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
 
 const withLimit = <A, E>(file: string, effect: Effect.Effect<A, E, Limit | Store>, over: { limit?: number; dir?: string } = {}) => {
-  const store = Store.layer(file, options())
-  const limit = Limit.layer({ dir: path.join(path.dirname(file), "results"), ...over }).pipe(Layer.provideMerge(store))
+  const store = storeLayer(file, options())
+  const limit = limitLayer({ dir: path.join(path.dirname(file), "results"), ...over }).pipe(Layer.provideMerge(store))
   return Effect.runPromise(effect.pipe(Effect.provide(limit)))
 }
 

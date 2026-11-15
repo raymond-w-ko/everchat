@@ -20,7 +20,7 @@
 
 import { Effect, Layer } from "effect"
 import { Ask } from "./ask.ts"
-import { head } from "./head.ts"
+import { type Declaration, head } from "./head.ts"
 import { Compactor, CompactorError } from "./memory.ts"
 import { type Pick, Store } from "./store.ts"
 
@@ -29,6 +29,7 @@ const diagnostic = Effect.annotateLogs("source", "compactor")
 
 export interface Options {
   readonly pick: Pick // the compactor's model: usually a cheap one
+  readonly declarations: ReadonlyArray<Declaration> // the functions of the chat, as in every head of the chat
   readonly rules?: string | null | undefined // the person's own instructions, as in every head of the chat
 }
 
@@ -39,7 +40,7 @@ export const layer = (options: Options) =>
       const asker = yield* Ask
       const store = yield* Store
       const chat = yield* store.chat
-      const sent = head(options.rules ?? null)
+      const sent = head(options.declarations, options.rules ?? null)
       return Compactor.of({
         compact: (blocks) =>
           asker.ask({ session: chat.uuid, pick: options.pick, head: sent, items: [{ kind: "user", blocks }] }, { patient: true }).pipe(

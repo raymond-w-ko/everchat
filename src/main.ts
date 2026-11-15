@@ -85,17 +85,18 @@ import { Cache } from "./cache.ts"
 import * as Compactor from "./compactor.ts"
 import * as Database from "./database.ts"
 import * as Diagnostics from "./diagnostics.ts"
-import { Functions } from "./functions.ts"
 import { Inspect } from "./inspect.ts"
 import { Gateway } from "./gateway.ts"
-import { Limit } from "./limit.ts"
+import { limitLayer } from "./limitfile.ts"
+import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
 import { Memory } from "./memory.ts"
-import { OpenAI } from "./openai.ts"
+import { openaiLayer } from "./openai.ts"
 import { Pipe } from "./pipe.ts"
-import { Sandbox } from "./sandbox.ts"
 import { Shell } from "./shell.ts"
-import { type Pick, Reads, Store } from "./store.ts"
+import { readsLayer, storeLayer } from "./sqlite.ts"
+import type { Pick } from "./store.ts"
 import { Terminal } from "./terminal.ts"
+import { threadLayer } from "./thread.ts"
 import { Turns } from "./turn.ts"
 
 export const VERSION = "0.1.0"
@@ -136,15 +137,15 @@ machine only (127.0.0.1).`
 export const layer = (given: { readonly home: string; readonly file: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
-    Layer.provideMerge(Store.layer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
+    Layer.provideMerge(storeLayer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
-  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, OpenAI.layer.pipe(Layer.provide(Gateway.layer)))), Layer.provideMerge(base))
-  const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor })), Layer.provideMerge(asking))
-  const limits = Limit.layer().pipe(Layer.provideMerge(memory))
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(Gateway.layer)))), Layer.provideMerge(base))
+  const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, declarations: DECLARATIONS })), Layer.provideMerge(asking))
+  const limits = limitLayer().pipe(Layer.provideMerge(memory))
   const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(limits))
-  const functions = Functions.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(shell))
-  const sandbox = Sandbox.layer().pipe(Layer.provideMerge(functions))
-  return Turns.layer().pipe(Layer.provideMerge(sandbox))
+  const functions = functionsLayer({ cwd: given.cwd }).pipe(Layer.provideMerge(shell))
+  const sandbox = threadLayer().pipe(Layer.provideMerge(functions))
+  return Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(sandbox))
 }
 
 // Pipe mode ended, and a turn of this launch had failed. The output holds
@@ -226,7 +227,7 @@ const inspect = Effect.fnUntraced(function*(given: { readonly port: number }) {
   }
   // Loaded only here: the HTTP server is not part of a launch of the chat.
   const { Inspector } = yield* Effect.promise(() => import("./inspector.ts"))
-  const serving = Inspector.layer({ port: given.port }).pipe(Layer.provide(Inspect.layer), Layer.provide(Reads.layer(file)))
+  const serving = Inspector.layer({ port: given.port }).pipe(Layer.provide(Inspect.layer), Layer.provide(readsLayer(file)))
   yield* Effect.gen(function*() {
     const inspector = yield* Inspector
     // The address alone on the standard output, for a script. The rest is for the person.

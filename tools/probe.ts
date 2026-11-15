@@ -33,16 +33,16 @@ import * as path from "node:path"
 import { Ask } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
 import * as RealCompactor from "../src/compactor.ts"
-import { Functions } from "../src/functions.ts"
-import { Limit } from "../src/limit.ts"
+import { limitLayer } from "../src/limitfile.ts"
+import { DECLARATIONS, functionsLayer } from "../src/localfunctions.ts"
 import { Compactor, Memory } from "../src/memory.ts"
-import { Sandbox } from "../src/sandbox.ts"
+import { threadLayer } from "../src/thread.ts"
 import { Shell } from "../src/shell.ts"
-import { Store } from "../src/store.ts"
+import { storeLayer } from "../src/sqlite.ts"
 import { Turns } from "../src/turn.ts"
 import { Gateway } from "../src/gateway.ts"
 import { head as realHead } from "../src/head.ts"
-import { Fetch, type Fetcher, OpenAI } from "../src/openai.ts"
+import { Fetch, type Fetcher, OpenAI, openaiLayer } from "../src/openai.ts"
 import type { Block, Head, Item, Reply, Request } from "../src/request.ts"
 
 const [mode, model = ""] = process.argv.slice(2)
@@ -85,7 +85,7 @@ const openrouter = Layer.sync(Gateway, () => {
   if (key === undefined || key === "") throw new Error("OPENROUTER_API_KEY is not set")
   return Gateway.of({ address: "https://openrouter.ai/api", key: Redacted.make(key) })
 })
-const layer = OpenAI.layer.pipe(Layer.provideMerge(process.env.PROBE === "openrouter" ? openrouter : Gateway.layer))
+const layer = openaiLayer.pipe(Layer.provideMerge(process.env.PROBE === "openrouter" ? openrouter : Gateway.layer))
 const run = <A>(effect: Effect.Effect<A, unknown, OpenAI | Gateway>) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provideService(Fetch, tee)))
 
@@ -281,9 +281,9 @@ if (mode === "models") {
   const shorts = Number(process.argv[5] ?? 150)
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-probe-")), "everchat.db")
   const pick = { vendor: "openai", model, effort: "low", speed: "slow" }
-  const store = Store.layer(file, { launch: { pid: process.pid, host: "probe", cwd: process.cwd(), version: "probe", runTag: "probe" }, pick })
+  const store = storeLayer(file, { launch: { pid: process.pid, host: "probe", cwd: process.cwd(), version: "probe", runTag: "probe" }, pick })
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, layer)))
-  const compactor = RealCompactor.layer({ pick }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const compactor = RealCompactor.layer({ pick, declarations: DECLARATIONS }).pipe(Layer.provide(Layer.merge(asking, store)))
   const words = "the quick brown fox jumps over the lazy dog while a small boat drifts past an old stone bridge".split(" ")
   const prose = (seed: string, n: number) => Array.from({ length: n }, (_, k) => words[parseInt(hash(seed + k).slice(0, 6), 16) % words.length]).join(" ")
   const started = Date.now()
@@ -314,15 +314,15 @@ if (mode === "models") {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-probe-"))
   const file = path.join(home, "everchat.db")
   const pick = { vendor: "openai", model, effort: process.env.PROBE_EFFORT ?? "low", speed: "slow" }
-  const store = Store.layer(file, { launch: { pid: process.pid, host: "probe", cwd: home, version: "probe", runTag: "probe-" + nonce }, pick })
+  const store = storeLayer(file, { launch: { pid: process.pid, host: "probe", cwd: home, version: "probe", runTag: "probe-" + nonce }, pick })
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, layer)))
   const none = Layer.succeed(Compactor, Compactor.of({ compact: () => Effect.die("the probe's message needed a compaction") }))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(none))
-  const limit = Limit.layer({ dir: path.join(home, "results") }).pipe(Layer.provide(store))
+  const limit = limitLayer({ dir: path.join(home, "results") }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd: home }).pipe(Layer.provide(store))
-  const functions = Functions.layer({ cwd: home }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limit)))
-  const sandbox = Sandbox.layer().pipe(Layer.provide(functions), Layer.provide(store))
-  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  const functions = functionsLayer({ cwd: home }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limit)))
+  const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
+  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   const started = Date.now()
   await Effect.runPromise(Effect.gen(function*() {
     const service = yield* Turns
@@ -350,7 +350,7 @@ if (mode === "models") {
   // so that the followers share only the head. A line with the run's nonce
   // goes at the end of the system prompt, so that an older run is not read.
   const real = process.env.PROBE_HEAD === "real"
-  const head: Head = real ? realHead(`Run ${nonce}.`) : { system: system("burst-" + way), tools }
+  const head: Head = real ? realHead(DECLARATIONS, `Run ${nonce}.`) : { system: system("burst-" + way), tools }
   const blocks = view("burst", real ? 0 : 3)
   const fire = async (k: number) => {
     const sent = Date.now()

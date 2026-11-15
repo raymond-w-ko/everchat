@@ -28,6 +28,7 @@ import {
   span,
   task
 } from "./memory.ts"
+import { storeLayer } from "./sqlite.ts"
 import { Store, StoreError } from "./store.ts"
 
 // A text that makes a message of exactly `n` bytes as the model reads it
@@ -484,7 +485,7 @@ test("a compaction that fails is asked again until it answers", async () => {
       yield* memory.push([{ kind: "user", text: sized(600) }])
       yield* memory.idle
     }).pipe(
-      Effect.provide(Memory.layer.pipe(Layer.provideMerge(Store.layer(file, options())), Layer.provide(flaky))),
+      Effect.provide(Memory.layer.pipe(Layer.provideMerge(storeLayer(file, options())), Layer.provide(flaky))),
       Effect.provideService(CompactionRetry, Schedule.spaced("1 millis"))
     )
   )
@@ -504,7 +505,7 @@ test("a write that fails stops the memory for good, and the database keeps the l
         transaction: (effect) =>
           Effect.suspend(() => fail ? Effect.fail(new StoreError({ op: "transaction", cause: "disk full" })) : store.transaction(effect))
       }))
-  ).pipe(Layer.provide(Store.layer(file, options())))
+  ).pipe(Layer.provide(storeLayer(file, options())))
   await Effect.runPromise(
     Effect.gen(function*() {
       const memory = yield* Memory

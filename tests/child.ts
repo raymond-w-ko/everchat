@@ -8,6 +8,7 @@
 //   in the middle of it, and waits there with the transaction open.
 
 import { Effect } from "effect"
+import { storeLayer } from "../src/sqlite.ts"
 import { type Options, Store } from "../src/store.ts"
 
 const [mode, file] = process.argv.slice(2)
@@ -44,4 +45,4 @@ const program = Effect.gen(function*() {
   }))
 })
 
-await Effect.runPromise(program.pipe(Effect.provide(Store.layer(file, options))))
+await Effect.runPromise(program.pipe(Effect.provide(storeLayer(file, options))))

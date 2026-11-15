@@ -2,7 +2,7 @@
 // =============
 // The program of the sandbox's worker thread: the QuickJS engine, and the
 // channel to the functions (the library `pi-codemode`). The sandbox starts
-// one such thread for each program (sandbox.ts).
+// one such thread for each program (thread.ts).
 //
 // It is a file of ours, and not the library's own, because of the
 // executable: `bun build --compile` puts only the entrypoints of the build

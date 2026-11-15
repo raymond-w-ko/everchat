@@ -38,7 +38,9 @@ that we do not use.
   build needs no upgrade [Q38]. See "Use Effect as much as possible"
   below.
 - TypeScript (`tsc`) checks the types. Bun runs the code without a check, so
-  `just check` is a separate step.
+  `just check` is a separate step. It runs two programs: all of the code,
+  and the core's files alone, with no Bun and no Node types
+  (`tsconfig.core.json`).
 
 ## Learning more about Effect
 
@@ -207,11 +209,13 @@ Code mode is the only primary tool that EverChat gives the model. What the old
 code gives the model as separate tools (shell, read, write, edit, and the
 memory tools) become functions that the program can call.
 
-How it is built (`src/sandbox.ts`, `src/functions.ts`):
+How it is built (`src/sandbox.ts`, `src/thread.ts`, `src/functions.ts`,
+`src/localfunctions.ts`):
 
 - A program is JavaScript. It runs in a QuickJS engine that is compiled to
   WebAssembly, in a worker thread (the library `pi-codemode`). In there it
-  has no files, no network, and no timers.
+  has no files, no network, and no timers. `src/sandbox.ts` holds the tag
+  `Sandbox`; the engine of a local chat is `threadLayer` in `src/thread.ts`.
 - The engine is QuickJS on all builds, so the model's programs behave the
   same on each [Q38]. Each program gets a new engine [Q8]. On Cloudflare,
   programs run in a separate Worker: a program that computes inside the
@@ -219,8 +223,13 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
 - Each function runs on EverChat's side. It is a row in `call` from its
   start, and the hooks will run there. So no command can pass a hook unseen.
 - The tool's description lists the functions as TypeScript declarations
-  (`src/head.ts`). To add a function, add its declaration, its arguments'
-  schema, and its code in `src/functions.ts`, with a test.
+  (`src/head.ts`), in the order of `DECLARATIONS` in
+  `src/localfunctions.ts`. That order is part of the prompt cache's key. To
+  add a function that needs only the memory and the store, add its
+  declaration, its arguments' schema, and its code to `core` in
+  `src/functions.ts`. To add a local one (the shell, the files, the work
+  directory), add them in `src/localfunctions.ts`. Either way, give it its
+  place in `DECLARATIONS`, and add a test.
 - A hosted chat has no `shell` and no file functions. It gets a common set
   of functions, and the functions of its provider over MCP; EverChat
   validates their definitions, the arguments, and the results [Q21, Q28,
@@ -229,7 +238,7 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
   end and does not wait for it. So the program's exit must not wait for
   worker threads.
 - The executable (`bun build --compile`) has no `node_modules`, where the
-  library looks for its two files. So the sandbox names both itself, in a
+  library looks for its two files. So `src/thread.ts` names both itself, in a
   way that holds from source and in the executable: the worker thread's
   program is our own `src/worker.ts`, the second entrypoint of the build,
   and the QuickJS file is imported as a file, so the build puts it into

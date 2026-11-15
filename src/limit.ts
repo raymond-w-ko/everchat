@@ -18,15 +18,11 @@
 // function gives its whole result to the program that called it. A second,
 // hard limit keeps a command that never stops printing from filling the
 // memory and the database.
+//
+// This file is the core's part: the cap, and the tag. The layer, which
+// writes the files, is in limitfile.ts.
 
-import { Context, Effect, Layer } from "effect"
-import * as fs from "node:fs"
-import * as os from "node:os"
-import * as path from "node:path"
-import { Store } from "./store.ts"
-
-// This module's diagnostics name it as their source (diagnostics.ts).
-const diagnostic = Effect.annotateLogs("source", "limit")
+import { Context, Effect } from "effect"
 
 // The most characters of a result that the model is shown, when the config
 // gives no other number. Three harnesses agree on about this size.
@@ -38,7 +34,27 @@ export const HARD = 64 * 1024 * 1024
 // The characters that the line between the head and the tail may take.
 const ROOM = 512
 
-const bytes = (text: string) => Buffer.byteLength(text, "utf8")
+// The bytes of one character of `text` at `at`, in UTF-8, and how many
+// code units it takes (2 for a surrogate pair). A lone surrogate is written
+// as U+FFFD, in 3 bytes, as Node's `Buffer.byteLength` counts it.
+const char = (text: string, at: number): readonly [bytes: number, units: number] => {
+  const code = text.charCodeAt(at)
+  if (code < 0x80) return [1, 1]
+  if (code < 0x800) return [2, 1]
+  if (code >> 10 === 0x36 && at + 1 < text.length && text.charCodeAt(at + 1) >> 10 === 0x37) return [4, 2]
+  return [3, 1]
+}
+
+// The bytes of `text` in UTF-8.
+export const bytes = (text: string): number => {
+  let total = 0
+  for (let at = 0; at < text.length;) {
+    const [size, units] = char(text, at)
+    total += size
+    at += units
+  }
+  return total
+}
 
 // True when a cut at `at` would part the two halves of a surrogate pair.
 const parts = (text: string, at: number) => at > 0 && at < text.length && text.charCodeAt(at) >> 10 === 0x37
@@ -60,28 +76,25 @@ export const shorten = (text: string, limit: number, where: string): string => {
 }
 
 // A text of at most `most` bytes: the start of `text`, never with half a
-// character at its end.
+// character at its end. The longest start that fits, then one unit less if
+// the cut is before the second half of a pair.
 export const capped = (text: string, most: number): string => {
-  if (bytes(text) <= most) {
-    return text
+  let total = 0
+  let at = 0
+  while (at < text.length) {
+    const [size, units] = char(text, at)
+    if (total + size > most) {
+      break
+    }
+    total += size
+    at += units
   }
-  let [low, high] = [0, text.length]
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2)
-    if (bytes(text.slice(0, middle)) <= most) low = middle
-    else high = middle - 1
-  }
-  return text.slice(0, parts(text, low) ? low - 1 : low)
+  return at === text.length ? text : text.slice(0, parts(text, at) ? at - 1 : at)
 }
 
 export interface Shown {
   readonly text: string // what the model reads
   readonly shown: number // its bytes
-}
-
-export interface Options {
-  readonly limit?: number | undefined // characters; the config file sets it
-  readonly dir?: string | undefined // where the files go; a test gives its own
 }
 
 export class Limit extends Context.Service<Limit, {
@@ -93,55 +106,4 @@ export class Limit extends Context.Service<Limit, {
   file(call: number): string
   // Writes a call's whole result to its file again. False: it could not.
   put(call: number, text: string): Effect.Effect<boolean>
-}>()("everchat/limit/Limit") {
-  static readonly layer = (options: Options = {}) =>
-    Layer.effect(
-      Limit,
-      Effect.gen(function*() {
-        const store = yield* Store
-        const limit = options.limit ?? LIMIT
-        const uid = process.getuid?.() ?? 0
-        const dir = options.dir ?? path.join(os.tmpdir(), "everchat-" + uid, (yield* Effect.orDie(store.chat)).uuid)
-        const file = (call: number) => path.join(dir, call + ".txt")
-
-        // The directory is under a place that every user can write to. So
-        // it is ours only if we own it and no one else can enter it, at
-        // each level that we make.
-        const ours = (at: string) => {
-          fs.mkdirSync(at, { recursive: true, mode: 0o700 })
-          const stat = fs.lstatSync(at)
-          return stat.isDirectory() && stat.uid === uid && (stat.mode & 0o077) === 0
-        }
-
-        const put = (call: number, text: string) =>
-          Effect.sync(() => {
-            try {
-              if (!(options.dir === undefined ? ours(path.dirname(dir)) && ours(dir) : ours(dir))) {
-                return false
-              }
-              fs.writeFileSync(file(call), text, { mode: 0o600 })
-              return true
-            } catch {
-              return false
-            }
-          })
-
-        const show = Effect.fn("Limit.show")(function*(call: number, text: string) {
-          if (text.length <= limit) {
-            return { text, shown: bytes(text) }
-          }
-          const written = yield* put(call, text)
-          if (!written) {
-            yield* diagnostic(Effect.logWarning(`the whole result of call ${call} could not be written to ${file(call)}`))
-          }
-          const where = written
-            ? "The whole result is in the file " + file(call) + ", and result(" + call + ") gives it to a program."
-            : "result(" + call + ") gives the whole result to a program."
-          const short = shorten(text, limit, where)
-          return { text: short, shown: bytes(short) }
-        })
-
-        return Limit.of({ show, file, put })
-      })
-    )
-}
+}>()("everchat/limit/Limit") {}

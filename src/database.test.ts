@@ -8,8 +8,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, rows } from "../tests/help.ts"
 import * as Database from "./database.ts"
-import { KINDS, migrations } from "./migrations.ts"
-import { Kind } from "./store.ts"
+import { migrations } from "./migrations.ts"
+import { Kind, KINDS } from "./store.ts"
 
 const withDatabase = <A, E>(file: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   Effect.runPromise(effect.pipe(Effect.provide(Database.layer(file))))

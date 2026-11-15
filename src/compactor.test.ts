@@ -8,17 +8,19 @@ import { Ask, AskDelay } from "./ask.ts"
 import { Cache } from "./cache.ts"
 import * as RealCompactor from "./compactor.ts"
 import { head, TOOL } from "./head.ts"
+import { DECLARATIONS } from "./localfunctions.ts"
 import { CompactionRetry, Memory } from "./memory.ts"
 import { Schedule } from "effect"
+import { storeLayer } from "./sqlite.ts"
 import { Store } from "./store.ts"
 
 const PICK = { vendor: "openai", model: "small", effort: "high", speed: "slow" }
 
 // The memory with the real compactor over a fake wire, in one launch.
 const withAll = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: Effect.Effect<A, E, Memory | Store>) => {
-  const store = Store.layer(file, options())
+  const store = storeLayer(file, options())
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const compactor = RealCompactor.layer({ pick: PICK, rules: "Answer in English." }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const compactor = RealCompactor.layer({ pick: PICK, declarations: DECLARATIONS, rules: "Answer in English." }).pipe(Layer.provide(Layer.merge(asking, store)))
   return Effect.runPromise(
     effect.pipe(
       Effect.provide(Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor))),
@@ -31,15 +33,24 @@ const withAll = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: 
 const long = "m".repeat(700)
 
 test("the head names the three kinds of request, has the one tool, and ends with the person's rules", () => {
-  const plain = head()
+  const plain = head(DECLARATIONS)
   expect(plain.system).toStartWith("You are EverChat, an AI agent that works for one user in a single chat that never\nends.")
   for (const part of ["a turn, a compaction, or a subagent task", "\"Compaction:\"", "\"Subagent task:\"", "# Turns", "# Compactions", "# Subagent tasks", "- asst: EverChat's replies"]) {
     expect(plain.system).toContain(part)
   }
   expect(plain.system).not.toContain("ever:")
   expect(plain.tools.map((tool) => [tool.name, tool.schema])).toEqual([[TOOL, undefined]])
-  expect(head("  Answer in English.  ").system).toBe(plain.system + "\n# The user's instructions\n\nAnswer in English.\n")
-  expect(head("  ")).toEqual(plain)
+  expect(head(DECLARATIONS, "  Answer in English.  ").system).toBe(plain.system + "\n# The user's instructions\n\nAnswer in English.\n")
+  expect(head(DECLARATIONS, "  ")).toEqual(plain)
+})
+
+test("the head's bytes are the ones that the prompt cache was written for", () => {
+  // A change of the prompt, of a declaration or of their order changes
+  // every request's prefix, and misses the vendor's cache once for every
+  // chat (AGENTS.md, "One system prompt for every kind of request"). Change
+  // this hash only on purpose.
+  const hash = new Bun.CryptoHasher("sha256").update(JSON.stringify(head(DECLARATIONS))).digest("hex")
+  expect(hash).toBe("315565fca459411a20a7aec74f3162b5ee0de974035c0cd79510b256554e7b73")
 })
 
 test("a compaction is one patient request with the chat's id and head, and its usage is written with its node", async () => {
@@ -55,7 +66,7 @@ test("a compaction is one patient request with the chat's id and head, and its u
   const sent = wire.sent[0]!
   expect(sent.session).toBe(uuid)
   expect(sent.pick).toEqual(PICK)
-  expect(sent.head).toEqual(head("Answer in English."))
+  expect(sent.head).toEqual(head(DECLARATIONS, "Answer in English."))
   expect(sent.items.length).toBe(1)
   const blocks = sent.items[0]!.kind === "user" ? sent.items[0]!.blocks : []
   expect(blocks[0]).toEqual({ text: "<chat>\n", mark: true })

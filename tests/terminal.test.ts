@@ -8,16 +8,17 @@ import * as path from "node:path"
 import { Ask, AskDelay } from "../src/ask.ts"
 import { Cache } from "../src/cache.ts"
 import * as Diagnostics from "../src/diagnostics.ts"
-import { Functions } from "../src/functions.ts"
-import { Limit } from "../src/limit.ts"
+import { limitLayer } from "../src/limitfile.ts"
+import { DECLARATIONS, functionsLayer } from "../src/localfunctions.ts"
 import { Memory } from "../src/memory.ts"
 import { OpenAI } from "../src/openai.ts"
 import { type Pace, QUIET } from "../src/pace.ts"
 import type { Event, Reply, Request, WireError } from "../src/request.ts"
-import { Sandbox } from "../src/sandbox.ts"
 import { Shell } from "../src/shell.ts"
+import { storeLayer } from "../src/sqlite.ts"
 import { Store, type StoreError } from "../src/store.ts"
 import { HELP, SHOWN, Terminal } from "../src/terminal.ts"
+import { threadLayer } from "../src/thread.ts"
 import { type TurnEvent, Turns } from "../src/turn.ts"
 import { compactor, newFile, options, PICK as PICKED, reply, rows, wireError } from "./help.ts"
 import { KEYS, Screen } from "./screen.ts"
@@ -51,14 +52,14 @@ const launch = <A, E>(
 ) => {
   const cwd = path.dirname(file)
   // The logger is under every layer, and merged: see diagnostics.ts.
-  const store = Diagnostics.layer.pipe(Layer.provideMerge(Store.layer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
+  const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
-  const limits = Limit.layer({ dir: path.join(cwd, "results") }).pipe(Layer.provide(store))
+  const limits = limitLayer({ dir: path.join(cwd, "results") }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = Functions.layer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
-  const sandbox = Sandbox.layer().pipe(Layer.provide(functions), Layer.provide(store))
+  const functions = functionsLayer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
+  const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const turns = Turns.layer().pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
+  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
   const terminal = Terminal.layer({ tty: screen, cwd, pace }).pipe(Layer.provideMerge(turns))
   return Effect.runPromise(effect.pipe(Effect.provide(terminal), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
@@ -548,7 +549,7 @@ const fakeTurns = (
 }
 
 const withFake = <A, E>(file: string, screen: Screen, fake: ReturnType<typeof fakeTurns>, effect: Effect.Effect<A, E, Terminal | Turns | Store>) => {
-  const store = Diagnostics.layer.pipe(Layer.provideMerge(Store.layer(file, options())))
+  const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options())))
   return Effect.runPromise(effect.pipe(Effect.provide(Terminal.layer({ tty: screen }).pipe(Layer.provideMerge(fake.layer), Layer.provideMerge(store)))))
 }
 

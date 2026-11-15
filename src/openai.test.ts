@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test"
 import { Effect, Layer, Redacted, Stream } from "effect"
 import { Gateway } from "./gateway.ts"
-import { body, Fetch, type Fetcher, OpenAI } from "./openai.ts"
+import { body, Fetch, type Fetcher, OpenAI, openaiLayer } from "./openai.ts"
 import { type Event, type Head, type Reply, type Request, WireError } from "./request.ts"
 
 const KEY = "sk-secret-key-0123456789"
@@ -59,7 +59,7 @@ const vendor = (answer: () => Response | Promise<Response>) => {
 const send = (asked: Request, fetcher: Fetcher) =>
   Effect.runPromise(
     OpenAI.use((wire) => Stream.runCollect(wire.send(asked))).pipe(
-      Effect.provide(OpenAI.layer.pipe(Layer.provide(gateway))),
+      Effect.provide(openaiLayer.pipe(Layer.provide(gateway))),
       Effect.provideService(Fetch, fetcher)
     )
   )
@@ -67,7 +67,7 @@ const send = (asked: Request, fetcher: Fetcher) =>
 const fails = (asked: Request, fetcher: Fetcher) =>
   Effect.runPromise(
     Effect.flip(OpenAI.use((wire) => Stream.runCollect(wire.send(asked)))).pipe(
-      Effect.provide(OpenAI.layer.pipe(Layer.provide(gateway))),
+      Effect.provide(openaiLayer.pipe(Layer.provide(gateway))),
       Effect.provideService(Fetch, fetcher)
     )
   )
@@ -410,7 +410,7 @@ test("an interrupt of the reader ends the HTTP request", async () => {
   }
   await Effect.runPromise(
     OpenAI.use((wire) => Stream.runCollect(wire.send(request())).pipe(Effect.timeoutOption("50 millis"))).pipe(
-      Effect.provide(OpenAI.layer.pipe(Layer.provide(gateway))),
+      Effect.provide(openaiLayer.pipe(Layer.provide(gateway))),
       Effect.provideService(Fetch, never)
     )
   )

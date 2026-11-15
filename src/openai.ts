@@ -51,7 +51,7 @@
 
 import { Context, Effect, Layer, Redacted, Schema, Stream } from "effect"
 import { Gateway } from "./gateway.ts"
-import { type Call, type Event, type Reply, type Request, type Stop, type Usage, type Wire, WireError, type WireErrorKind } from "./request.ts"
+import { type Call, type Event, type Reply, type Request, type Stop, type Usage, VendorWire, WireError, type WireErrorKind } from "./request.ts"
 
 // How the wire reaches the network. A test replaces it.
 export type Fetcher = (url: string, init: RequestInit) => Promise<Response>
@@ -425,48 +425,50 @@ async function* read(stream: ReadableStream<Uint8Array>, asked: Request, request
 // The service
 // -----------
 
-export class OpenAI extends Context.Service<OpenAI, Wire>()("everchat/openai/OpenAI") {
-  static readonly layer = Layer.effect(
-    OpenAI,
-    Effect.gen(function*() {
-      const gateway = yield* Gateway
-      const fetch = yield* Fetch
+// The wire of the vendor "openai", for Ask (request.ts, `VendorWire`).
+export const OpenAI = VendorWire("openai")
+export type OpenAI = VendorWire
 
-      const send = (request: Request): Stream.Stream<Event, WireError> =>
-        Stream.unwrap(Effect.gen(function*() {
-          const json = yield* body(request)
-          // An interrupt of the reader ends the HTTP request.
-          const abort = yield* Effect.acquireRelease(
-            Effect.sync(() => new AbortController()),
-            (controller) => Effect.sync(() => controller.abort())
-          )
-          const response = yield* Effect.tryPromise({
-            try: () =>
-              fetch(gateway.address + "/v1/responses", {
-                method: "POST",
-                headers: {
-                  authorization: "Bearer " + Redacted.value(gateway.key),
-                  "content-type": "application/json",
-                  // The author's inference gateway's rule, not OpenAI's: see `Request.session`.
-                  "x-session-id": request.session
-                },
-                body: JSON.stringify(json),
-                signal: abort.signal
-              }),
-            catch: (cause) => failure("busy", `the request did not reach the inference gateway: ${cause instanceof Error ? cause.message : String(cause)}`, true)
-          })
-          const id = response.headers.get("x-request-id")
-          if (!response.ok) {
-            return yield* Effect.flatMap(Effect.promise(() => refused(response, id)), Effect.fail)
-          }
-          if (response.body === null) {
-            return yield* failure("protocol", "OpenAI answered with no stream", true, { request: id, status: response.status })
-          }
-          return Stream.fromAsyncIterable(read(response.body, request, id), (cause) =>
-            cause instanceof WireError ? cause : failure("cut", `the stream broke: ${String(cause)}`, true, { request: id }))
-        }))
+export const openaiLayer = Layer.effect(
+  OpenAI,
+  Effect.gen(function*() {
+    const gateway = yield* Gateway
+    const fetch = yield* Fetch
 
-      return OpenAI.of({ send })
-    })
-  )
-}
+    const send = (request: Request): Stream.Stream<Event, WireError> =>
+      Stream.unwrap(Effect.gen(function*() {
+        const json = yield* body(request)
+        // An interrupt of the reader ends the HTTP request.
+        const abort = yield* Effect.acquireRelease(
+          Effect.sync(() => new AbortController()),
+          (controller) => Effect.sync(() => controller.abort())
+        )
+        const response = yield* Effect.tryPromise({
+          try: () =>
+            fetch(gateway.address + "/v1/responses", {
+              method: "POST",
+              headers: {
+                authorization: "Bearer " + Redacted.value(gateway.key),
+                "content-type": "application/json",
+                // The author's inference gateway's rule, not OpenAI's: see `Request.session`.
+                "x-session-id": request.session
+              },
+              body: JSON.stringify(json),
+              signal: abort.signal
+            }),
+          catch: (cause) => failure("busy", `the request did not reach the inference gateway: ${cause instanceof Error ? cause.message : String(cause)}`, true)
+        })
+        const id = response.headers.get("x-request-id")
+        if (!response.ok) {
+          return yield* Effect.flatMap(Effect.promise(() => refused(response, id)), Effect.fail)
+        }
+        if (response.body === null) {
+          return yield* failure("protocol", "OpenAI answered with no stream", true, { request: id, status: response.status })
+        }
+        return Stream.fromAsyncIterable(read(response.body, request, id), (cause) =>
+          cause instanceof WireError ? cause : failure("cut", `the stream broke: ${String(cause)}`, true, { request: id }))
+      }))
+
+    return OpenAI.of({ send })
+  })
+)
