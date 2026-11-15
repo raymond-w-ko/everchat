@@ -12,7 +12,7 @@ plan to track upstream closely. We can pull an upstream change when it is
 useful. We do not have to.
 
 EverChat is an LLM agent harness. Its core idea: the chat itself is the memory.
-There is one chat that never ends. A cheap model compresses the log into a tree
+A chat never ends. A cheap model compresses the log into a tree
 of summaries, and the agent zooms into that tree when it needs detail.
 
 This codebase is yours: what it's for and how it's built are your call, and
@@ -27,12 +27,15 @@ that we do not use.
 
 ## Tools
 
-- [Bun](https://bun.sh) is the runtime, package manager, test runner, and
-  bundler. Do not use Node, npm, yarn, or pnpm.
+- [Bun](https://bun.sh) stays the runtime, package manager, test runner, and
+  bundler of the project. Do not use npm, yarn, pnpm, or Deno. The one place
+  for Node: the core's checks also run on Node, to show that the core needs
+  no Bun [Q14].
 - [just](https://github.com/casey/just) is the command runner. Put common
   tasks in the `justfile` as recipes.
-- [Effect](https://effect.website) (the `effect` package, version 4) is the
-  library we write the program with. See "Use Effect as much as possible"
+- [Effect](https://effect.website) (the `effect` package, version 4.1.2) is
+  the library we write the program with. It stays at 4.1.2: the Cloudflare
+  build needs no upgrade [Q38]. See "Use Effect as much as possible"
   below.
 - TypeScript (`tsc`) checks the types. Bun runs the code without a check, so
   `just check` is a separate step.
@@ -101,6 +104,12 @@ upstream. Read it before you make design changes.
 Treat it as the starting point, not as a spec we must follow. When our design
 differs from it, write down the difference and the reason.
 
+The settled design is [docs/design.md](docs/design.md): what the owner decided
+for the local use, the hosted use and the factory, each decision with its
+question number (`[Q22]`) and its reason. Read it too before you make a design
+change. Where it differs from the original concept or from the research in
+`docs/research/`, it holds. Only a decision of the owner changes it.
+
 When the upstream code and this document disagree, the code is canonical. The
 code came later, and the upstream author uses it every day. So treat the
 document as a guide to the intent, and the code as the truth about the
@@ -125,21 +134,39 @@ Our goal is to make EverChat "battle hardened" and fit our own needs:
 
 ## Where we are going
 
-This is the high-level goal. It is a direction, not a finished plan. Each step
-toward it still needs its own design.
+This is the high-level goal. `docs/design.md` holds its settled design. Each
+step toward it still needs its own design, inside that one.
+
+EverChat has three uses, in this order [Q52, Q56]:
+
+1. The local use: one person on the person's own computer, with the local
+   build (Bun, one SQLite file, the terminal, the shell).
+2. The hosted use, for work: a hosted deployment with many tenants, with the
+   server build (Bun, MariaDB, HTTP and WebSocket, many tenants in one
+   process).
+3. The factory, with its hooks. It starts after the first two.
+
+A hosted chat has no hooks, no shell and no file functions [Q5, Q52]. Only
+code keeps tenants apart, and the shell is the hole: a command runs as
+EverChat's user of the system, and can read the files and the environment of
+the other tenants. A hosted chat needs no hooks: its provider sees each call,
+and approval is the gate.
 
 ### How EverChat will be used
 
-EverChat will run in our software factory, next to the `claude` (Claude Code)
-and `codex` harnesses. Its role there is a chief of staff: one agent with a
-long memory that hands coding work to the mature harnesses, and does not do
-all of that work itself. So do not build what those harnesses already do well
-(for example, background shells) before the core is solid.
+In the local use, EverChat is a person's main assistant, a chief of staff.
+There it has no other harness to hand work to, so it uses its own subagents a
+lot.
 
-EverChat must also work alone, with no factory, for example as a person's
-main assistant. There it has no other harness to hand work to, so it uses its
-own subagents a lot. Keep both uses in mind: subagents must be cheap and
-solid, and nothing in the core may need the factory.
+In the factory, EverChat runs next to the `claude` (Claude Code) and `codex`
+harnesses, as a drop-in for them [Q56]. There it is one agent with a long
+memory that hands coding work to the mature harnesses, and does not do all of
+that work itself. So do not build what those harnesses already do well before
+the core is solid. Background shells and monitors come later, for the local
+use only, after the wake-ups [Q54].
+
+Keep all the uses in mind: subagents must be cheap and solid, and nothing in
+the core may need the factory, or one host.
 
 The factory uses all three in the same way:
 
@@ -151,15 +178,18 @@ The factory uses all three in the same way:
   at a fixed point, for example when a turn starts, when a tool runs, or when a
   turn ends. Hooks tell the factory what the harness is doing.
 
-So EverChat must:
+So the local build must:
 
 - Work fully as an interactive terminal program in a PTY, as one process. No
   separate server to start, and no browser sign-in.
 - Have hooks, like the hooks in `claude` and `codex`. We have not built them
-  yet.
+  yet. A hosted chat has none.
 
-The terminal is the primary interface. The web and iOS clients are secondary.
-Keep them working where it is cheap, but do not let them shape the design.
+In the local use, the terminal is the primary interface. The hosted use has
+no terminal: browsers connect to EverChat directly, over a WebSocket first and
+plain HTTP as the fallback, with the same events [Q18, Q19, Q25, Q40]. The
+repository's client for it is a small web page, for development only [Q27].
+The old web and iOS clients (`ref/`) do not shape the design.
 
 The factory has written down what it needs from a harness: the launch, the
 hooks, the shell and the transcript. Read that interface before you design a
@@ -182,11 +212,19 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
 - A program is JavaScript. It runs in a QuickJS engine that is compiled to
   WebAssembly, in a worker thread (the library `pi-codemode`). In there it
   has no files, no network, and no timers.
+- The engine is QuickJS on all builds, so the model's programs behave the
+  same on each [Q38]. Each program gets a new engine [Q8]. On Cloudflare,
+  programs run in a separate Worker: a program that computes inside the
+  chat's Durable Object stops the other objects.
 - Each function runs on EverChat's side. It is a row in `call` from its
   start, and the hooks will run there. So no command can pass a hook unseen.
 - The tool's description lists the functions as TypeScript declarations
   (`src/head.ts`). To add a function, add its declaration, its arguments'
   schema, and its code in `src/functions.ts`, with a test.
+- A hosted chat has no `shell` and no file functions. It gets a common set
+  of functions, and the functions of its provider over MCP; EverChat
+  validates their definitions, the arguments, and the results [Q21, Q28,
+  Q48].
 - A stop of a program is a request: the library asks the worker thread to
   end and does not wait for it. So the program's exit must not wait for
   worker threads.
@@ -205,7 +243,7 @@ How it is built (`src/sandbox.ts`, `src/functions.ts`):
 
 ### The terminal and pipe mode
 
-The program has two interfaces, and one launch has one of them
+The local build has two interfaces, and one launch has one of them
 (`src/main.ts` chooses): the terminal, when the standard input and the
 standard output are both a terminal, and pipe mode, when one of them is
 not.
@@ -227,6 +265,15 @@ standard input is a message, one after the other, and each message that
 enters the log goes to the standard output as text. It is the same chat
 with the same parts, so it is the cheap way to run the whole program: no
 pseudo-terminal and no terminal emulator.
+
+A real run needs the owner's yes first. Do not start a run of EverChat with
+a real model (a chat, in either interface, that sends requests to a real
+model), and do not deploy to the owner's Cloudflare account, until the
+owner has said yes. In the factory, that yes is an approval card [Q53]
+(`docs/design.md`, "The goal and the order"). A run with a fake vendor, as
+in the tests, needs no yes. A probe (`tools/probe.ts`) is not such a run:
+it keeps its own rule, the list of probes by vendor in the section on
+model access, the one after "OpenAI first, then Anthropic".
 
 What holds for both:
 
@@ -277,11 +324,12 @@ message, and it changes nothing.
 
 How it is built, in four parts that each know only the one before:
 
-- The store's reads (`Reads` in `src/store.ts`): the store with no launch
-  and no write, over a connection that cannot write. So the inspector is a
-  process of its own. It runs next to a launch of the chat, or with none,
-  and the chat's process has no server in it. A new query for the
-  inspector goes here, because no other module uses SQL.
+- The store's reads (`Reads` in `src/store.ts`, its SQL in `src/sqlite.ts`):
+  the store with no launch and no write, over a connection that cannot
+  write. So the inspector is a process of its own. It runs next to a launch
+  of the chat, or with none, and the chat's process has no server in it. A
+  new query for the inspector goes in `src/sqlite.ts`, because no other
+  module uses SQL.
 - The read module (`src/inspect.ts`): it turns the reads into what the
   page shows, as plain data. It knows no HTTP. Test it directly.
 - The server (`src/inspector.ts`): the page, and the read module's answers
@@ -347,6 +395,13 @@ Two rules follow:
 A computer task is the exception. It has no view and another tool, so it
 keeps its own prompt.
 
+The head is EverChat's fixed text with named fields, and an appended text
+[Q29]. The fixed text holds the rules of the memory and of code mode, so it
+cannot be replaced; the name falls back to "EverChat". The appended text
+comes, in the local use, from a file that the config file names, and in the
+factory from `AGENTS.md` in the working directory [Q50]. A change applies at
+the next load: it costs a new head and one cache write.
+
 ### Our own vendor wires
 
 We write and keep our own code for each model vendor's API (a "wire": it
@@ -372,8 +427,12 @@ take control that the memory needs:
   `@earendil-works/pi-*` on npm) for code mode. It does not depend on `pi-ai`.
 - `pi-tui` for the terminal's screen and keys (see "The terminal and pipe
   mode").
-- Other pi packages where they fit (for example `pi-mcp`). Check each one
-  against our needs before you adopt it.
+- `pi-schema` for JSON Schema that comes from outside (a provider's
+  definitions): `pi-codemode` does not check it [Q45].
+- For MCP, the official SDK, not `pi-mcp` for now: `pi-mcp` speaks only an
+  old version of the protocol [Q45].
+- Other pi packages where they fit. Check each one against our needs before
+  you adopt it.
 
 Keep what is EverChat's own idea: the memory (the log, the tree of summaries,
 and the view that each request shows the model), and the prompt-cache rule in
@@ -388,6 +447,38 @@ it. In particular, the core (the memory and the agent loop) must not depend on
 the server, the web, accounts, or billing. In the old code the chat logic
 lives in `ref/src/server.ts`, so this is a large change.
 
+The target ("Layout" describes today's flat `src/`): one repository with
+workspaces, and nine packages named `@everchat/<name>`, with one version
+[Q31, Q45]. The packages import the TypeScript sources of each other, with no
+build step, and nothing goes to npm at first. A person outside can then use
+one package at a time.
+
+| Package | Holds | May import |
+| --- | --- | --- |
+| `@everchat/core` | the memory, the turn loop, requests, the cache, the head, the tags of the seams | `effect`, `pi-codemode/declarations` |
+| `@everchat/openai` | the wire for OpenAI; Anthropic's comes next to it | `core` (its requests) |
+| `@everchat/sqlite` | the store on SQLite: an entry each for Bun, Node and a Durable Object | `core` |
+| `@everchat/mariadb` | the store on MariaDB | `core`, `@effect/sql-mysql2` |
+| `@everchat/codemode` | the engine: in a worker thread, or in a separate Worker | `core`, `pi-codemode` |
+| `@everchat/local` | the terminal, the shell, the files, the inspector, the executable | `core`, `openai`, `sqlite`, `codemode`, `pi-tui`, `@effect/platform-bun` |
+| `@everchat/server` | HTTP and WebSocket, the lease, the provider | `core`, `openai`, `mariadb`, `codemode` |
+| `@everchat/cloudflare` | the Durable Object of a chat | `core`, `openai`, `sqlite`, `codemode` |
+| `@everchat/wakeups` | reminders and routines, optional | `core` |
+
+The rules that keep the boundaries:
+
+- The core has no runtime API, with one exception: `createHash` from
+  `node:crypto`, which runs the same on Bun, Node and `workerd` [Q45]. The
+  tests of the core use `node:test`, so that they run on Bun and on Node.
+- Two checks hold the boundaries [Q45]: the imports of each package (no
+  relative import into another package, no entry that reaches a file it may
+  not), and its manifest (each import names a dependency of the package's own
+  `package.json`).
+- Three builds prove the design [Q4, Q6, Q14]: local, server, and a
+  Cloudflare smoke test (`workerd`, a Durable Object for each chat with its
+  own SQLite). Each build is one host with its own implementations of the
+  seams, so the three together show that the core holds no runtime API.
+
 ### Greenfield: no backward compatibility
 
 - The project is greenfield. No user and no stored chat depends on today's
@@ -397,8 +488,8 @@ lives in `ref/src/server.ts`, so this is a large change.
   for compatibility.
 - Invest in good code now: a clean, modular design comes before a small change.
 - What still holds: the checks must pass, each schema change is designed and
-  tested ("All state in one SQLite file"), and the factory's harness interface
-  must still be met ("How EverChat will be used").
+  tested ("All state in the chat's database"), and the factory's harness
+  interface must still be met ("How EverChat will be used").
 
 ### A rewrite, in place
 
@@ -484,29 +575,52 @@ Which route is for what:
   respects every cache mark and reports cache writes. A change to where the
   marks go needs a probe there.
 
-### All state in one SQLite file
+### All state in the chat's database
 
-One chat is one database, in one home directory that the variable
-`EVERCHAT_HOME` names. A second, independent chat is a second home. Do not put
-two chats in one database.
+All state of a chat lives in its database. One schema serves all builds
+[Q15, Q24]: in the local build, one SQLite file in one home directory that
+the variable `EVERCHAT_HOME` names; in the server build, EverChat's tables in
+the product's schema on MariaDB; on Cloudflare, the SQLite of the chat's
+Durable Object. A database can hold many chats.
 
-Almost all state lives in one SQLite database. This gives two things:
+This gives two things:
 
 - Restart: when the process is interrupted, crashes, or restarts, it reads the
   database and continues from where it was. It loses at most the work that was
   in flight (for example, a request that had not finished), and it can see
   what that work was so that it can start it again.
-- Backup and moving hosts: an install is one to three files. These are one
-  executable (`bun build --compile`), one SQLite database, and maybe one config
-  file.
+- Backup and moving hosts: a local install is one to three files. These are
+  one executable (`bun build --compile`), one SQLite database, and maybe one
+  config file. On MariaDB, the product's backups of its schema include the
+  chats [Q47].
 
 The rule: the program writes its state to the database. The person writes the
 config file by hand, and the program only reads it. Do not keep state in
 other files, in other directories, or only in memory, unless you write down
 why.
 
-Design the schema before the code that uses it. Each table has a written
-purpose, and each schema change has a migration and a test.
+The schema:
+
+- Each table has the fixed table prefix `everchat_`, in all builds, written
+  out in each statement (`everchat_msg`) [Q46]. No statement builds a name.
+  Every name that is unique in a schema gets the prefix.
+- Design the schema before the code that uses it. Each table has a written
+  purpose, and each schema change is designed and tested.
+- No migration. In the local build, EverChat makes its own schema, and for
+  now a change of the schema means a new SQLite file [Q55]. On MariaDB, the
+  schema is `.sql` files in the form of `skeema`, one for each table, always
+  the current schema; an administrator applies them with `skeema`. The
+  server build never changes the schema: at each start it compares each of
+  its tables in the database with its files, and stops with an error that
+  names a difference [Q55].
+
+### A chat is loaded and unloaded
+
+A process loads a chat to work on it, and unloads it after 6 minutes with no
+work [Q12, Q20]. An idle chat uses no memory. A load makes all again from the
+database: the chat and each agent carry a recipe, not values. So an unload
+saves nothing and loses nothing. Do not keep a value in memory that a load
+cannot make again, such as a secret; keep what makes it.
 
 ### Use Effect as much as possible
 
