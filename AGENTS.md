@@ -563,8 +563,9 @@ Today five of them exist: `@everchat/core`, `@everchat/openai`,
 `@everchat/sqlite`, `@everchat/codemode` and `@everchat/local` ("Layout").
 Each of the three cut out of `local` holds less than its row says:
 `openai` has the wire for OpenAI and none for Anthropic, `sqlite` an
-entry for Bun only (`./bun`), and `codemode` the engine in a worker thread
-only (`./thread`).
+entry for Bun only (`./bun`), and `codemode` two engines, `./thread`
+(the engine in a worker thread) and `./inline` (the engine in the
+caller's own thread), but none in a separate Worker.
 `mariadb`, `server`, `cloudflare` and `wakeups` do not exist yet.
 
 The rules that keep the boundaries:
