@@ -1,6 +1,14 @@
 // Tests of the sandbox, with real programs in the real engine and with
 // fake functions: a program's result, its functions and their call rows,
-// its limits, and a stop.
+// its limits, and a stop. The run cases of every engine (tests/cases.ts,
+// run by thread.test.ts) are not repeated here: what is here is this
+// engine's own.
+//
+// The bounds, by the suite's rule: the engine's clock starts before the
+// boot of its worker (thread.ts), which on a loaded host can take most of
+// a second, so a program that must run has a bound of BOUND, far past that
+// boot, with its stretches of compute and its waits sized to it; only a
+// program that a wall must stop runs under the small bound of 250 ms.
 
 import { expect, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
@@ -29,6 +37,8 @@ test("the QuickJS file that the sandbox loads is the one that the library was bu
 const fakes = () => {
   const seen: Array<{ name: string; args: ReadonlyArray<unknown>; caller: Caller }> = []
   const state = { stopped: 0 }
+  // When each slow function started and ended, on the host's clock.
+  const times: Array<{ name: string; start: number; end: number }> = []
   const table: Record<string, Fake> = {
     add: (args) => Effect.succeed((args[0] as number) + (args[1] as number)),
     echo: (args) => Effect.succeed(args),
@@ -36,10 +46,14 @@ const fakes = () => {
     boom: () => Effect.fail(new FunctionError({ message: "it broke" })),
     bug: () => Effect.die(new Error("a bug in EverChat")),
     slow: (args) =>
-      Effect.sleep((args[0] as number | undefined) ?? 60_000).pipe(
-        Effect.as("slept"),
-        Effect.onInterrupt(() => Effect.sync(() => void (state.stopped += 1)))
-      )
+      Effect.suspend(() => {
+        const start = performance.now()
+        return Effect.sleep((args[0] as number | undefined) ?? 60_000).pipe(
+          Effect.tap(() => Effect.sync(() => void times.push({ name: "slow", start, end: performance.now() }))),
+          Effect.as("slept"),
+          Effect.onInterrupt(() => Effect.sync(() => void (state.stopped += 1)))
+        )
+      })
   }
   const layer = Layer.succeed(
     Functions,
@@ -52,7 +66,7 @@ const fakes = () => {
       }
     })
   )
-  return { seen, state, layer }
+  return { seen, state, times, layer }
 }
 
 // One launch with the sandbox. `run` runs a program in a new call of one turn.
@@ -114,13 +128,12 @@ test("a program that throws, or that is not JavaScript, fails with its error and
     }))
 })
 
-test("a program has no way out but its functions", async () => {
+// Its globals, the way out that is not a function, are the suite's case of
+// an escape.
+test("a program that waits for nothing that can come fails at once, and a program starts with nothing from the one before it", async () => {
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
     Effect.gen(function*() {
-      const out = yield* run("return [typeof fetch, typeof require, typeof process, typeof setTimeout, typeof Bun, typeof WebAssembly]")
-      expect(JSON.parse(out.output)).toEqual(["undefined", "undefined", "undefined", "undefined", "undefined", "undefined"])
-      // A program that waits for nothing that can come fails at once.
       const dead = yield* run("await new Promise(() => {})")
       expect(dead.failed).toBe(true)
       // A program starts with nothing from the one before it.
@@ -154,13 +167,17 @@ test("a function gets the program's arguments, and each call is a row under the 
 
 test("functions run at the same time", async () => {
   const file = newFile()
-  await withSandbox(file, fakes(), (run) =>
+  const fake = fakes()
+  await withSandbox(file, fake, (run) =>
     Effect.gen(function*() {
-      const started = performance.now()
       const out = yield* run("return (await Promise.all([slow(150), slow(150), slow(150), add(1, 1)])).join(' ')")
       expect(out.output).toBe("slept slept slept 2")
-      expect(performance.now() - started).toBeLessThan(400)
     }))
+  // Each of the three slow functions started before any of them ended: the
+  // times are the fakes' own, so the boot of the worker is not in them.
+  const slow = fake.times.filter((one) => one.name === "slow")
+  expect(slow).toHaveLength(3)
+  expect(Math.max(...slow.map((one) => one.start))).toBeLessThan(Math.min(...slow.map((one) => one.end)))
   expect(functionRows(file).map((row) => row.status)).toEqual(["done", "done", "done", "done"])
 })
 
@@ -202,6 +219,11 @@ test("a function that the program did not wait for is stopped, and the result sa
 // Limits and stops
 // ----------------
 
+// The bound of a test whose programs must run: far past the boot of a
+// worker on a loaded host (most of a second), and short enough that the
+// file runs in well under 30 s. Its stops say "2 s".
+const BOUND = 2000
+
 test("the compute limit stops a program that loops, and not one that waits for a function", async () => {
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
@@ -209,18 +231,18 @@ test("the compute limit stops a program that loops, and not one that waits for a
       const started = performance.now()
       const loop = yield* run("for (;;) {}")
       expect(loop).toEqual({
-        output: "The program was stopped: it computed for 0 s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\").",
+        output: "The program was stopped: it computed for 2 s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\").",
         failed: true
       })
-      expect(performance.now() - started).toBeLessThan(3000)
+      expect(performance.now() - started).toBeLessThan(BOUND + 1000)
       // A function may take longer than the limit, and so may two in a row.
-      expect((yield* run("await slow(400); return await slow(400)")).output).toBe("slept")
+      expect((yield* run(`await slow(${BOUND + 200}); return await slow(${BOUND + 200})`)).output).toBe("slept")
       // The clock starts again after each function.
       const late = yield* run("await slow(10); for (;;) {}")
       expect(late.failed).toBe(true)
       expect(late.output).toStartWith("The program was stopped: it computed")
-    }), { compute: 250 })
-})
+    }), { compute: BOUND })
+}, 60_000)
 
 // A program that computes for about `ms` milliseconds, `times` times, and
 // calls a function after each. The sandbox has no timers, so it waits on
@@ -228,36 +250,46 @@ test("the compute limit stops a program that loops, and not one that waits for a
 const busy = (ms: number, times: number) =>
   `for (let i = 0; i < ${times}; i++) { const end = Date.now() + ${ms}; while (Date.now() < end) {} await nothing() }\nreturn "done"`
 
-const BUDGET = "The program was stopped: it used up its compute budget, 0.3 s of compute in all with no function at work. Do less in one program."
+// The stop of a budget of `seconds` (as the engine writes them).
+const budgetStop = (seconds: string) =>
+  `The program was stopped: it used up its compute budget, ${seconds} of compute in all with no function at work. Do less in one program.`
 
 test("with no budget, the compute limit starts again after each function", async () => {
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
     Effect.gen(function*() {
-      // 3 times 150 ms, more than the limit in all, less in each stretch.
-      expect(yield* run(busy(150, 3))).toEqual({ output: "done", failed: false })
-    }), { compute: 250 })
-})
+      // 5 times a quarter of the bound: more than the limit in all, less in
+      // each stretch, also in the first, which has the boot in it.
+      expect(yield* run(busy(BOUND / 4, 5))).toEqual({ output: "done", failed: false })
+    }), { compute: BOUND })
+}, 60_000)
 
 test("the compute budget stops a program that computes too long in all, and not one that waits", async () => {
   const file = newFile()
   const fake = fakes()
   await withSandbox(file, fake, (run) =>
     Effect.gen(function*() {
-      // The same program: 150 ms, a function, then the budget runs out.
-      expect(yield* run(busy(150, 3))).toEqual({ output: BUDGET, failed: true })
-      expect(fake.seen.map((one) => one.name)).toEqual(["nothing"])
-      // A wait for a function is not compute time.
-      expect(yield* run("return await slow(400)")).toEqual({ output: "slept", failed: false })
-    }), { compute: 250, budget: 250 })
-})
+      // 8 stretches of 0.3 of the budget, a function after each: twice the
+      // budget in all. With the boot at most 0.7 of it, at least one
+      // function is called; and the budget runs out in the fourth stretch at
+      // the latest, so no more than 3 are.
+      expect(yield* run(busy(0.3 * BOUND, 8))).toEqual({ output: budgetStop("2 s"), failed: true })
+      expect(fake.seen.every((one) => one.name === "nothing")).toBe(true)
+      expect(fake.seen.length).toBeGreaterThanOrEqual(1)
+      expect(fake.seen.length).toBeLessThanOrEqual(3)
+      // A wait for a function is not compute time: after a wait longer than
+      // the budget, the program still computes, and is not stopped.
+      const waits = `const got = await slow(${BOUND + 200}); const end = Date.now() + 200; while (Date.now() < end) {}\nreturn got`
+      expect(yield* run(waits)).toEqual({ output: "slept", failed: false })
+    }), { compute: BOUND, budget: BOUND })
+}, 60_000)
 
 test("a budget alone stops a loop after an await, and the limit still speaks when it is the nearer one", async () => {
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
     Effect.gen(function*() {
       const started = performance.now()
-      expect(yield* run("await nothing(); for (;;) {}")).toEqual({ output: BUDGET, failed: true })
+      expect(yield* run("await nothing(); for (;;) {}")).toEqual({ output: budgetStop("0.3 s"), failed: true })
       expect(performance.now() - started).toBeLessThan(3000)
     }), { budget: 250 })
   await withSandbox(newFile(), fakes(), (run) =>
@@ -275,11 +307,12 @@ test("the known limit (ec-x0cm): the budget does not count what a program comput
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
     Effect.gen(function*() {
-      const out = yield* run("slow(2000); const end = Date.now() + 600; while (Date.now() < end) {}\nreturn 'done'")
+      // It computes for longer than its budget while the function is at work.
+      const out = yield* run(`slow(${2 * BOUND}); const end = Date.now() + ${BOUND + 500}; while (Date.now() < end) {}\nreturn 'done'`)
       expect(out.failed).toBe(false)
       expect(out.output).toStartWith("done")
-    }), { budget: 250 })
-})
+    }), { budget: BOUND })
+}, 60_000)
 
 test("a program that takes too much memory fails, and EverChat goes on", async () => {
   const file = newFile()
