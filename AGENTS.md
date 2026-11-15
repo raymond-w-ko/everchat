@@ -535,23 +535,29 @@ The rules that keep the boundaries:
 - The tests of the core use `node:test` and `node:assert`, so that they run
   on Bun and on Node: `test`, `beforeEach` and `afterEach` from `node:test`,
   each assertion from `node:assert/strict` (`import * as assert`), and a
-  timeout as `test(name, { timeout: 60_000 }, fn)`. No helper module for the
-  tests goes in `packages/core/src/`: every file there that is not a test is
-  in the core's own type check, which has no Node types. A test of the core
+  timeout as `test(name, { timeout: 60_000 }, fn)`. A helper module for the
+  tests in `packages/core/src/` is not a test: it is in the core's own type
+  check, which has no Node types, and under the list of built-ins of the
+  core's files, so a helper that imports `node:test` or `node:assert` fails
+  both checks; a helper that needs neither passes. A test of the core
   that imports `@everchat/local` (the SQLite store, the shared test code)
   reaches `bun:sqlite`, so it runs on Bun only for now.
 - Two checks hold the boundaries [Q45], in `just check`: the type check of
   each package (the core's has no Bun and no Node types), and
   `tools/graph.ts`, for what the types do not see. Bun's parser
   (`Bun.Transpiler.scanImports`) alone decides what each file of each
-  package imports, and the script prints one line for each fault,
+  package imports. The script sees value imports only: a type-only import
+  (`import type`, `export type`, a list of only `type` names) and a `.d.ts`
+  file are the type check's. It prints one line for each fault,
   `<file>:<line>: <rule>: <specifier>`; the line is a hint. The rules:
   `manifest` (a package imports only itself and its own dependencies; a
   test may also use its
   `devDependencies`), `way out` (a relative import stays in its package),
   `entry` (an import of a workspace package names an entry of its
   `exports`), `built-in` (a `node:` or `bun:` module is on its package's
-  list: for the core's files, `node:crypto` only; which of its names the
+  list: for the core's tests, `node:assert/strict`, `node:crypto`,
+  `node:path` and `node:test`, and no `bun:` module, so that they run on
+  Node too; for the core's files, `node:crypto` only; which of its names the
   core may use, `createHash`, is held by the core's type check, for a name
   that a file uses by its type, but not for a name made at run time: see
   "Reflection" below), and
@@ -561,21 +567,23 @@ The rules that keep the boundaries:
   import that its line names: declare the dependency, import by the
   package's name and an entry, or keep the code that needs a module out of
   the core. What the two checks do not hold, each an accepted risk:
-  - Reflection (ec-lzw7). A file of the core reaches a runtime API through
-    a value of type `any`: for example `Reflect.get(crypto, "randomUUID")()`
-    on an import of the whole `node:crypto`, or `Reflect.get(globalThis,
-    "process")` with no import at all. Both pass `just check`: the type
-    check holds the names that a file uses by their types, and the script
-    holds the modules that a file imports; neither sees a name that is made
-    at run time. It is rare: only code that is written to go around the
-    types does this, and the type check refuses each other name of
-    `node:crypto` that a file uses directly (`import { randomUUID }` and
-    `crypto.randomUUID()` each fail). To recover, remove the line: no
-    record is lost. The review of a change to the core looks for `Reflect`,
-    `globalThis` and `any`. What would fix it is not an import check: a
-    lint rule that forbids those three in the core, or a run of the core
-    where the API is absent (the core's tests on Node, the Cloudflare smoke
-    test).
+  - Reflection (ec-lzw7). A file of the core reaches a runtime API by a
+    name that is made at run time: through a value of type `any`, for
+    example `Reflect.get(crypto, "randomUUID")()` on an import of the whole
+    `node:crypto`, or `Reflect.get(globalThis, "process")` with no import
+    at all; or by a computed `import(n)` (`const n = "node:fs"; await
+    import(n)`), which Bun's parser does not list. All three pass `just
+    check`: the type check holds the names that a file uses by their
+    types, and the script holds the modules that a file imports; neither
+    sees a name that is made at run time. It is rare: only code that is
+    written to go around the types does this, and the type check refuses
+    each other name of `node:crypto` that a file uses directly
+    (`import { randomUUID }` and `crypto.randomUUID()` each fail). To
+    recover, remove the line: no record is lost. The review of a change to
+    the core looks for `Reflect`, `globalThis`, `any`, and an `import()`
+    of no string. What would fix it is not an import check: a lint rule
+    that forbids those in the core, or a run of the core where the API is
+    absent (the core's tests on Node, the Cloudflare smoke test).
   - An ambient import (ec-ofuo). An `import` with no `type` inside a
     `declare module "x" { ... }` block, in a `.ts` file that is not a
     `.d.ts` file, loads nothing, but Bun's parser lists it, so the script

@@ -1,6 +1,7 @@
 // Makes packages/local/tests/golden.json from the OLD code (ref/). Run: bun tools/golden.ts
 //
-// tests/golden.test.ts runs the new memory on the same chat and compares.
+// packages/local/tests/golden.test.ts runs the new memory on the same chat
+// and compares.
 // This is the one file outside ref/ that imports from ref/. It is not part
 // of the program, of the type check, or of the tests, and it goes away when
 // ref/ does. Run it again only to change the chat that both sides get.

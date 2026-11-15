@@ -36,7 +36,7 @@ const workspace = (change: Record<string, string> = {}, links: Record<string, st
     ].join("\n"),
     "packages/core/src/b.ts": `export const b = 1\n`,
     "packages/core/src/a.test.ts": [
-      `import { test } from "bun:test"`,
+      `import { test } from "node:test"`,
       `import * as path from "node:path"`,
       `import { x } from "@everchat/local/x"`,
       `test("a", () => void [path, x])`
@@ -140,6 +140,28 @@ test("built-in: a module that is not on the package's list", () => {
   // The list names modules. Which names of `node:crypto` the core may use is
   // the core's type check's rule, so any of them, or all, pass here.
   expect(check(workspace({ [B]: `import { createHash, randomUUID } from "node:crypto"\nimport * as c from "crypto"\nexport const b = [createHash, randomUUID, c]\n` }))).toEqual([])
+})
+
+test("built-in: the core's tests have their own list, with no Bun module", () => {
+  const T = "packages/core/src/a.test.ts"
+  // Bun's own module: the core's tests also run on Node.
+  expect(check(workspace({ [T]: `import { Database } from "bun:sqlite"\nimport { test } from "node:test"\ntest("a", () => void Database)\n` }))).toEqual([
+    T + ":1: built-in, not on @everchat/core's list: bun:sqlite"
+  ])
+  // The four modules that they use pass.
+  const four = [
+    `import * as assert from "node:assert/strict"`,
+    `import { createHash } from "node:crypto"`,
+    `import * as path from "node:path"`,
+    `import { test } from "node:test"`,
+    `test("a", () => void [assert, createHash, path])`
+  ].join("\n")
+  expect(check(workspace({ [T]: four }))).toEqual([])
+  // A module is matched whole: `node:assert` is not `node:assert/strict`.
+  expect(check(workspace({ [T]: `import * as assert from "node:assert"\nimport * as fs from "fs"\nexport const a = [assert, fs]\n` }))).toEqual([
+    T + ":1: built-in, not on @everchat/core's list: node:assert",
+    T + ":2: built-in, not on @everchat/core's list: fs"
+  ])
 })
 
 test("built-in: the real import counts, whatever comments, strings, templates and regular expressions hold", () => {

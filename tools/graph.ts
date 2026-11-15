@@ -47,9 +47,13 @@ import { isBuiltin } from "node:module"
 import * as path from "node:path"
 
 // The built-in modules that each package may import, by its name: "any",
-// or a list of modules. A test of the package has its own list.
+// or a list of modules. A test of the package has its own list. A module
+// is matched whole, with its `node:` prefix (`fs` is `node:fs`): a subpath
+// is a module of its own, so `node:assert/strict` allows neither
+// `node:assert` nor the other way around. The core's tests run on Bun and
+// on Node, so their list holds no `bun:` module.
 export const BUILTINS: Record<string, { readonly src: Rule; readonly tests: Rule }> = {
-  "@everchat/core": { src: ["node:crypto"], tests: "any" },
+  "@everchat/core": { src: ["node:crypto"], tests: ["node:assert/strict", "node:crypto", "node:path", "node:test"] },
   "@everchat/local": { src: "any", tests: "any" }
 }
 type Rule = "any" | ReadonlyArray<string>
