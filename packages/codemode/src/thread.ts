@@ -20,18 +20,19 @@
 //   own worker runs, from `node_modules`.
 //
 // The limits of memory and compute are parameters too, with defaults.
+//
+// The call rows of the functions and the result are inline.ts's code, which
+// both engines use.
 
 /// <reference path="./assets.d.ts" />
 
 import { CodemodeSandbox, loadQuickJSWasm } from "@earendil-works/pi-codemode"
-import { Effect, FiberSet, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import QUICKJS from "quickjs-wasi/quickjs.wasm" with { type: "file" }
-import { FunctionError, Functions } from "@everchat/core/functions"
-import { COMPUTE, MEMORY, render, Sandbox, STOPPED } from "@everchat/core/sandbox"
+import { Functions } from "@everchat/core/functions"
+import { COMPUTE, MEMORY, Sandbox } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
-
-// This module's diagnostics name it as their source (diagnostics.ts).
-const diagnostic = Effect.annotateLogs("source", "sandbox")
+import { functionCalls, ran } from "./inline.ts"
 
 export interface Options {
   readonly memory?: number | undefined // bytes
@@ -54,9 +55,6 @@ export interface Options {
 // A time for a person: seconds, with a tenth below 10 s.
 const seconds = (ms: number): string => (ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10)) + " s"
 
-// A function's result as the database keeps it.
-const text = (value: unknown): string => (typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value) ?? "")
-
 export const threadLayer = (options: Options = {}) =>
   Layer.effect(
     Sandbox,
@@ -69,39 +67,13 @@ export const threadLayer = (options: Options = {}) =>
       const worker = options.worker
       const quickjs = options.quickjs ?? QUICKJS
 
-      const broken = (op: string) => new FunctionError({ message: "EverChat's database failed (" + op + ")." })
-
       const run = Effect.fn("Sandbox.run")(function*(program: string, at: { readonly turn: number; readonly call: number }) {
-        // The functions at work, by their call. The scope's end stops
-        // each one that is left, and waits until its row is closed.
-        const fibers = yield* FiberSet.make<unknown, FunctionError>()
-        const promise = yield* FiberSet.runtimePromise(fibers)<never>()
-        const working = new Map<number, string>()
-
-        // One call of a function: its row, its work, its row again.
-        const invoke = (name: string, given: unknown) =>
-          Effect.uninterruptibleMask((restore) =>
-            Effect.gen(function*() {
-              const args: ReadonlyArray<unknown> = Array.isArray(given) ? given : []
-              const id = yield* Effect.mapError(
-                store.startCall({ turn: at.turn, parent: at.call, fn: name, input: JSON.stringify(args) }),
-                () => broken("startCall")
-              )
-              working.set(id, name)
-              const work = restore(functions.call(name, args, { turn: at.turn, program: at.call, call: id })).pipe(
-                Effect.catchDefect((defect) => Effect.fail(new FunctionError({ message: "EverChat failed in this function: " + String(defect) }))),
-                Effect.onInterrupt(() => Effect.ignore(store.endCall(id, { status: "cut", output: STOPPED })))
-              )
-              const got = yield* Effect.result(work)
-              working.delete(id)
-              if (got._tag === "Failure") {
-                yield* Effect.mapError(store.endCall(id, { status: "failed", output: got.failure.message }), () => broken("endCall"))
-                return yield* Effect.fail(got.failure)
-              }
-              yield* Effect.mapError(store.endCall(id, { status: "done", output: text(got.success) }), () => broken("endCall"))
-              return got.success
-            })
-          )
+        // The functions at work, and one call of a function: its row, its
+        // work, its row again (inline.ts).
+        const calls = yield* functionCalls(at).pipe(
+          Effect.provideService(Functions, functions),
+          Effect.provideService(Store, store)
+        )
 
         // The compute limit and the compute budget: a clock that runs only
         // while no function is at work. The limit starts again at each arm;
@@ -139,13 +111,13 @@ export const threadLayer = (options: Options = {}) =>
           // Read and compiled once: the library keeps it by its path.
           wasm: loadQuickJSWasm(quickjs),
           ...(worker === undefined ? {} : { workerUrl: worker }),
-          globals: functions.names.map((name) => ({
+          globals: calls.names.map((name) => ({
             name,
             spread: true,
             execute: (given: unknown) => {
               disarm()
               pending += 1
-              return promise(invoke(name, given)).finally(() => {
+              return calls.call(name, given).finally(() => {
                 pending -= 1
                 if (pending === 0 && !over) arm()
               })
@@ -155,6 +127,12 @@ export const threadLayer = (options: Options = {}) =>
 
         const result = yield* Effect.promise((signal) => {
           signal.addEventListener("abort", () => controller.abort(new Error("The program was stopped.")), { once: true })
+          // The clock counts the boot of the worker too: `vm.execute` starts
+          // a new worker and loads QuickJS, and on a loaded host that can
+          // take most of the limit. The library's `execute` gives no point
+          // after the boot; its `start` does (`onStarted`), but only in its
+          // deterministic mode, which changes what a program sees. That is
+          // the draft ec-q2nbc.
           arm()
           return vm.execute(program, { signal: controller.signal })
         }).pipe(
@@ -163,10 +141,7 @@ export const threadLayer = (options: Options = {}) =>
             disarm()
           }))
         )
-        if (!result.ok && result.error.kind === "sandbox") {
-          yield* diagnostic(Effect.logError(`the sandbox failed: ${result.error.message}`))
-        }
-        return render(result, [...working.values()])
+        return yield* ran(result, calls.working)
       }, Effect.scoped)
 
       return Sandbox.of({ run })

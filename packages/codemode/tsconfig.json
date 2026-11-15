@@ -7,5 +7,5 @@
   "compilerOptions": {
     "types": ["bun"]
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }
