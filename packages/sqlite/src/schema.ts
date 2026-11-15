@@ -23,7 +23,7 @@
 
 // The mark of this schema, the file's `pragma user_version`. A file that
 // Effect's migrator made has none (0).
-export const VERSION = 4
+export const VERSION = 5
 
 export const schema: ReadonlyArray<string> = [
   // Each tenant: its UUIDv4, from outside. The local file has one.
@@ -78,6 +78,9 @@ export const schema: ReadonlyArray<string> = [
        begin select raise(abort, 'everchat_chat is deleted only with its tenant'); end`,
   `create trigger everchat_chat_no_move before update of id, tenant, uuid on everchat_chat
        begin select raise(abort, 'everchat_chat keeps its id, its tenant and its uuid'); end`,
+  // SQLite fires no trigger of `update of id` for an update of rowid, oid or _rowid_.
+  `create trigger everchat_chat_no_rowid before update on everchat_chat when new.id is not old.id
+       begin select raise(abort, 'everchat_chat keeps its id, its tenant and its uuid'); end`,
 
   // Each load of a chat. At most one live launch for each chat.
   `create table everchat_launch (
@@ -96,6 +99,8 @@ export const schema: ReadonlyArray<string> = [
        primary key (chat, n)
      ) strict`,
   `create unique index everchat_launch_live on everchat_launch (chat, live)`,
+  `create trigger everchat_launch_no_move before update of chat, n on everchat_launch
+       begin select raise(abort, 'everchat_launch keeps its chat and its n'); end`,
 
   // Each system prompt and tool list sent, stored once for each chat.
   `create table everchat_head (
@@ -129,6 +134,8 @@ export const schema: ReadonlyArray<string> = [
        foreign key (chat, launch) references everchat_launch (chat, n) on delete cascade
      ) strict`,
   `create index everchat_turn_running on everchat_turn (chat, status)`,
+  `create trigger everchat_turn_no_move before update of chat, n on everchat_turn
+       begin select raise(abort, 'everchat_turn keeps its chat and its n'); end`,
 
   // A turn's request, step by step, as sent to the vendor.
   `create table everchat_turn_item (
@@ -171,6 +178,8 @@ export const schema: ReadonlyArray<string> = [
   `create unique index everchat_call_vendor on everchat_call (chat, turn, vendor_id)`,
   `create index everchat_call_parent on everchat_call (chat, parent)`,
   `create index everchat_call_running on everchat_call (chat, status)`,
+  `create trigger everchat_call_no_move before update of chat, n on everchat_call
+       begin select raise(abort, 'everchat_call keeps its chat and its n'); end`,
 
   // The log: every message of the chat, for ever.
   `create table everchat_msg (
@@ -252,6 +261,8 @@ export const schema: ReadonlyArray<string> = [
        updated integer not null,
        primary key (chat, name)
      ) strict, without rowid`,
+  `create trigger everchat_view_no_move before update of chat, name on everchat_view
+       begin select raise(abort, 'everchat_view keeps its chat and its name'); end`,
 
   // What each request to a model used.
   `create table everchat_usage (
@@ -307,7 +318,8 @@ export const schema: ReadonlyArray<string> = [
        primary key (chat, n),
        foreign key (chat, turn) references everchat_turn (chat, n) on delete cascade,
        foreign key (chat, call) references everchat_call (chat, n) on delete cascade,
-       foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade
+       foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade,
+       foreign key (chat, msg_last) references everchat_msg (chat, i) on delete cascade
      ) strict`,
   `create trigger everchat_event_no_update before update on everchat_event
        begin select raise(abort, 'everchat_event is append only'); end`,

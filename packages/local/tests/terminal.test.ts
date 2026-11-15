@@ -562,25 +562,25 @@ test("no message is shown twice or left out, whenever its event comes: before th
     (store, publish) =>
       Effect.gen(function*() {
         const [early] = yield* store.append([{ kind: "user", text: "the first" }])
-        yield* publish({ type: "accepted", messages: [early!] })
+        yield* publish({ type: "accepted", n: 1, messages: [early!] })
       }),
     // One just after the subscription: it is in the log that the terminal
     // reads, and its event comes too.
     (store, publish) =>
       Effect.gen(function*() {
         const [late] = yield* store.append([{ kind: "asst", text: "The second." }])
-        yield* publish({ type: "message", message: late! })
+        yield* publish({ type: "message", n: 2, message: late! })
       })
   )
   await withFake(file, screen, fake, Effect.gen(function*() {
     yield* sees(screen, "The second.", "idle")
     // One with no event at all, then one with an event.
     const more = yield* (yield* Store).append([{ kind: "note", text: "a quiet note" }, { kind: "asst", text: "The fourth." }])
-    yield* fake.made.publish({ type: "message", message: more[1]! })
+    yield* fake.made.publish({ type: "message", n: 4, message: more[1]! })
     yield* sees(screen, "The fourth.")
     // The event of the quiet one comes late.
-    yield* fake.made.publish({ type: "message", message: more[0]! })
-    yield* fake.made.publish({ type: "end", turn: 1, status: "done", why: null })
+    yield* fake.made.publish({ type: "message", n: 3, message: more[0]! })
+    yield* fake.made.publish({ type: "end", n: 5, turn: 1, status: "done", why: null })
     yield* Effect.sleep("50 millis")
     expect(yield* Effect.promise(() => screen.all())).toEqual(["", "› the first", "", "The second.", "", "· a quiet note", "", "The fourth.", "", RULE, "", RULE, IDLE])
   }))
@@ -597,7 +597,7 @@ test("a turn that runs at the launch is shown at work, also when the terminal ge
   )
   await withFake(file, screen, fake, Effect.gen(function*() {
     yield* sees(screen, "› work on it", "turn 1 · works · ")
-    yield* fake.made.publish({ type: "end", turn: 1, status: "done", why: null })
+    yield* fake.made.publish({ type: "end", n: 5, turn: 1, status: "done", why: null })
     yield* idle(screen)
   }))
 })

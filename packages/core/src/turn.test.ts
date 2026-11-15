@@ -4,7 +4,7 @@
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Deferred, Effect, Layer, PubSub } from "effect"
+import { Deferred, Effect, Fiber, Layer, PubSub } from "effect"
 import * as path from "node:path"
 import { compactor, fakeWire, newFile, options, reply, rows, wireError } from "@everchat/local/testing"
 import { Ask, AskDelay } from "./ask.ts"
@@ -23,16 +23,19 @@ import { Stream } from "effect"
 type Run = (program: string) => Effect.Effect<{ output: string; failed: boolean }>
 
 // One launch: the store, the memory, the ask service over a fake wire, a
-// fake sandbox, and the turn loop.
+// fake sandbox, and the turn loop. `over` puts a wrapper over the store or
+// the memory that the turn loop gets.
 const withTurns = <A, E>(
   file: string,
   wire: ReturnType<typeof fakeWire>,
   run: Run,
   effect: Effect.Effect<A, E, Turns | Memory | Store>,
-  summaries: Parameters<typeof compactor>[0] = () => "a summary"
+  summaries: Parameters<typeof compactor>[0] = () => "a summary",
+  over: { readonly store?: Layer.Layer<Store, never, Store>; readonly memory?: Layer.Layer<Memory, never, Memory> } = {}
 ) => {
-  const store = storeLayer(file, options())
-  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
+  const real = storeLayer(file, options())
+  const store = over.store === undefined ? real : over.store.pipe(Layer.provide(real))
+  const memory = (over.memory === undefined ? Memory.layer : over.memory.pipe(Layer.provide(Memory.layer))).pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
   const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
@@ -155,9 +158,211 @@ test("a listener that subscribes before a message misses no event, and a program
     const seen: ReadonlyArray<TurnEvent> = yield* PubSub.takeAll(subscription)
     assert.deepStrictEqual(seen.map((event) => event.type), ["accepted", "start", "text", "call", "message", "message", "text", "message", "end"])
     // The program's call is known when it starts, before its messages are in the log.
-    assert.deepStrictEqual(seen[3], { type: "call", turn: 1, call: 1, program: "return 1 + 1" })
+    assert.deepStrictEqual(seen[3], { type: "call", n: 3, turn: 1, call: 1, program: "return 1 + 1" })
     assert.deepStrictEqual(seen.flatMap((event) => (event.type === "message" ? [[event.message.kind, event.message.call]] : [])), [["tool", 1], ["echo", 1], ["asst", null]])
   })))
+})
+
+// The events' rows
+// ----------------
+
+type EventRow = { n: number; type: string; turn: number | null; call: number | null; msg: number | null; msg_last: number | null }
+
+// The rows of everchat_event, in the order of their numbers.
+const events = (file: string) => rows<EventRow>(file, "select n, type, turn, call, msg, msg_last from everchat_event order by n")
+
+// What a listener got, but the pieces, as the rows that section 7 gives
+// each type: `accepted` and `message` their first and last message, `start`
+// and `end` their turn, `call` its turn and its call, and null for the rest.
+const reported = (seen: ReadonlyArray<TurnEvent>) =>
+  seen.flatMap((event): Array<EventRow> =>
+    event.type === "accepted"
+      ? [{ n: event.n, type: event.type, turn: null, call: null, msg: event.messages[0]!.i, msg_last: event.messages[event.messages.length - 1]!.i }]
+      : event.type === "message"
+      ? [{ n: event.n, type: event.type, turn: null, call: null, msg: event.message.i, msg_last: event.message.i }]
+      : event.type === "start" || event.type === "end"
+      ? [{ n: event.n, type: event.type, turn: event.turn, call: null, msg: null, msg_last: null }]
+      : event.type === "call"
+      ? [{ n: event.n, type: event.type, turn: event.turn, call: event.call, msg: null, msg_last: null }]
+      : []
+  )
+
+// The numbers run from 1 with no gap, and the chat's `seq` is the last one.
+const counted = (file: string) => {
+  const all = events(file)
+  assert.deepStrictEqual(all.map((row) => row.n), Array.from({ length: all.length }, (_, k) => k + 1))
+  assert.deepStrictEqual(rows(file, "select seq from everchat_chat"), [{ seq: all.length }])
+}
+
+// A store whose `messagesAfter` runs `late.say` once, when it finds no
+// message and `when` holds, then `late.then`: so a message comes after a
+// turn's last steer has found none, and it waits for the next turn.
+const lateStore = (late: { say: Effect.Effect<unknown, unknown> | null; then?: Effect.Effect<void, unknown> }, when: () => boolean) =>
+  Layer.effect(
+    Store,
+    Effect.gen(function*() {
+      const real = yield* Store
+      return Store.of({
+        ...real,
+        messagesAfter: (after, kinds) =>
+          Effect.gen(function*() {
+            const found = yield* real.messagesAfter(after, kinds)
+            const say = late.say
+            if (say !== null && found.length === 0 && when()) {
+              late.say = null
+              yield* Effect.orDie(say)
+              if (late.then !== undefined) {
+                yield* Effect.orDie(late.then)
+              }
+            }
+            return found
+          })
+      })
+    })
+  )
+
+test("each event but a piece has its row and its number, 1, 2, 3 with no gap: the five types, the next turn of a waiting message, and a restart", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "return 1 + 1") : says(asked, "Reply " + n + ".")))
+  const late: { say: Effect.Effect<unknown, unknown> | null } = { say: null }
+  const seen = await withTurns(
+    file,
+    wire,
+    () => Effect.succeed({ output: "2", failed: false }),
+    Effect.scoped(Effect.gen(function*() {
+      const turnsService = yield* Turns
+      const subscription = yield* turnsService.subscribe
+      late.say = turnsService.say("and now?")
+      yield* turnsService.say("add one and one")
+      yield* eventually(() => wire.sent.length === 3)
+      yield* turnsService.idle
+      return yield* PubSub.takeAll(subscription)
+    })),
+    undefined,
+    { store: lateStore(late, () => wire.sent.length === 2) }
+  )
+  assert.equal(late.say, null)
+  // The late message started turn 2, in the transaction of its `start`.
+  assert.deepStrictEqual(turns(file).map((turn) => [turn.id, turn.first_msg]), [[1, 0], [2, 4]])
+  assert.deepStrictEqual(seen.filter((event) => event.type !== "text").map((event) => event.type), ["accepted", "start", "call", "message", "message", "message", "accepted", "end", "start", "message", "end"])
+  // Each published event's `n` is its row's, and each row holds what its type reports.
+  assert.deepStrictEqual(events(file), reported(seen))
+  assert.equal(events(file).length, 11)
+  counted(file)
+
+  // A restart: the cut program's `tool` and `echo` get their `message` rows,
+  // and the turn that continues its `start`, after the last number.
+  const cut = newFile()
+  let started = false
+  await withTurns(cut, fakeWire((asked) => runs(asked, "call_1", "slow()")), () => Effect.andThen(Effect.sync(() => (started = true)), Effect.never), Effect.gen(function*() {
+    yield* (yield* Turns).say("do the slow thing")
+    yield* eventually(() => started)
+  }))
+  assert.deepStrictEqual(events(cut).map((row) => [row.n, row.type]), [[1, "accepted"], [2, "start"], [3, "call"]])
+  const again = await withTurns(cut, fakeWire((asked) => says(asked, "It was cut.")), noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    yield* turnsService.idle
+    return yield* PubSub.takeAll(subscription)
+  })))
+  assert.deepStrictEqual(events(cut), [
+    { n: 1, type: "accepted", turn: null, call: null, msg: 0, msg_last: 0 },
+    { n: 2, type: "start", turn: 1, call: null, msg: null, msg_last: null },
+    { n: 3, type: "call", turn: 1, call: 1, msg: null, msg_last: null },
+    { n: 4, type: "message", turn: null, call: null, msg: 1, msg_last: 1 },
+    { n: 5, type: "message", turn: null, call: null, msg: 2, msg_last: 2 },
+    { n: 6, type: "start", turn: 1, call: null, msg: null, msg_last: null },
+    { n: 7, type: "message", turn: null, call: null, msg: 3, msg_last: 3 },
+    { n: 8, type: "end", turn: 1, call: null, msg: null, msg_last: null }
+  ])
+  counted(cut)
+  // The restart's events came before the listener could subscribe; what it got carries the last rows' numbers.
+  assert.deepStrictEqual(reported(again), events(cut).slice(6))
+})
+
+test("a listener gets the events in the order of their numbers: a message of the person that comes while a step writes its messages", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => says(asked, "Reply " + n + "."))
+  // The window: the step's `asst` page is committed, and its event is not
+  // yet published. The memory's `pushWith` lets the person's message run
+  // then, and waits until it is in the log or 100 ms have passed. With no
+  // lock over the write and the publish, it is logged and published inside
+  // the window, every time; with the lock, it waits for the step's publish.
+  const window: { say: Effect.Effect<unknown, unknown> | null } = { say: null }
+  let opened = false
+  const memory = Layer.effect(
+    Memory,
+    Effect.gen(function*() {
+      const real = yield* Memory
+      return Memory.of({
+        ...real,
+        pushWith: (said, also) =>
+          Effect.gen(function*() {
+            const out = yield* real.pushWith(said, also)
+            const say = window.say
+            if (say !== null && said[0]?.kind === "asst") {
+              window.say = null
+              opened = true
+              const fiber = yield* Effect.forkDetach(say)
+              yield* Effect.race(Fiber.await(fiber), Effect.sleep("100 millis"))
+            }
+            return out
+          })
+      })
+    })
+  )
+  const seen = await withTurns(
+    file,
+    wire,
+    noPrograms,
+    Effect.scoped(Effect.gen(function*() {
+      const turnsService = yield* Turns
+      const subscription = yield* turnsService.subscribe
+      window.say = turnsService.say("one more thing")
+      yield* turnsService.say("hello")
+      yield* eventually(() => opened && messages(file).some((message) => message.text === "one more thing"))
+      yield* turnsService.idle
+      return yield* PubSub.takeAll(subscription)
+    })),
+    undefined,
+    { memory }
+  )
+  assert.ok(opened)
+  const numbers = reported(seen).map((row) => row.n)
+  assert.deepStrictEqual(numbers, Array.from({ length: numbers.length }, (_, k) => k + 1))
+  assert.equal(seen.filter((event) => event.type === "accepted").length, 2)
+  assert.deepStrictEqual(events(file), reported(seen))
+  counted(file)
+})
+
+test("the draft: a message sent when no turn runs clears it, and the turn that a waiting message starts leaves it as it was", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => says(asked, "Reply " + n + "."))
+  const drafts: Array<string | null> = []
+  const late: { say: Effect.Effect<unknown, unknown> | null; then?: Effect.Effect<void, unknown> } = { say: null }
+  await withTurns(
+    file,
+    wire,
+    noPrograms,
+    Effect.gen(function*() {
+      const store = yield* Store
+      const turnsService = yield* Turns
+      yield* store.setDraft("half typed")
+      late.say = Effect.andThen(Effect.flatMap(store.chat, (chat) => Effect.sync(() => drafts.push(chat.draft))), turnsService.say("and then?"))
+      // What the person types after the waiting message, before the next turn starts.
+      late.then = store.setDraft("typed after it")
+      yield* turnsService.say("hello")
+      yield* eventually(() => wire.sent.length === 2)
+      yield* turnsService.idle
+    }),
+    undefined,
+    { store: lateStore(late, () => wire.sent.length === 1) }
+  )
+  assert.equal(late.say, null)
+  // The message sent with no turn running cleared it, in its transaction.
+  assert.deepStrictEqual(drafts, [null])
+  assert.deepStrictEqual(turns(file).map((turn) => [turn.id, turn.first_msg]), [[1, 0], [2, 2]])
+  assert.deepStrictEqual(rows(file, "select draft from everchat_chat"), [{ draft: "typed after it" }])
 })
 
 test("a tool that is not the one tool gives the model an error, and no program runs", async () => {
@@ -297,6 +502,16 @@ test("the person stops a turn: the program that runs is closed as cut, and the t
     assert.deepStrictEqual(turns(file), [{ id: 1, status: "stopped", why: "Stopped.", first_msg: 0 }])
   }))
   assert.deepStrictEqual(rows(file, "select status, output from everchat_call"), [{ status: "cut", output: cutText(STOPPED, []) }])
+  // The note's `message`, then the `end`, in the transaction of the turn's end.
+  assert.deepStrictEqual(events(file).map((row) => [row.n, row.type, row.turn, row.call, row.msg]), [
+    [1, "accepted", null, null, 0],
+    [2, "start", 1, null, null],
+    [3, "call", 1, 1, null],
+    [4, "message", null, null, 1],
+    [5, "message", null, null, 2],
+    [6, "message", null, null, 3],
+    [7, "end", 1, null, null]
+  ])
   assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [
     ["user", "run for ever"],
     ["tool", "forever()"],

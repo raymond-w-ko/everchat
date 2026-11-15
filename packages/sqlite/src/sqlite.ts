@@ -21,8 +21,9 @@
 // The program makes each row's number, in the transaction of its write: one
 // more than the chat's highest `n` in that table, from 1 (`next`). A table's
 // own coordinates go on from 0, as before: a message's `i`, a turn's item's
-// `n` in its turn, a message's image's `n` in its message. The database makes no number but the ids of a chat,
-// a pick and a kind. The store gives a row's `n` as its `id` (`seq` for a
+// `n` in its turn, a message's image's `n` in its message. An event's `n`
+// is the chat's counter `seq` plus 1 (`addEvent`). The database makes no
+// number but the ids of a chat, a pick and a kind. The store gives a row's `n` as its `id` (`seq` for a
 // diagnostic), and a chat's UUID, 16 bytes in the file, as text.
 
 import { Clock, Context, Effect, Exit, Layer, Option, Schema } from "effect"
@@ -40,6 +41,7 @@ import {
   type Message,
   type NewCall,
   type NewDiagnostic,
+  type NewEvent,
   type NewImage,
   type NewMessage,
   type NewNode,
@@ -896,6 +898,37 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     yield* sql`update everchat_call set pgid = ${pgid} where chat = ${chat} and n = ${id} and status = 'running'`
   }, failed("setCallPgid"))
 
+  // Events
+  // ------
+
+  // The rows of the chat that each type of event reports; null for the rest.
+  const reported = (event: NewEvent) => {
+    switch (event.type) {
+      case "accepted":
+      case "message":
+        return { turn: null, call: null, msg: event.msg, msg_last: event.msgLast }
+      case "start":
+      case "end":
+        return { turn: event.turn, call: null, msg: null, msg_last: null }
+      case "call":
+        return { turn: event.turn, call: event.call, msg: null, msg_last: null }
+    }
+  }
+
+  // The chat's next event number is its `seq` plus 1; the row and the new
+  // `seq` are written together, in the caller's transaction when there is
+  // one (docs/schema.html, sections 4 and 7).
+  const addEvent = Effect.fn("Store.addEvent")(function*(event: NewEvent) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const row = yield* only(yield* sql<{ seq: number }>`select seq from everchat_chat where tenant = ${tenant} and id = ${chat}`)
+      const n = row.seq + 1
+      const created = yield* now
+      yield* sql`insert into everchat_event ${sql.insert({ chat, n, type: event.type, ...reported(event), created })}`
+      yield* sql`update everchat_chat set seq = ${n}, updated = ${created} where tenant = ${tenant} and id = ${chat}`
+      return n
+    }))
+  }, failed("addEvent"))
+
   // Diagnostics
   // -----------
 
@@ -953,6 +986,7 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     startCall,
     endCall,
     setCallPgid,
+    addEvent,
     addDiagnostics,
     dropDiagnostics
   })

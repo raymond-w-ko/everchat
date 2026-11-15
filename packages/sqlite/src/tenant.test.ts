@@ -1,15 +1,17 @@
 // The test of two tenants (docs/schema.html, section 1, "The tenant
 // boundary"): on the code's own file, no member of the store reaches a row
 // of another chat. One database holds tenant A and tenant B, a chat of
-// B, two chats of A (the chat under test, and a second one), and rows of
-// each chat in every table of a chat; B has more rows than A in each, so B
-// has row numbers that A does not have. A launch of B and a launch of A's
+// B, two chats of A (the chat under test, and a second one), a second chat
+// of B made after the chat under test, and rows of each chat in every
+// table of a chat, its events too, written through the store; B has more
+// rows than A in each, so B has row numbers that A does not have. A launch of B and a launch of A's
 // second chat are live while every case runs, on the host of A's launch,
 // with the number that A's launch takes.
 //
 // "Another chat" is B's chat and A's second chat alike: the test catches a
-// statement that has no condition on its chat (B shows it), and one that
-// reaches every chat of its tenant (A's second chat shows it).
+// statement that has no condition on its chat (B shows it), one that
+// reaches every chat of its tenant (A's second chat shows it), and one that
+// takes the chats from A's on (`chat >=`: B's second chat shows it).
 //
 // - Reads: each member of `Reading`, on A's store and on A's reads, gives
 //   the same answer with B's rows there as on a file that has only A's.
@@ -33,7 +35,8 @@
 //
 // The times come from a test clock, so that the two files give the same
 // answers to the millisecond. Each case runs on its own copy of a file that
-// is built once.
+// is built once. The building never fails the file's `beforeAll`: each
+// write's failure is kept, and a case of the file names it.
 
 import { Database as Sqlite } from "bun:sqlite"
 import { beforeAll, expect, test } from "bun:test"
@@ -87,6 +90,17 @@ const A2: Side = {
   launch: { ...options().launch, host: "host-c", cwd: "/c", runTag: "tag-c" },
   k: 4,
   launches: 3
+}
+
+// The second chat of tenant B: made after the chat under test, so that A's
+// chat is not the last of the file.
+const B2: Side = {
+  tenant: TENANT_B,
+  tag: "d",
+  pick: { vendor: "anthropic", model: "model-d", effort: "low", speed: "slow" },
+  launch: { ...options().launch, host: "host-d", cwd: "/d", runTag: "tag-d" },
+  k: 2,
+  launches: 1
 }
 
 // The processes of the live launches of B and of A's second chat, which run
@@ -166,9 +180,9 @@ const chatId = (file: string, uuid: string) => {
   }
 }
 
-// Every row of the file that is not of A's chat (the UUID `a`): B's rows
-// and those of A's second chat in each table of a chat, their rows of
-// `everchat_chat`, and B's tenant.
+// Every row of the file that is not of A's chat (the UUID `a`): the rows of
+// B's chats and of A's second chat in each table of a chat, their rows of
+// `everchat_chat` (their `seq` too), and B's tenant.
 const notA = (file: string, a: string) => {
   const id = chatId(file, a)
   const db = new Sqlite(file, { readonly: true })
@@ -227,84 +241,117 @@ const answer = (exit: Exit.Exit<unknown, unknown>, a: string) =>
 // JSON of an answer: bytes as a list of numbers.
 const json = (_key: string, value: unknown) => (value instanceof Uint8Array ? Array.from(value) : value)
 
+// What failed in the building of the files: each write of `fill` that
+// failed, and each step of `build`. A case of the file checks that nothing
+// did, so that a statement that breaks the building fails a named case.
+const failures: Array<string> = []
+
+// `effect`'s value; on a failure, `otherwise`, and the failure is kept.
+const tried = <A>(what: string, effect: Effect.Effect<A, unknown>, otherwise: A) =>
+  Effect.map(Effect.exit(effect), (exit) => {
+    if (Exit.isSuccess(exit)) return exit.value
+    failures.push(`${what}: ${String(Cause.squash(exit.cause))}`)
+    return otherwise
+  })
+
 // The rows of one side. Each turn: an image, a turn with two items, a
 // program and a function it calls, three messages (the first with images),
-// two rows of usage and a diagnostic. Then the tree, the views and the
-// chat's row. B's turns and calls stay running.
+// two rows of usage and a diagnostic, and three events, each in the
+// transaction of what it reports: the turn's start, its program's call,
+// and its messages accepted. Then the tree, the views and the chat's row.
+// The turns and calls of B and of A's second chat stay running. Each write
+// is tried: a failure gives the number that the write would have given.
+const EVENTS_PER_TURN = 3
 const fill = (store: StoreService, side: Side) =>
   Effect.gen(function*() {
     const { k, pick, tag } = side
+    const at = (what: string, t: number) => `${tag} ${what} ${t}`
     for (let t = 1; t <= k; t++) {
-      const image = yield* store.putImage({
+      const image = yield* tried(at("putImage", t), store.putImage({
         name: `${tag} image ${t}`,
         type: "image/png",
         width: t,
         height: t,
         source: t % 2 === 1 ? "person" : "tool",
         bytes: new Uint8Array([tag.charCodeAt(0), t])
-      })
-      const turn = yield* store.startTurn({ pick, head: `{"${tag}":${t}}`, firstMsg: yield* store.count })
-      yield* store.addTurnItem(turn.id, "user", `${tag} item ${t}.0`)
-      yield* store.addTurnItem(turn.id, "turn", `${tag} item ${t}.1`)
-      const program = yield* store.startCall({ turn: turn.id, vendorId: `${tag} v${t}`, fn: "run", input: `${tag} program ${t}` })
-      const child = yield* store.startCall({ turn: turn.id, parent: program, fn: "read", input: `${tag} read ${t}` })
-      yield* store.append([
-        { kind: "user", text: `${tag} says ${t}`, turn: turn.id, images: t === 1 ? [image] : [image - 1, image] },
-        { kind: "tool", text: `${tag} runs ${t}`, turn: turn.id, call: program, line: `${tag} line ${t}` },
-        { kind: "echo", text: `${tag} reads ${t}`, turn: turn.id, call: child }
-      ])
-      yield* store.addUsage({ served: "turn", turn: turn.id, pick, request: `${tag} request ${t}`, input: 10 * t, cacheRead: t, cacheWrite: t, output: t })
-      yield* store.addUsage({ served: "compaction", node: [0, t - 1], pick, input: t, cacheRead: 0, cacheWrite: 0, output: t, expected: t })
-      yield* store.addDiagnostics([{ level: "info", source: tag, text: `${tag} diagnostic ${t}`, created: t }])
+      }), t)
+      const firstMsg = yield* tried(at("count", t), store.count, 3 * (t - 1))
+      const turn = yield* tried(
+        at("startTurn", t),
+        store.transaction(Effect.gen(function*() {
+          const turn = yield* store.startTurn({ pick, head: `{"${tag}":${t}}`, firstMsg })
+          yield* store.addEvent({ type: "start", turn: turn.id })
+          return turn.id
+        })),
+        t
+      )
+      yield* tried(at("addTurnItem", t), store.addTurnItem(turn, "user", `${tag} item ${t}.0`), 0)
+      yield* tried(at("addTurnItem", t), store.addTurnItem(turn, "turn", `${tag} item ${t}.1`), 1)
+      const program = yield* tried(
+        at("startCall", t),
+        store.transaction(Effect.gen(function*() {
+          const call = yield* store.startCall({ turn, vendorId: `${tag} v${t}`, fn: "run", input: `${tag} program ${t}` })
+          yield* store.addEvent({ type: "call", turn, call })
+          return call
+        })),
+        2 * t - 1
+      )
+      const child = yield* tried(at("startCall", t), store.startCall({ turn, parent: program, fn: "read", input: `${tag} read ${t}` }), 2 * t)
+      yield* tried(
+        at("append", t),
+        store.transaction(Effect.gen(function*() {
+          const said = yield* store.append([
+            { kind: "user", text: `${tag} says ${t}`, turn, images: t === 1 ? [image] : [image - 1, image] },
+            { kind: "tool", text: `${tag} runs ${t}`, turn, call: program, line: `${tag} line ${t}` },
+            { kind: "echo", text: `${tag} reads ${t}`, turn, call: child }
+          ])
+          yield* store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[said.length - 1]!.i })
+        })),
+        undefined
+      )
+      yield* tried(
+        at("addUsage", t),
+        store.addUsage({ served: "turn", turn, pick, request: `${tag} request ${t}`, input: 10 * t, cacheRead: t, cacheWrite: t, output: t }),
+        undefined
+      )
+      yield* tried(
+        at("addUsage", t),
+        store.addUsage({ served: "compaction", node: [0, t - 1], pick, input: t, cacheRead: 0, cacheWrite: 0, output: t, expected: t }),
+        undefined
+      )
+      yield* tried(at("addDiagnostics", t), store.addDiagnostics([{ level: "info", source: tag, text: `${tag} diagnostic ${t}`, created: t }]), undefined)
     }
-    yield* store.putNodes([
+    yield* tried(`${tag} putNodes`, store.putNodes([
       ...Array.from({ length: 2 * k }, (_, i) => ({ l: 0, i, text: `${tag} node 0.${i}` })),
       ...Array.from({ length: k }, (_, i) => ({ l: 1, i, text: `${tag} node 1.${i}` }))
-    ])
-    yield* store.putView({ name: "chat", parts: [[1, 0], [0, 2]], batch: false })
-    if (k > A.k) yield* store.putView({ name: "seen", parts: [[0, 0]], batch: true })
-    yield* store.setGoal(`${tag} goal`)
-    yield* store.setDraft(`${tag} draft`)
-    yield* store.setTaken(2)
+    ]), [])
+    yield* tried(`${tag} putView`, store.putView({ name: "chat", parts: [[1, 0], [0, 2]], batch: false }), undefined)
+    if (k > A.k) yield* tried(`${tag} putView`, store.putView({ name: "seen", parts: [[0, 0]], batch: true }), undefined)
+    yield* tried(`${tag} setGoal`, store.setGoal(`${tag} goal`), undefined)
+    yield* tried(`${tag} setDraft`, store.setDraft(`${tag} draft`), undefined)
+    yield* tried(`${tag} setTaken`, store.setTaken(2), undefined)
   })
 
-// The events of one side, straight to the file (the store writes none yet):
-// one for each turn, with its program and its messages.
-const events = (file: string, side: Side, uuid: string) => {
-  const chat = chatId(file, uuid)
-  const db = new Sqlite(file)
-  try {
-    db.run("pragma foreign_keys = on")
-    for (let t = 1; t <= side.k; t++) {
-      db.run(
-        "insert into everchat_event (chat, n, type, turn, call, msg, msg_last, created) values (?, ?, 'message', ?, ?, ?, ?, 0)",
-        [chat, t, t, 2 * t - 1, 3 * (t - 1), 3 * (t - 1) + 2]
-      )
-    }
-  } finally {
-    db.close()
-  }
-}
-
 // Makes the side's chat in `file`, fills it in its first launch, and takes
-// its other launches. Gives the chat's UUID.
+// its other launches. Gives the chat's UUID. A launch that fails is kept in
+// `failures`.
 const build = async (file: string, side: Side) => {
   const chat = await run(file, Chats.use((chats) => chats.make(side.tenant, side.pick)))
   for (let n = 1; n <= side.launches; n++) {
-    await run(file, Effect.gen(function*() {
+    const exit = await run(file, Effect.exit(Effect.gen(function*() {
       const store = yield* (yield* Chats).store(side.tenant, chat, side.launch)
       if (n === 1) yield* fill(store, side)
-    }))
+    })))
+    if (Exit.isFailure(exit)) failures.push(`${side.tag} launch ${n}: ${String(Cause.squash(exit.cause))}`)
   }
-  events(file, side, chat)
   return chat
 }
 
 // The two files: `alone` has only A's rows; `both` has B's, made first (so
 // B's chat, B's picks and B's rows come first in each key), then those of
-// A's second chat, and then A's.
+// A's second chat, then A's, and then those of B's second chat.
 let alone: { readonly file: string; readonly a: string }
-let both: { readonly file: string; readonly a: string; readonly a2: string; readonly b: string }
+let both: { readonly file: string; readonly a: string; readonly a2: string; readonly b: string; readonly b2: string }
 
 // The launches of B and of A's second chat that stay live: the last of
 // each, open again, straight in the file, on the host of A's launch and in
@@ -334,15 +381,21 @@ const live = (file: string) =>
     ).map((row) => ({ chat, ...row }))
   )
 
+// It does not throw: what fails is kept in `failures`, for a named case.
 beforeAll(async () => {
-  const one = newFile()
-  alone = { file: one, a: await build(one, A) }
-  const two = newFile()
-  const b = await build(two, B)
-  const a2 = await build(two, A2)
-  both = { file: two, b, a2, a: await build(two, A) }
-  liven(two, b, LIVE_PID, B_LIVE)
-  liven(two, a2, LIVE_PID_A2, A2_LIVE)
+  try {
+    const one = newFile()
+    alone = { file: one, a: await build(one, A) }
+    const two = newFile()
+    const b = await build(two, B)
+    const a2 = await build(two, A2)
+    const a = await build(two, A)
+    both = { file: two, b, a2, a, b2: await build(two, B2) }
+    liven(two, b, LIVE_PID, B_LIVE)
+    liven(two, a2, LIVE_PID_A2, A2_LIVE)
+  } catch (error) {
+    failures.push(`the building: ${String(error)}`)
+  }
 })
 
 // The calls of each member, run on the store (or the reads) of a chat.
@@ -408,10 +461,11 @@ for (const member of Object.keys(READS) as Array<keyof Reading>) {
     const one = await answers(copy(alone.file), alone.a, member)
     const two = await answers(copy(both.file), both.a, member)
     expect(two).toEqual(one)
-    // None of the text of B or of A's second chat, nor their UUIDs, is in it.
+    // None of the text of the other chats, nor their UUIDs, is in it.
     expect(two).not.toContain(both.b)
     expect(two).not.toContain(both.a2)
-    expect(two).not.toMatch(/"[bc] [a-z]|\{\\"[bc]\\"|model-[bc]|host-[bc]|tag-[bc]|"\/[bc]"|[bc] goal|[bc] draft/)
+    expect(two).not.toContain(both.b2)
+    expect(two).not.toMatch(/"[bcd] [a-z]|\{\\"[bcd]\\"|model-[bcd]|host-[bcd]|tag-[bcd]|"\/[bcd]"|[bcd] goal|[bcd] draft/)
   })
 }
 
@@ -475,6 +529,19 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
   "append with a turn": { member: "append", want: "fails", run: (s, b) => s.append([{ kind: "user", text: "by A", turn: b.turn }]) },
   "append with a call": { member: "append", want: "fails", run: (s, b) => s.append([{ kind: "echo", text: "by A", call: b.call }]) },
   "append with an image": { member: "append", want: "fails", run: (s, b) => s.append([{ kind: "user", text: "by A", images: [b.image] }]) },
+  "addEvent with a turn": { member: "addEvent", want: "fails", run: (s, b) => s.addEvent({ type: "start", turn: b.turn }) },
+  "addEvent with a call": { member: "addEvent", want: "fails", run: (s, b) => s.addEvent({ type: "call", turn: 1, call: b.call }) },
+  "addEvent with a message": { member: "addEvent", want: "fails", run: (s, b) => s.addEvent({ type: "message", msg: b.msg, msgLast: b.msg }) },
+  "addEvent of accepted with A's first message and a last message": {
+    member: "addEvent",
+    want: "fails",
+    run: (s, b) => s.addEvent({ type: "accepted", msg: 0, msgLast: b.msg })
+  },
+  "addEvent of a message with A's first message and a last message": {
+    member: "addEvent",
+    want: "fails",
+    run: (s, b) => s.addEvent({ type: "message", msg: 0, msgLast: b.msg })
+  },
   "addUsage with a turn": {
     member: "addUsage",
     want: "fails",
@@ -490,16 +557,21 @@ const OTHERS = { "B": () => both.b, "A's second chat": () => both.a2 } as const
 
 for (const [other, uuid] of Object.entries(OTHERS)) {
   for (const [name, { run: call, want }] of Object.entries(ROWS)) {
-    test(`a row number of ${other}: ${name} on A's store ${want === "fails" ? "fails" : "finds nothing"}, and the other chats' rows stay as they were`, async () => {
+    test(`a row number of ${other}: ${name} on A's store ${want === "fails" ? "fails and writes nothing" : "finds nothing"}, and the other chats' rows stay as they were`, async () => {
       const file = copy(both.file)
       const b = onlyOf(file, uuid())
       const before = notA(file, both.a)
+      // A's rows but its launches, which the opening of its store changes.
+      const mine = () => ({ ...ofA(file, both.a), everchat_launch: null })
+      const own = mine()
       const exit = await run(file, Effect.gen(function*() {
         const store = yield* (yield* Chats).store(TENANT_A, both.a, A.launch)
         return yield* Effect.exit(call(store, b))
       }))
-      if (want === "fails") expect(Exit.isFailure(exit)).toBe(true)
-      else expect(Exit.isSuccess(exit) && nothing(exit.value)).toBe(true)
+      if (want === "fails") {
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(mine()).toEqual(own)
+      } else expect(Exit.isSuccess(exit) && nothing(exit.value)).toBe(true)
       expect(notA(file, both.a)).toEqual(before)
     })
   }
@@ -556,6 +628,14 @@ const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
   ],
   endCall: (s) => [s.endCall(1, { status: "done", output: "by A" }), s.endCall(2, { status: "cut", output: "by A", shown: 1 })],
   setCallPgid: (s) => [s.setCallPgid(3, 4242), s.setCallPgid(4, 4343)],
+  addEvent: (s) => [
+    s.addEvent({ type: "start", turn: 1 }),
+    s.addEvent({ type: "call", turn: 2, call: 3 }),
+    s.addEvent({ type: "message", msg: 4, msgLast: 4 }),
+    s.addEvent({ type: "accepted", msg: 0, msgLast: 5 }),
+    s.transaction(Effect.andThen(s.endTurn(2, "done"), s.addEvent({ type: "end", turn: 2 }))),
+    Effect.flip(s.transaction(Effect.andThen(s.addEvent({ type: "end", turn: 1 }), Effect.fail("no"))))
+  ],
   addDiagnostics: (s) => [s.addDiagnostics([{ level: "warn", source: "a", text: "a new line", created: 1 }, { level: "error", source: "a", text: "another", created: 2 }])],
   dropDiagnostics: (s) => [s.dropDiagnostics(Number.MAX_SAFE_INTEGER)]
 }
@@ -671,19 +751,45 @@ test("no member is left out: each member of the store and of the reads, taken at
 // The file
 // --------
 
-test("the file: B has more rows than A in every table of a chat; A's second chat has rows in each; the launches of B and of A's second chat are live", () => {
+test("the file: the building of both files wrote every row it was asked to", () => {
+  expect(failures).toEqual([])
+})
+
+test("the file: each chat's events, written through the store, run from 1 to their count with no gap, and its seq is that count", () => {
+  const sides: ReadonlyArray<readonly [string, string, Side]> = [
+    [alone.file, alone.a, A],
+    [both.file, both.b, B],
+    [both.file, both.a2, A2],
+    [both.file, both.a, A],
+    [both.file, both.b2, B2]
+  ]
+  for (const [file, chat, side] of sides) {
+    const id = chatId(file, chat)
+    const count = EVENTS_PER_TURN * side.k
+    const events = rows<{ n: number }>(file, `select n from everchat_event where chat = ${id} order by n`).map((row) => row.n)
+    const [seq] = rows<{ seq: number }>(file, `select seq from everchat_chat where id = ${id}`)
+    expect({ chat: side.tag, events, seq: seq?.seq }).toEqual({ chat: side.tag, events: range(1, count), seq: count })
+  }
+})
+
+test("the file: B has more rows than A in every table of a chat; A's second chat and B's second have rows in each; the launches of B and of A's second chat are live", () => {
   const a = chatId(both.file, both.a)
   const b = chatId(both.file, both.b)
   const a2 = chatId(both.file, both.a2)
-  // Three chats, two of tenant A; the second made after B's and before A's.
+  const b2 = chatId(both.file, both.b2)
+  // Four chats, two of each tenant: A's second made after B's and before
+  // A's, B's second after A's.
   expect(rows(both.file, "select id, lower(hex(tenant)) as tenant from everchat_chat order by id")).toEqual([
     { id: b, tenant: TENANT_B.replaceAll("-", "") },
     { id: a2, tenant: TENANT_A.replaceAll("-", "") },
-    { id: a, tenant: TENANT_A.replaceAll("-", "") }
+    { id: a, tenant: TENANT_A.replaceAll("-", "") },
+    { id: b2, tenant: TENANT_B.replaceAll("-", "") }
   ])
-  expect(b < a2 && a2 < a).toBe(true)
+  expect(b < a2 && a2 < a && a < b2).toBe(true)
   for (const table of shape.ofChat) {
-    expect({ table, some: rows<{ n: number }>(both.file, `select count(*) as n from ${table} where chat = ${a2}`)[0]!.n > 0 }).toEqual({ table, some: true })
+    for (const [tag, id] of [["c", a2], ["d", b2]] as const) {
+      expect({ table, tag, some: rows<{ n: number }>(both.file, `select count(*) as n from ${table} where chat = ${id}`)[0]!.n > 0 }).toEqual({ table, tag, some: true })
+    }
   }
   expect(rows(both.file, `select n, pid, host, ended from everchat_launch where chat = ${b} and ended is null`)).toEqual([
     { n: B_LIVE, pid: LIVE_PID, host: A.launch.host, ended: null }
@@ -735,7 +841,10 @@ for (const { column, key, parent, table } of shape.references) {
         for (const part of shape.keys[table] ?? []) {
           if (part !== "chat" && !refs.includes(part)) row[part] = (values(`select max(${part}) as v from ${table}`)[0] ?? 0) + 1000
         }
+        // An event's messages: the other one is A's own, so that only the
+        // reference under test can refuse the row (and msg_last >= msg).
         if (table === "everchat_event" && column === "msg") row["msg_last"] = value
+        if (table === "everchat_event" && column === "msg_last") row["msg"] = own
         delete row["live"]
         const names = Object.keys(row)
         db.run(`insert into ${table} (${names.join(", ")}) values (${names.map(() => "?").join(", ")})`, names.map((name) => row[name]) as Array<never>)
@@ -755,6 +864,7 @@ test("the database refuses: the schema has each reference inside a chat that the
     "everchat_call.turn",
     "everchat_event.call",
     "everchat_event.msg",
+    "everchat_event.msg_last",
     "everchat_event.turn",
     "everchat_log.launch",
     "everchat_msg.call",

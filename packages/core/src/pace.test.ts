@@ -12,6 +12,7 @@ const delta = (type: Kind, text: string, turn = 1): TurnEvent => ({ type, turn, 
 
 const message = (kind: Message["kind"], turn: number | null = 1): TurnEvent => ({
   type: "message",
+  n: 1,
   message: { i: 5, kind, text: "a message", size: 9, more: false, line: null, turn, call: null, launch: 1, created: 0 }
 })
 
@@ -25,13 +26,13 @@ const NEVER = 1e12
 test("an event that is not a piece of what streams goes on as it is, at once", () => {
   const pace = pacer()
   const events: Array<TurnEvent> = [
-    { type: "accepted", messages: [] },
-    { type: "start", turn: 1 },
-    { type: "call", turn: 1, call: 3, program: "return 1" },
+    { type: "accepted", n: 1, messages: [] },
+    { type: "start", n: 1, turn: 1 },
+    { type: "call", n: 1, turn: 1, call: 3, program: "return 1" },
     message("tool"),
     message("echo"),
     message("asst"),
-    { type: "end", turn: 1, status: "done", why: null }
+    { type: "end", n: 1, turn: 1, status: "done", why: null }
   ]
   for (const event of events) {
     assert.deepStrictEqual(pace.push(event, 0), [event])
@@ -161,8 +162,8 @@ test("what is held is dropped when the step's streams are over: EverChat's messa
   for (
     const over of [
       message("asst"),
-      { type: "call", turn: 1, call: 3, program: "return 1" },
-      { type: "end", turn: 1, status: "stopped", why: "Stopped." }
+      { type: "call", n: 1, turn: 1, call: 3, program: "return 1" },
+      { type: "end", n: 1, turn: 1, status: "stopped", why: "Stopped." }
     ] as Array<TurnEvent>
   ) {
     const pace = pacer()
@@ -175,7 +176,7 @@ test("what is held is dropped when the step's streams are over: EverChat's messa
     assert.deepStrictEqual(given(pace.push(delta("text", "New.\n\n"), 20)), [["text", "New.\n\n"]])
   }
   // Another message does not end the streams: a note, or a message of the person.
-  for (const other of [message("note"), message("user", null), { type: "accepted", messages: [] }, { type: "start", turn: 1 }] as Array<TurnEvent>) {
+  for (const other of [message("note"), message("user", null), { type: "accepted", n: 1, messages: [] }, { type: "start", n: 1, turn: 1 }] as Array<TurnEvent>) {
     const pace = pacer()
     assert.deepStrictEqual(pace.push(delta("text", "a text"), 0), [])
     assert.deepStrictEqual(pace.push(other, 10), [other])
@@ -211,7 +212,7 @@ test("the streams of two turns are held apart", () => {
   const pace = pacer()
   assert.deepStrictEqual(pace.push(delta("text", "of one", 1), 0), [])
   assert.deepStrictEqual(pace.push(delta("text", "of two", 2), 0), [])
-  const end: TurnEvent = { type: "end", turn: 1, status: "done", why: null }
+  const end: TurnEvent = { type: "end", n: 1, turn: 1, status: "done", why: null }
   assert.deepStrictEqual(pace.push(end, 10), [end])
   assert.deepStrictEqual(pace.tick(QUIET), [delta("text", "of two", 2)])
 })

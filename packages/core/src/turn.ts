@@ -25,7 +25,7 @@
 // after a restart, sends the same bytes and reads the vendor's cache.
 //
 // What each event writes, each in one transaction (docs/schema.html,
-// section 7):
+// section 9):
 //
 //   a message, and no turn runs    msg, turn (running)
 //   the first request is built     turn_item 0, chat.taken
@@ -41,6 +41,26 @@
 // `tool` and an `echo` that say so. Then the turn that still runs goes on
 // from its items: it builds its first item if it has none, it finishes a
 // step whose results are not all in, and it sends the next step.
+//
+// The events of a chat
+//
+// Each event but a piece (`accepted`, `start`, `call`, `message`, `end`) has
+// its row of `everchat_event` and its number `n`, in the transaction of what
+// it reports (`store.addEvent`): `accepted` and the turn's `start`, when no
+// turn runs, in the one of the person's message; each page's `message` in the
+// one that logs it; `call` with the call's row; a turn's `end` after its
+// note's `message`, with the turn's end; the `start` of the turn that a
+// waiting message starts, with that turn's row; a `start` after a restart in
+// one of its own. A piece (`text`, `thought`, `program`) has no number and no
+// row. No event: a function's start and end, a compaction, the pick, the
+// goal, the draft.
+//
+// A listener gets a chat's events in the order of their numbers. The lock
+// `order` covers each event's write and its publish, and nothing can
+// interrupt it between the two. The locks are always taken in one order:
+// the turn loop's `lock` (the person's message, the next turn of a waiting
+// message), then `order`, then the memory's own (inside `pushWith`). No one
+// holds a later one and waits for an earlier one, so they cannot deadlock.
 //
 // The program's own stop (the scope closes) leaves the turn running in the
 // database: it is cut, and it goes on at the next launch. Only `stop`, the
@@ -104,14 +124,15 @@ export const cutText = (why: string, functions: ReadonlyArray<CallRow>): string 
   return why + "\nThe functions that it called (result(id) gives a whole result):\n" + lines.join("\n")
 }
 
-// What the terminal shows as it happens.
+// What the terminal shows as it happens. `n` is the event's number in its
+// chat, the `n` of its row; a piece has none.
 export type TurnEvent =
-  | { readonly type: "accepted"; readonly messages: ReadonlyArray<Message> } // a message of the person is in the log
-  | { readonly type: "start"; readonly turn: number }
+  | { readonly type: "accepted"; readonly n: number; readonly messages: ReadonlyArray<Message> } // a message of the person is in the log
+  | { readonly type: "start"; readonly n: number; readonly turn: number }
   | { readonly type: "text" | "thought" | "program"; readonly turn: number; readonly delta: string }
-  | { readonly type: "call"; readonly turn: number; readonly call: number; readonly program: string } // a program starts to run
-  | { readonly type: "message"; readonly message: Message } // a reply, a program, a result, or a note is in the log
-  | { readonly type: "end"; readonly turn: number; readonly status: "done" | "stopped" | "failed"; readonly why: string | null }
+  | { readonly type: "call"; readonly n: number; readonly turn: number; readonly call: number; readonly program: string } // a program starts to run
+  | { readonly type: "message"; readonly n: number; readonly message: Message } // a reply, a program, a result, or a note is in the log
+  | { readonly type: "end"; readonly n: number; readonly turn: number; readonly status: "done" | "stopped" | "failed"; readonly why: string | null }
 
 // A turn's items as they are kept. A `turn` item also keeps the calls that
 // the wire read from the vendor's output, so that a restart does not have
@@ -175,6 +196,7 @@ export class Turns extends Context.Service<Turns, {
         const lock = yield* Semaphore.make(1)
         const hub = yield* PubSub.unbounded<TurnEvent>()
         const emit = (event: TurnEvent) => Effect.asVoid(PubSub.publish(hub, event))
+        const order = yield* Semaphore.make(1)
         const session = (yield* store.chat).uuid
 
         // The turn that runs, its fiber, and why the person stopped it.
@@ -182,15 +204,32 @@ export class Turns extends Context.Service<Turns, {
 
         const broken = (op: string) => (cause: unknown) => new StoreError({ op, cause })
 
-        // Messages in the log, with more writes of the same event.
-        const log = <B>(said: ReadonlyArray<Said>, also: Effect.Effect<B, StoreError>) =>
-          Effect.gen(function*() {
-            const [written, more] = yield* memory.pushWith(said, () => also)
-            for (const message of written) {
-              yield* emit({ type: "message", message })
+        // An event's write and its publish, under `order`, with no
+        // interruption between the commit and the publish (the head comment).
+        // `write` commits the rows, and gives its result and the events, in
+        // the order of their numbers.
+        const record = <A>(write: Effect.Effect<readonly [A, ReadonlyArray<TurnEvent>], StoreError>): Effect.Effect<A, StoreError> =>
+          order.withPermits(1)(Effect.uninterruptible(Effect.gen(function*() {
+            const [result, events] = yield* write
+            for (const event of events) {
+              yield* emit(event)
             }
-            return more
-          })
+            return result
+          })))
+
+        // Messages in the log, each page with its `message` row, then more
+        // writes of the same event, in one transaction. `then` gives the
+        // events that come after the messages' (a turn's `end`).
+        const log = <B>(said: ReadonlyArray<Said>, also: Effect.Effect<B, StoreError>, then: (more: B) => ReadonlyArray<TurnEvent> = () => []) =>
+          record(Effect.map(
+            memory.pushWith(said, (written) =>
+              Effect.gen(function*() {
+                const numbers = yield* Effect.forEach(written, (message) => store.addEvent({ type: "message", msg: message.i, msgLast: message.i }))
+                return [numbers, yield* also] as const
+              })),
+            ([written, [numbers, more]]) =>
+              [more, [...written.map((message, k): TurnEvent => ({ type: "message", n: numbers[k]!, message })), ...then(more)]] as const
+          ))
 
         // The messages that no request has taken in: the person's and the agents' reports.
         const waiting = Effect.flatMap(store.chat, (chat) => store.messagesAfter(chat.taken, ["user", "work"]))
@@ -249,8 +288,11 @@ export class Turns extends Context.Service<Turns, {
             : status === "stopped"
             ? why ?? "Stopped."
             : null
-          yield* log(note === null ? [] : [{ kind: "note", text: note, turn: turn.id }], store.endTurn(turn.id, status, why))
-          yield* emit({ type: "end", turn: turn.id, status, why })
+          yield* log(
+            note === null ? [] : [{ kind: "note", text: note, turn: turn.id }],
+            Effect.andThen(store.endTurn(turn.id, status, why), store.addEvent({ type: "end", turn: turn.id })),
+            (n) => [{ type: "end", n, turn: turn.id, status, why }]
+          )
         })
 
         // The functions that program `id` called.
@@ -259,8 +301,11 @@ export class Turns extends Context.Service<Turns, {
         // One program of the model: its call is written when it starts, and
         // its `tool` and `echo` when it ends.
         const program = Effect.fnUntraced(function*(turn: Turn, call: Call) {
-          const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: call.input })
-          yield* emit({ type: "call", turn: turn.id, call: id, program: call.input })
+          const id = yield* record(store.transaction(Effect.gen(function*() {
+            const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: call.input })
+            const n = yield* store.addEvent({ type: "call", turn: turn.id, call: id })
+            return [id, [{ type: "call", n, turn: turn.id, call: id, program: call.input }]] as const
+          })))
           const close = (status: "done" | "failed" | "cut", output: string, text: string, bytes?: number) =>
             log(
               [{ kind: "tool", text: call.input, turn: turn.id, call: id }, { kind: "echo", text, turn: turn.id, call: id }],
@@ -351,9 +396,9 @@ export class Turns extends Context.Service<Turns, {
           return kept
         })
 
-        // A turn, from where its items are, to its end.
+        // A turn, from where its items are, to its end. Its `start` is
+        // written and published by what starts it.
         const run = Effect.fnUntraced(function*(turn: Turn) {
-          yield* emit({ type: "start", turn: turn.id })
           const head = yield* Effect.mapError(decodeHead(turn.head), broken("head"))
           const items: Array<Kept> = []
           for (const row of yield* store.turnItems(turn.id)) {
@@ -379,12 +424,14 @@ export class Turns extends Context.Service<Turns, {
           }
         })
 
+        // A new turn's row and its `start` row, in the caller's transaction.
         const begin = (firstMsg: number) =>
           Effect.gen(function*() {
             const chat = yield* store.chat
-            yield* store.setDraft(null)
-            return yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(makeHead(options.declarations, options.rules ?? null)), firstMsg })
+            const turn = yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(makeHead(options.declarations, options.rules ?? null)), firstMsg })
+            return { turn, n: yield* store.addEvent({ type: "start", turn: turn.id }) }
           })
+        const started = (begun: { readonly turn: Turn; readonly n: number }): TurnEvent => ({ type: "start", n: begun.n, turn: begun.turn.id })
 
         // Turns, one after the other, while messages wait. A turn that
         // failed ends the row: the person must speak again.
@@ -401,7 +448,9 @@ export class Turns extends Context.Service<Turns, {
                   running = null
                   return null
                 }
-                return yield* begin(next.i)
+                // Its turn and its `start`, in one transaction. The draft
+                // stays: it is what the person typed after that message.
+                return yield* record(Effect.map(store.transaction(begin(next.i)), (begun) => [begun.turn, [started(begun)]] as const))
               })
               current = yield* lock.withPermits(1)(following)
             }
@@ -440,11 +489,30 @@ export class Turns extends Context.Service<Turns, {
         const say = (text: string) =>
           lock.withPermits(1)(Effect.gen(function*() {
             const idle = running === null
-            const [written, turn] = yield* memory.pushWith(
-              [{ kind: "user", text }],
-              (written): Effect.Effect<Turn | null, StoreError> => idle && written[0] !== undefined ? begin(written[0].i) : Effect.succeed(null)
-            )
-            yield* emit({ type: "accepted", messages: written })
+            // Its pages, their `accepted`, and, when no turn runs, the clear
+            // of the draft (the draft was this message) and a turn with its
+            // `start`, in one transaction.
+            const [written, turn] = yield* record(Effect.map(
+              memory.pushWith([{ kind: "user", text }], (written) =>
+                Effect.gen(function*() {
+                  const first = written[0]
+                  const last = written[written.length - 1]
+                  if (first === undefined || last === undefined) {
+                    return yield* Effect.die(new Error("a message of the person logged no page"))
+                  }
+                  const accepted = yield* store.addEvent({ type: "accepted", msg: first.i, msgLast: last.i })
+                  if (!idle) {
+                    return [accepted, null] as const
+                  }
+                  yield* store.setDraft(null)
+                  return [accepted, yield* begin(first.i)] as const
+                })),
+              ([written, [accepted, begun]]) =>
+                [
+                  [written, begun?.turn ?? null] as const,
+                  [{ type: "accepted", n: accepted, messages: written }, ...(begun === null ? [] : [started(begun)])]
+                ] as const
+            ))
             if (turn !== null) {
               yield* launch(turn)
             }
@@ -483,6 +551,8 @@ export class Turns extends Context.Service<Turns, {
         const [cut] = yield* store.runningTurns(null)
         if (cut !== undefined) {
           yield* diagnostic(Effect.logInfo(`turn ${cut.id} was cut, and continues`))
+          // Its `start`, in a transaction of its own.
+          yield* record(Effect.map(store.addEvent({ type: "start", turn: cut.id }), (n) => [undefined, [{ type: "start", n, turn: cut.id }]] as const))
           yield* launch(cut)
         }
 

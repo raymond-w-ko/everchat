@@ -11,7 +11,7 @@ import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
 import { chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
-import { Chats, DatabaseVersion, LaunchLive, NoChat, type Part, Reads, Store, StoreError } from "@everchat/core/store"
+import { Chats, DatabaseVersion, LaunchLive, type NewEvent, NoChat, type Part, Reads, Store, StoreError } from "@everchat/core/store"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
@@ -948,4 +948,114 @@ test("Chats: an opening interrupted at any point leaves no launch, or one that e
   // The rounds reach both sides of the commit.
   expect(outcomes[0]).toBe("none")
   expect(outcomes.at(-1)).toBe("signal")
+})
+
+// Events
+// ------
+
+const eventRows = (file: string) =>
+  rows(file, "select chat, n, type, turn, call, msg, msg_last as msgLast from everchat_event order by n")
+
+test("addEvent: three events get 1, 2, 3 with no gap, seq is 3, and the chat's updated moved to the last one's time", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const before = (yield* store.chat).updated
+    // The next millisecond at least, so that a move of `updated` shows.
+    yield* Effect.sleep("5 millis")
+    const numbers = [
+      yield* store.addEvent({ type: "start", turn: turn.id }),
+      yield* store.transaction(store.addEvent({ type: "end", turn: turn.id })),
+      yield* store.addEvent({ type: "start", turn: turn.id })
+    ]
+    return { before, numbers, after: (yield* store.chat).updated }
+  }))
+  expect(got.numbers).toEqual([1, 2, 3])
+  expect(rows(file, "select n from everchat_event order by n")).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }])
+  const [chat] = rows<{ seq: number; updated: number }>(file, "select seq, updated from everchat_chat")
+  const [last] = rows<{ created: number }>(file, "select created from everchat_event where n = 3")
+  expect(chat!.seq).toBe(3)
+  expect(chat!.updated).toBeGreaterThan(got.before)
+  expect(chat!.updated).toBe(last!.created)
+  expect(got.after).toBe(chat!.updated)
+})
+
+test("addEvent: each type's row holds what the union gives, and null for the rest", async () => {
+  // The type refuses a row that section 7 does not have: a message's row
+  // copies no turn.
+  // @ts-expect-error: a `message` row has no turn
+  const refused: NewEvent = { type: "message", msg: 0, msgLast: 0, turn: 1 }
+  expect(refused.type).toBe("message")
+  const file = newFile()
+  await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const said = yield* store.append([{ kind: "user", text: "one" }, { kind: "user", text: "two" }, { kind: "asst", text: "three" }])
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const call = yield* store.startCall({ turn: turn.id, vendorId: "v1", fn: "run", input: "1" })
+    yield* store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[1]!.i })
+    yield* store.addEvent({ type: "start", turn: turn.id })
+    yield* store.addEvent({ type: "call", turn: turn.id, call })
+    yield* store.addEvent({ type: "message", msg: said[2]!.i, msgLast: said[2]!.i })
+    yield* store.addEvent({ type: "end", turn: turn.id })
+  }))
+  expect(eventRows(file)).toEqual([
+    { chat: 1, n: 1, type: "accepted", turn: null, call: null, msg: 0, msgLast: 1 },
+    { chat: 1, n: 2, type: "start", turn: 1, call: null, msg: null, msgLast: null },
+    { chat: 1, n: 3, type: "call", turn: 1, call: 1, msg: null, msgLast: null },
+    { chat: 1, n: 4, type: "message", turn: null, call: null, msg: 2, msgLast: 2 },
+    { chat: 1, n: 5, type: "end", turn: 1, call: null, msg: null, msgLast: null }
+  ])
+})
+
+test("addEvent: an event whose last message the chat does not have is refused, and the next event takes the next number, with no gap", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const said = yield* store.append([{ kind: "user", text: "one" }])
+    const first = yield* store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[0]!.i })
+    const before = rows(file, "select seq, updated from everchat_chat")
+    yield* Effect.sleep("5 millis")
+    // Message 1 is not there: only the reference of msg_last refuses it.
+    const refused = yield* Effect.flip(store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[0]!.i + 1 }))
+    const message = yield* Effect.flip(store.addEvent({ type: "message", msg: said[0]!.i, msgLast: said[0]!.i + 1 }))
+    const after = rows(file, "select seq, updated from everchat_chat")
+    const next = yield* store.addEvent({ type: "message", msg: said[0]!.i, msgLast: said[0]!.i })
+    return { first, refused, message, before, after, next }
+  }))
+  expect(got.refused).toBeInstanceOf(StoreError)
+  expect(got.message).toBeInstanceOf(StoreError)
+  // The store's error carries the driver's: its text is SQLite's.
+  for (const error of [got.refused, got.message]) {
+    expect(String((error.cause as { reason?: { cause?: unknown } }).reason?.cause)).toContain("FOREIGN KEY")
+  }
+  expect(got.after).toEqual(got.before)
+  expect([got.first, got.next]).toEqual([1, 2])
+  expect(eventRows(file)).toEqual([
+    { chat: 1, n: 1, type: "accepted", turn: null, call: null, msg: 0, msgLast: 0 },
+    { chat: 1, n: 2, type: "message", turn: null, call: null, msg: 0, msgLast: 0 }
+  ])
+  expect(rows(file, "select seq from everchat_chat")).toEqual([{ seq: 2 }])
+})
+
+test("addEvent: a transaction that fails after addEvent leaves no row, and seq and updated as they were", async () => {
+  const file = newFile()
+  const failed = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    yield* store.addEvent({ type: "start", turn: turn.id })
+    const before = rows(file, "select seq, updated from everchat_chat")
+    yield* Effect.sleep("5 millis")
+    const error = yield* Effect.flip(store.transaction(Effect.gen(function*() {
+      yield* store.addEvent({ type: "end", turn: turn.id })
+      yield* store.endTurn(turn.id, "done")
+      return yield* Effect.fail("no" as const)
+    })))
+    return { error, before, after: rows(file, "select seq, updated from everchat_chat"), status: Option.map(yield* store.turn(turn.id), (t) => t.status) }
+  }))
+  expect(failed.error).toBe("no")
+  expect(failed.after).toEqual(failed.before)
+  expect(failed.after).toEqual([{ seq: 1, updated: expect.any(Number) }])
+  expect(failed.status).toEqual(Option.some("running"))
+  expect(eventRows(file).map((row) => row.n)).toEqual([1])
 })

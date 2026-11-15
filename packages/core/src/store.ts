@@ -181,6 +181,16 @@ export interface NewUsage {
   readonly expected?: number | null | undefined
 }
 
+// An event of the chat, as its row of `everchat_event` holds it: its type,
+// and the rows of the chat that it reports (docs/schema.html, section 7),
+// not its payload. A row references only what its event reports: a
+// `message` row does not copy its message's turn and call. A piece is no
+// event.
+export type NewEvent =
+  | { readonly type: "accepted" | "message"; readonly msg: number; readonly msgLast: number } // the first and the last message
+  | { readonly type: "start" | "end"; readonly turn: number }
+  | { readonly type: "call"; readonly turn: number; readonly call: number } // a program starts
+
 // One turn, with its pick and its head as text.
 export interface Turn {
   readonly id: number
@@ -461,6 +471,12 @@ export class Store extends Context.Service<Store, Reading & {
   endCall(id: number, end: CallEnd): Effect.Effect<void, StoreError>
   // The process group of a shell command, while it runs.
   setCallPgid(id: number, pgid: number): Effect.Effect<void, StoreError>
+
+  // An event's row, with the chat's next event number (its `seq` plus 1),
+  // which it gives back; `seq` becomes that number. An event's row belongs
+  // in the transaction of what it reports: call it inside `transaction`,
+  // with that write. Alone, it is a transaction of its own.
+  addEvent(event: NewEvent): Effect.Effect<number, StoreError>
 
   // `addDiagnostics` writes them in one transaction, in the order given.
   // `dropDiagnostics` deletes those from before `before` (a time), and

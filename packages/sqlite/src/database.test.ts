@@ -36,14 +36,17 @@ const TABLES = [
 ]
 
 const TRIGGERS = [
+  "everchat_call_no_move",
   "everchat_chat_no_delete",
   "everchat_chat_no_move",
+  "everchat_chat_no_rowid",
   "everchat_event_no_delete",
   "everchat_event_no_update",
   "everchat_head_no_update",
   "everchat_image_no_update",
   "everchat_kind_no_delete",
   "everchat_kind_no_update",
+  "everchat_launch_no_move",
   "everchat_log_no_update",
   "everchat_msg_image_no_delete",
   "everchat_msg_image_no_update",
@@ -55,7 +58,9 @@ const TRIGGERS = [
   "everchat_pick_no_update",
   "everchat_tenant_no_update",
   "everchat_turn_item_no_update",
-  "everchat_usage_no_update"
+  "everchat_turn_no_move",
+  "everchat_usage_no_update",
+  "everchat_view_no_move"
 ]
 
 const INDEXES = [
@@ -102,15 +107,15 @@ const oldFile = async (mark: number) => {
   return file
 }
 
-test("a new file gets the whole schema of the page, and the mark: 17 tables, 20 triggers, 6 indexes, 1 view, each table strict", async () => {
+test("a new file gets the whole schema of the page, and the mark: 17 tables, 25 triggers, 6 indexes, 1 view, each table strict", async () => {
   const file = newFile()
   await withDatabase(file, Effect.void)
   expect(names(file, "table")).toEqual(TABLES)
   expect(names(file, "trigger")).toEqual(TRIGGERS)
   expect(names(file, "index")).toEqual(INDEXES)
   expect(names(file, "view")).toEqual(["everchat_msg_read"])
-  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([17, 20, 6])
-  expect(VERSION).toBe(4)
+  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([17, 25, 6])
+  expect(VERSION).toBe(5)
   expect(rows(file, "pragma user_version")).toEqual([{ user_version: VERSION }])
   const strict = rows<{ name: string; strict: number }>(file, "select name, strict from pragma_table_list where schema = 'main' and type = 'table'")
     .filter((row) => !row.name.startsWith("sqlite_"))
@@ -217,7 +222,7 @@ test("a file with another mark is refused, and not changed", async () => {
   }
 })
 
-test("a refused file in DELETE mode, with rows, keeps its bytes and its mode, and gets no file beside it: marks 0, 2 and 4, and a backup", async () => {
+test(`a refused file in DELETE mode, with rows, keeps its bytes and its mode, and gets no file beside it: marks 0, ${VERSION - 1} and ${VERSION + 1}, and a backup`, async () => {
   // Mark 0: tables of the old names, a row, and no mark.
   const none = newFile()
   write(none, "create table pick (id integer primary key, vendor text not null) strict")
@@ -277,12 +282,19 @@ test("the kinds in the table are the kinds in the code", async () => {
   expect(table.every((row) => row.name.length === 4)).toBe(true)
 })
 
-// The tenant of the rows below, and the chat's UUID: 16 bytes each.
+// The tenant of the rows below, and the chat's UUID: 16 bytes each. Then a
+// second tenant, its chat's UUID, and the UUID of a third chat.
 const TENANT = "x'00112233445566778899aabbccddeeff'"
 const UUID = "x'0123456789abcdef0123456789abcdef'"
+const OTHER = "x'ffeeddccbbaa99887766554433221100'"
+const UUID2 = "x'2222222222222222222222222222222a'"
+const UUID3 = "x'3333333333333333333333333333333a'"
 
-// Rows that the refused writes below build on, all of chat 1. Each one is
-// valid.
+// Rows that the refused writes below build on, most of chat 1. Each one is
+// valid. Chat 2, of another tenant, has its own launch, head, turn, call and
+// view, so that a move of a row of chat 1 into it finds the row's parents and
+// reaches the guard, not a missing parent; chat 3, of the first tenant, has no
+// rows. Chat 1's launch 3 and turn 3 have no child, as its call 2 has none.
 const BASE = [
   `insert into everchat_pick (id, vendor, model, effort, speed, created) values (1, 'v', 'm', 'e', 's', 1)`,
   `insert into everchat_tenant (id, created) values (${TENANT}, 1)`,
@@ -301,22 +313,39 @@ const BASE = [
   `insert into everchat_msg_image (chat, msg, n, image) values (1, 0, 0, 2)`,
   `insert into everchat_usage (chat, n, served, pick, input, cache_read, cache_write, output, created) values (1, 1, 'turn', 1, 1, 0, 0, 1, 1)`,
   `insert into everchat_log (chat, n, level, source, text, launch, created) values (1, 1, 'info', 's', 't', 1, 1)`,
-  `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 1, 'accepted', 0, 0, 1)`
+  `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 1, 'accepted', 0, 0, 1)`,
+  `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created, ended, why) values (1, 3, 9, 'h', '/', '0', 't', 1, 1, 'exit')`,
+  `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, ended) values (1, 3, 'done', 1, 1, 0, 1, 1, 1)`,
+  `insert into everchat_tenant (id, created) values (${OTHER}, 1)`,
+  `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (2, ${OTHER}, ${UUID2}, 1, 1, 1)`,
+  `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (3, ${TENANT}, ${UUID3}, 1, 1, 1)`,
+  `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (2, 1, 20, 'h', '/', '0', 'u', 1)`,
+  `insert into everchat_head (chat, n, hash, body, created) values (2, 1, 'abc', '{}', 1)`,
+  `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created) values (2, 1, 'running', 1, 1, 0, 1, 1)`,
+  `insert into everchat_call (chat, n, turn, vendor_id, fn, input, status, launch, created) values (2, 1, 1, 'call_a', 'run', 'x', 'running', 1, 1)`,
+  `insert into everchat_view (chat, name, parts, created, updated) values (2, 'chat', '[[0,0]]', 1, 1)`
 ]
 
 // Each write that the schema must refuse, and a part of the error's text.
 const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: string]> = [
   ["a tenant whose id is not 16 bytes", `insert into everchat_tenant (id, created) values (x'00', 1)`, "CHECK"],
   ["a change of a tenant", `update everchat_tenant set created = 2`, "everchat_tenant is append only"],
-  ["a second chat with the same UUID", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (2, ${TENANT}, ${UUID}, 1, 1, 1)`, "UNIQUE"],
-  ["a chat whose UUID is not 16 bytes", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (2, ${TENANT}, x'01', 1, 1, 1)`, "CHECK"],
-  ["a chat of a tenant that is not there", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (2, x'ffffffffffffffffffffffffffffffff', x'ffffffffffffffffffffffffffffffff', 1, 1, 1)`, "FOREIGN KEY"],
+  ["a second chat with the same UUID", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (4, ${TENANT}, ${UUID}, 1, 1, 1)`, "UNIQUE"],
+  ["a chat whose UUID is not 16 bytes", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (4, ${TENANT}, x'01', 1, 1, 1)`, "CHECK"],
+  ["a chat of a tenant that is not there", `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (4, x'ffffffffffffffffffffffffffffffff', x'ffffffffffffffffffffffffffffffff', 1, 1, 1)`, "FOREIGN KEY"],
   ["a chat with a pick that is not there", `update everchat_chat set pick = 99`, "FOREIGN KEY"],
   ["a move of the chat to another tenant", `update everchat_chat set tenant = x'ffffffffffffffffffffffffffffffff'`, "everchat_chat keeps its id, its tenant and its uuid"],
   ["a change of the chat's UUID", `update everchat_chat set uuid = x'ffffffffffffffffffffffffffffffff'`, "everchat_chat keeps its id, its tenant and its uuid"],
-  ["a change of the chat's id", `update everchat_chat set id = 2`, "everchat_chat keeps its id, its tenant and its uuid"],
+  ["a change of the chat's id", `update everchat_chat set id = 4 where id = 1`, "everchat_chat keeps its id, its tenant and its uuid"],
+  ["a change of the rowid of a chat with no rows", `update everchat_chat set rowid = 7 where id = 3`, "everchat_chat keeps its id, its tenant and its uuid"],
+  ["a change of the oid of a chat with no rows", `update everchat_chat set oid = 7 where id = 3`, "everchat_chat keeps its id, its tenant and its uuid"],
+  ["a change of the _rowid_ of a chat with no rows", `update everchat_chat set _rowid_ = 7 where id = 3`, "everchat_chat keeps its id, its tenant and its uuid"],
   ["a delete of the chat while its tenant is there", `delete from everchat_chat`, "everchat_chat is deleted only with its tenant"],
   ["a second live launch", `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (1, 2, 11, 'h', '/', '0', 't', 2)`, "UNIQUE"],
+  ["a move of a launch to another tenant's chat", `update everchat_launch set chat = 2 where chat = 1 and n = 3`, "everchat_launch keeps its chat and its n"],
+  ["a move of a launch onto another tenant's launch, with or replace", `update or replace everchat_launch set chat = 2, n = 1 where chat = 1 and n = 3`, "everchat_launch keeps its chat and its n"],
+  ["a change of a launch's n", `update everchat_launch set n = 9 where chat = 1 and n = 3`, "everchat_launch keeps its chat and its n"],
+  ["a move of a launch by the do update of an upsert", `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (1, 3, 9, 'h', '/', '0', 't', 1) on conflict (chat, n) do update set chat = 3`, "everchat_launch keeps its chat and its n"],
   ["a launch of a chat that is not there", `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (9, 1, 11, 'h', '/', '0', 't', 2)`, "FOREIGN KEY"],
   ["a second pick with the same values", `insert into everchat_pick (vendor, model, effort, speed, created) values ('v', 'm', 'e', 's', 2)`, "UNIQUE"],
   ["a change of a pick", `update everchat_pick set vendor = 'w'`, "everchat_pick is append only"],
@@ -348,12 +377,20 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a node before message 0", `insert into everchat_node (chat, l, i, text, size, created) values (1, 0, -1, 'x', 1, 1)`, "CHECK"],
   ["a view with another name", `insert into everchat_view (chat, name, parts, created, updated) values (1, 'other', '[]', 1, 1)`, "CHECK"],
   ["a view with a flag that is not 0 or 1", `update everchat_view set batch = 2`, "CHECK"],
+  ["a move of a view to a chat with no views", `update everchat_view set chat = 3 where chat = 1`, "everchat_view keeps its chat and its name"],
+  ["a move of a view onto another tenant's view, with or replace", `update or replace everchat_view set chat = 2 where chat = 1`, "everchat_view keeps its chat and its name"],
+  ["a change of a view's name", `update everchat_view set name = 'seen' where chat = 1`, "everchat_view keeps its chat and its name"],
+  ["a move of a view by the do update of an upsert", `insert into everchat_view (chat, name, parts, created, updated) values (1, 'chat', '[]', 1, 1) on conflict (chat, name) do update set chat = 3`, "everchat_view keeps its chat and its name"],
 
   ["a turn with an unknown status", `update everchat_turn set status = 'paused'`, "CHECK"],
   ["a running turn with an end", `update everchat_turn set ended = 2`, "CHECK"],
   ["a done turn with no end", `update everchat_turn set status = 'done'`, "CHECK"],
   ["a turn on a pick that is not there", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created) values (1, 2, 'running', 99, 1, 0, 1, 1)`, "FOREIGN KEY"],
   ["a turn on a head that is not there", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created) values (1, 2, 'running', 1, 99, 0, 1, 1)`, "FOREIGN KEY"],
+  ["a move of a turn to another tenant's chat", `update everchat_turn set chat = 2 where chat = 1 and n = 3`, "everchat_turn keeps its chat and its n"],
+  ["a move of a turn onto another tenant's turn, with or replace", `update or replace everchat_turn set chat = 2, n = 1 where chat = 1 and n = 3`, "everchat_turn keeps its chat and its n"],
+  ["a change of a turn's n", `update everchat_turn set n = 9 where chat = 1 and n = 3`, "everchat_turn keeps its chat and its n"],
+  ["a move of a turn by the do update of an upsert", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, ended) values (1, 3, 'done', 1, 1, 0, 1, 1, 1) on conflict (chat, n) do update set chat = 3`, "everchat_turn keeps its chat and its n"],
   ["a change of a turn item", `update everchat_turn_item set body = '[]'`, "turn_item is append only"],
   ["a turn item of an unknown kind", `insert into everchat_turn_item (chat, turn, n, kind, body, created) values (1, 1, 2, 'tool', '{}', 1)`, "CHECK"],
 
@@ -363,6 +400,10 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a running call with an end", `update everchat_call set ended = 2 where n = 1`, "CHECK"],
   ["a done call with no end", `update everchat_call set status = 'done' where n = 1`, "CHECK"],
   ["a call with an unknown status", `update everchat_call set status = 'lost' where n = 1`, "CHECK"],
+  ["a move of a call to another tenant's chat", `update everchat_call set chat = 2 where chat = 1 and n = 2`, "everchat_call keeps its chat and its n"],
+  ["a move of a call onto another tenant's call, with or replace", `update or replace everchat_call set chat = 2, n = 1 where chat = 1 and n = 2`, "everchat_call keeps its chat and its n"],
+  ["a change of a call's n", `update everchat_call set n = 9 where chat = 1 and n = 2`, "everchat_call keeps its chat and its n"],
+  ["a move of a call by the do update of an upsert", `insert into everchat_call (chat, n, turn, parent, fn, input, status, launch, created) values (1, 2, 1, 1, 'shell', '{}', 'running', 1, 1) on conflict (chat, n) do update set chat = 3`, "everchat_call keeps its chat and its n"],
 
   ["a change of a usage", `update everchat_usage set output = 2`, "usage is append only"],
   ["a usage that served an unknown thing", `insert into everchat_usage (chat, n, served, pick, input, cache_read, cache_write, output, created) values (1, 2, 'chat', 1, 1, 0, 0, 1, 1)`, "CHECK"],
@@ -372,7 +413,8 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a change of an event", `update everchat_event set type = 'end'`, "everchat_event is append only"],
   ["a delete of an event", `delete from everchat_event`, "everchat_event is append only"],
   ["an event of an unknown type", `insert into everchat_event (chat, n, type, created) values (1, 2, 'text', 1)`, "CHECK"],
-  ["an event with a first message and no last", `insert into everchat_event (chat, n, type, msg, created) values (1, 2, 'message', 0, 1)`, "CHECK"]
+  ["an event with a first message and no last", `insert into everchat_event (chat, n, type, msg, created) values (1, 2, 'message', 0, 1)`, "CHECK"],
+  ["an event whose last message the chat does not have", `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 3, 'accepted', 0, 1, 1)`, "FOREIGN KEY"]
 ]
 
 // Writes that must stay possible.
@@ -410,9 +452,173 @@ test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves t
   expect(failures).toEqual([])
   expect(rows(file, "select text from everchat_msg")).toEqual([{ text: "hello" }])
   expect(rows(file, "select text from everchat_node")).toEqual([{ text: "user: hello" }])
-  expect(rows(file, "select count(*) as n from everchat_launch")).toEqual([{ n: 2 }])
+  expect(rows(file, "select count(*) as n from everchat_launch")).toEqual([{ n: 4 }])
+  expect(rows(file, "select chat, name from everchat_view order by chat")).toEqual([{ chat: 1, name: "chat" }, { chat: 2, name: "chat" }])
+  expect(rows(file, "select id from everchat_chat order by id")).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
   expect(rows(file, "select msg, n, image from everchat_msg_image order by n")).toEqual([{ msg: 0, n: 0, image: 2 }, { msg: 0, n: 1, image: 1 }])
   expect(rows(file, "select count(*) as n from everchat_event")).toEqual([{ n: 1 }])
+})
+
+// A REPLACE (docs/schema.html, section 1, the tenant boundary): it is no
+// update, so no guard of a row's chat or key runs for it; it deletes each row
+// that it meets and inserts its own, and passes where those statements pass.
+// Through a row's hidden rowid, it moves the row to another chat. Each case
+// runs on a new file with BASE and its own rows: `moves` names the table and
+// the condition of the row that must come out of chat 1 into chat 2 with its
+// rowid, `refused` the text that refuses it, and `gone` the counts of chat
+// 1's rows that the cascade must leave.
+const REPLACES: ReadonlyArray<{
+  readonly name: string
+  readonly extra?: ReadonlyArray<string>
+  readonly table: string
+  readonly where: string
+  readonly set?: Readonly<Record<string, string>>
+  readonly refused?: string
+  readonly left?: Readonly<Record<string, number>>
+}> = [
+  { name: "the schema allows it: a launch with no child moves to another tenant's chat, as its delete and an insert each pass", table: "everchat_launch", where: "n = 3" },
+  { name: "the schema allows it: a turn with no child moves to another tenant's chat, as its delete and an insert each pass", table: "everchat_turn", where: "n = 3" },
+  { name: "the schema allows it: a call with no child moves to another tenant's chat, as its delete and an insert each pass", table: "everchat_call", where: "n = 2" },
+  {
+    name: "the schema allows it: a turn whose children may all be deleted moves, and the cascade deletes its item and its calls, as a delete of it does",
+    table: "everchat_turn",
+    where: "n = 1",
+    set: { n: "5" },
+    left: { everchat_turn_item: 0, everchat_call: 0 }
+  },
+  {
+    name: "the schema allows it: a head that no turn names moves, as its delete and an insert each pass",
+    extra: [`insert into everchat_head (chat, n, hash, body, created) values (1, 2, 'def', '[]', 1)`],
+    table: "everchat_head",
+    where: "n = 2"
+  },
+  { name: "the schema allows it: a turn's item moves to a turn of another tenant's chat", table: "everchat_turn_item", where: "turn = 1 and n = 0" },
+  { name: "the schema allows it: an image that no message names moves", table: "everchat_image", where: "n = 1" },
+  { name: "the schema allows it: a usage row moves", table: "everchat_usage", where: "n = 1" },
+  { name: "the schema allows it: a log row moves", table: "everchat_log", where: "n = 1" },
+  { name: "the delete trigger of a message refuses it: a launch that a message names", table: "everchat_launch", where: "n = 1", refused: "everchat_msg is append only" },
+  {
+    name: "the delete trigger of a message refuses it: a call that a message names",
+    extra: [`insert into everchat_msg (chat, i, kind, text, size, call, launch, created) values (1, 1, 4, 'echo', 4, 2, 1, 1)`],
+    table: "everchat_call",
+    where: "n = 2",
+    refused: "everchat_msg is append only"
+  },
+  {
+    name: "the delete trigger of an event refuses it: a turn that an event names",
+    extra: [`insert into everchat_event (chat, n, type, turn, created) values (1, 2, 'start', 3, 1)`],
+    table: "everchat_turn",
+    where: "n = 3",
+    refused: "everchat_event is append only"
+  },
+  { name: "the delete trigger of a message's image refuses it: an image that a message names", table: "everchat_image", where: "n = 2", refused: "everchat_msg_image is append only" },
+  { name: "the delete trigger of a message refuses it: a message", table: "everchat_msg", where: "i = 0", refused: "everchat_msg is append only" },
+  {
+    name: "the delete trigger of an event refuses it: an event",
+    table: "everchat_event",
+    where: "n = 1",
+    set: { type: "'start'", msg: "null", msg_last: "null" },
+    refused: "everchat_event is append only"
+  },
+  {
+    name: "the delete of the row that it meets in the other chat is refused: a launch onto another tenant's launch that a message names",
+    extra: [`insert into everchat_msg (chat, i, kind, text, size, launch, created) values (2, 0, 1, 'hers', 4, 1, 1)`],
+    table: "everchat_launch",
+    where: "n = 3",
+    set: { n: "1" },
+    refused: "everchat_msg is append only"
+  }
+]
+
+for (const { extra = [], left = {}, name, refused, set = {}, table, where } of REPLACES) {
+  test(`a REPLACE through the rowid, ${name}`, async () => {
+    const file = newFile()
+    const got = await withDatabase(
+      file,
+      Effect.gen(function*() {
+        const sql = yield* SqlClient.SqlClient
+        for (const statement of [...BASE, ...extra]) yield* sql.unsafe(statement)
+        const columns = (yield* sql.unsafe<{ name: string }>(`select name from pragma_table_xinfo('${table}') where hidden = 0`)).map((column) => column.name)
+        const values = columns.map((column) => (column === "chat" ? "2" : set[column] ?? column))
+        const [row] = yield* sql.unsafe<{ rowid: number }>(`select rowid from ${table} where chat = 1 and ${where}`)
+        const statement = `insert or replace into ${table} (rowid, ${columns.join(", ")}) select rowid, ${values.join(", ")} from ${table} where chat = 1 and ${where}`
+        const result = yield* Effect.result(sql.unsafe(statement))
+        const after = yield* sql.unsafe<{ chat: number }>(`select chat from ${table} where rowid = ${row!.rowid}`)
+        const counts: Record<string, number> = {}
+        for (const other of Object.keys(left)) counts[other] = (yield* sql.unsafe<{ n: number }>(`select count(*) as n from ${other} where chat = 1`))[0]!.n
+        return { error: result._tag === "Success" ? null : String(result.failure.reason.cause), chat: after[0]?.chat, counts }
+      })
+    )
+    if (refused === undefined) {
+      // It passed, and the row with the same rowid is now chat 2's.
+      expect(got).toEqual({ error: null, chat: 2, counts: left })
+    } else {
+      expect(got.error).toContain(refused)
+      expect(got.chat).toBe(1)
+    }
+  })
+}
+
+test("a REPLACE of a view, which has no rowid, writes only the view of the chat that it names, and the view that it copies stays", async () => {
+  const file = newFile()
+  const views = await withDatabase(
+    file,
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      for (const statement of BASE) yield* sql.unsafe(statement)
+      // Over chat 2's own view of the same name, then a new view of chat 3.
+      yield* sql.unsafe(`insert or replace into everchat_view (chat, name, parts, batch, created, updated) select 2, name, '[[9,9]]', batch, created, updated from everchat_view where chat = 1`)
+      yield* sql.unsafe(`replace into everchat_view (chat, name, parts, batch, created, updated) select 3, name, parts, batch, created, updated from everchat_view where chat = 1`)
+      const named = yield* Effect.flip(sql.unsafe(`insert or replace into everchat_view (rowid, chat, name, parts, created, updated) select rowid, 2, name, parts, created, updated from everchat_view where chat = 1`))
+      return { views: yield* sql.unsafe(`select chat, name, parts from everchat_view order by chat`), named: String(named.reason.cause) }
+    })
+  )
+  expect(views.views).toEqual([
+    { chat: 1, name: "chat", parts: "[[0,0]]" },
+    { chat: 2, name: "chat", parts: "[[9,9]]" },
+    { chat: 3, name: "chat", parts: "[[0,0]]" }
+  ])
+  expect(views.named).toContain("no column named rowid")
+})
+
+test("one rule, read from the file: each table with a column chat refuses an update that names chat or a column of its key, and everchat_chat its key and its rowid", async () => {
+  const file = newFile()
+  await withDatabase(file, Effect.void)
+  // Each update sets a column to the value that the row has, so only a
+  // trigger can refuse it: no reference, key or check is broken. The rowid is
+  // the one exception (a trigger by name never sees it): chat 3 has no rows,
+  // so no reference refuses its change either.
+  const updates: Array<readonly [table: string, statement: string]> = []
+  for (const table of names(file, "table")) {
+    const columns = rows<{ name: string; pk: number }>(file, `select name, pk from pragma_table_info('${table}')`)
+    if (table !== "everchat_chat" && !columns.some((column) => column.name === "chat")) continue
+    const named = new Set([...(table === "everchat_chat" ? [] : ["chat"]), ...columns.filter((column) => column.pk > 0).map((column) => column.name)])
+    for (const column of named) updates.push([table, `update ${table} set ${column} = ${column}`])
+  }
+  for (const alias of ["rowid", "oid", "_rowid_"]) updates.push(["everchat_chat", `update everchat_chat set ${alias} = 7 where id = 3`])
+  // Every table but the tenants and the shared lists.
+  expect([...new Set(updates.map(([table]) => table))]).toEqual(TABLES.filter((table) => !["everchat_kind", "everchat_pick", "everchat_tenant"].includes(table)))
+  const failures = await withDatabase(
+    file,
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      for (const statement of BASE) yield* sql.unsafe(statement)
+      const failures: Array<string> = []
+      for (const [table, statement] of updates) {
+        const result = yield* Effect.result(sql.unsafe(statement))
+        if (result._tag === "Success") {
+          failures.push(`${statement}: was not refused`)
+        } else if (!String(result.failure.reason.cause).includes(`${table} `)) {
+          failures.push(`${statement}: refused with "${result.failure.reason.cause}", not by a trigger of ${table}`)
+        }
+      }
+      return failures
+    })
+  )
+  expect(failures).toEqual([])
+  // The 13 tables of a chat: chat and the rest of each key (29); the chat's id;
+  // its rowid by three names.
+  expect(updates.length).toBe(33)
 })
 
 test("the delete of the tenant erases its chat and every row of the chat, and leaves the shared lists", async () => {
