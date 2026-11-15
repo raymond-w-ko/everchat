@@ -88,6 +88,7 @@ a { color: var(--accent); }
   <li><strong>New:</strong> <code>everchat_tenant</code>. <code>everchat_chat</code> has a row for each chat, with its tenant, its UUID as 16 bytes, and the counter of its events (<code>seq</code>).</li>
   <li><strong>New:</strong> keys <code>(chat, n)</code>. Each reference carries the chat, and deletes cascade from tenant to chat to rows.</li>
   <li><strong>New:</strong> <code>everchat_event</code>, a row for each event but a piece.</li>
+  <li><strong>New:</strong> more that the database refuses: a chat keeps its id, its tenant and its UUID; every table whose rows have neither <code>updated</code> nor <code>ended</code> refuses an update; a message's images go only with the chat (section 1).</li>
   <li><strong>New:</strong> each column has its SQLite type and its MariaDB type. The SQLite DDL is one block (section 8).</li>
   <li><strong>Changed:</strong> the partial indexes became forms that run on both: a generated column <code>live</code> for the live launch, and plain indexes with <code>chat</code> in front.</li>
   <li><strong>Changed:</strong> no migrator. The local file gets its schema made whole, with a mark, and a file of another schema is refused (section 1).</li>
@@ -123,18 +124,18 @@ a { color: var(--accent); }
   <li><strong>The prefix.</strong> Every name that is unique in a schema has the fixed prefix <code>everchat_</code>, written out in each statement: each table, the view, each index and each trigger. No statement builds a name. In SQLite an index's name and a trigger's name are unique in the whole file, so they take the prefix too. Foreign keys and checks have no names. The indexes that SQLite makes by itself for a <code>unique</code> or a key are named <code>sqlite_autoindex_…</code>: they are SQLite's, not ours.</li>
   <li><strong>Tenants and chats.</strong> A tenant is a separate company, possibly a competitor, and has many chats. <code>everchat_tenant.id</code> is the tenant's UUIDv4 as 16 bytes; it comes from outside [Q9, Q16]. A chat has an integer id inside, made by the database, and a UUID outside: 16 bytes, made when the chat is made, and text only at the store's edge. Two tables are shared lists, with no text of a tenant: <code>everchat_kind</code> and <code>everchat_pick</code>. Every other table but <code>everchat_tenant</code> is a table of a chat.</li>
   <li><strong>Keys <code>(chat, n)</code>.</strong> Each table of a chat has the column <code>chat</code>, and its primary key starts with it: <code>(chat, n)</code>, or <code>chat</code> and the table's own coordinates (<code>(chat, i)</code> for a message, <code>(chat, l, i)</code> for a node, <code>(chat, name)</code> for a view, <code>(chat, turn, n)</code> for a turn's item). The program makes each <code>n</code> in the transaction of its write: one more than the chat's highest <code>n</code> in that table, from 1. A message's <code>i</code> starts at 0, as the tree needs. One writer for each chat (below) makes this safe.</li>
-  <li><strong>The tenant boundary.</strong> Every statement on a table of a chat has the chat in its <code>where</code> or in its key. A reference to a row of a chat carries the chat: it is a foreign key <code>(chat, x)</code> to the parent's key <code>(chat, n)</code>. So a row of one chat cannot point to another chat's row: the database refuses it. Each statement on <code>everchat_chat</code> names the tenant: <code>where tenant = ? and uuid = ?</code>. A tag of the deployment makes and finds chats, only by their tenant and their UUID, and gives a <code>Store</code> for one chat; a chat of another tenant is not found, with the same answer as a UUID that does not exist. No member of <code>Store</code> takes a chat's id. A test with two tenants checks it [Q5, Q8, Q13].</li>
-  <li><strong>Deletes cascade</strong> from tenant to chat to rows [Q9]. <code>everchat_chat.tenant</code> refers to the tenant <code>on delete cascade</code>; each table's <code>chat</code> refers to the chat <code>on delete cascade</code>; and each reference inside a chat cascades too, so that the rows of a chat can go in any order (MariaDB checks a reference at once, and has no check deferred to the end). A reference to a shared list does not cascade: a kind or a pick in use cannot be deleted. In SQLite the trigger <code>everchat_chat_no_delete</code> lets a delete of a chat's row pass only when its tenant is gone, so the one way to erase a chat is the delete of its tenant. The delete of a tenant's row is that erase, so a REPLACE of a tenant's row would be one too: the program makes a tenant's row once, and no statement of it is a REPLACE; whether the erase of a tenant goes through a state of its own is the plan of the server package. No code deletes a tenant or a chat in the first version.</li>
+  <li><strong>The tenant boundary.</strong> Every statement on a table of a chat has the chat in its <code>where</code> or in its key. A reference to a row of a chat carries the chat: it is a foreign key <code>(chat, x)</code> to the parent's key <code>(chat, n)</code>. So a row of one chat cannot point to another chat's row: the database refuses it. Each statement on <code>everchat_chat</code> names the tenant: <code>where tenant = ? and uuid = ?</code>. A chat's id, its tenant and its UUID never change: the database refuses an update that names one of them (in SQLite the trigger <code>everchat_chat_no_move</code>, on MariaDB the user's rights, below), so no update moves a chat, with its history, to another tenant. A tag of the deployment makes and finds chats, only by their tenant and their UUID, and gives a <code>Store</code> for one chat; a chat of another tenant is not found, with the same answer as a UUID that does not exist. No member of <code>Store</code> takes a chat's id. A test with two tenants checks it [Q5, Q8, Q13].</li>
+  <li><strong>Deletes cascade</strong> from tenant to chat to rows [Q9]. <code>everchat_chat.tenant</code> refers to the tenant <code>on delete cascade</code>; each table's <code>chat</code> refers to the chat <code>on delete cascade</code>; and each reference inside a chat cascades too, so that the rows of a chat can go in any order (MariaDB checks a reference at once, and has no check deferred to the end). A reference to a shared list does not cascade, and no row of a shared list (<code>everchat_kind</code>, <code>everchat_pick</code>) is deleted, in use or not: in SQLite the triggers <code>everchat_kind_no_delete</code> and <code>everchat_pick_no_delete</code> refuse every delete, and so every REPLACE, of a row. No reference cascades into them, so the erase of a tenant does not reach them. In SQLite the trigger <code>everchat_chat_no_delete</code> lets a delete of a chat's row pass only when its tenant is gone, so the one way to erase a chat is the delete of its tenant. The delete of a tenant's row is that erase, so a REPLACE of a tenant's row would be one too: the program makes a tenant's row once, and no statement of it is a REPLACE; whether the erase of a tenant goes through a state of its own is the plan of the server package. No code deletes a tenant or a chat in the first version. On MariaDB, the composite references <code>(chat, x) … on delete cascade</code>, with the reference of <code>everchat_call</code> to itself, are not proved here: the checks of the <code>mariadb</code> package prove them.</li>
   <li><strong>One writer for each chat.</strong> In the local file, one process owns it: <code>everchat_launch</code> shows which, and a chat has at most one live launch. On a server, one active process for each deployment, with a lease row and an epoch that each write checks [Q22]; they come with the server package. Other programs may read the local file (WAL mode allows that), for example a backup.</li>
   <li><strong>One event, one transaction.</strong> Each event (a message sent, a step done, a function started) writes all its rows in one transaction. After a crash, an event is there whole or not at all. Each event but a piece (<code>text</code>, <code>thought</code>, <code>program</code>) also writes a row of <code>everchat_event</code>, in the same transaction, with <code>n</code> from the chat's counter [Q10, Q17]. Section 9 lists the events.</li>
-  <li><strong>Append only where the memory needs it.</strong> A message's id never changes and is never reused. The tree math depends on it (node <code>(l, i)</code> covers messages <code>i·2^l</code> on). <code>everchat_msg</code>, <code>everchat_node</code> and <code>everchat_event</code> refuse an <code>update</code> and a <code>delete</code>. <code>everchat_turn_item</code> and <code>everchat_usage</code> refuse an <code>update</code>. A bug in the program then cannot rewrite the chat's history.
+  <li><strong>Append only where the memory needs it.</strong> A message's id never changes and is never reused. The tree math depends on it (node <code>(l, i)</code> covers messages <code>i·2^l</code> on). <code>everchat_msg</code>, <code>everchat_msg_image</code>, <code>everchat_node</code> and <code>everchat_event</code> refuse an <code>update</code> and a <code>delete</code>: a message's images are part of it, and go only with the chat. The shared lists <code>everchat_kind</code> and <code>everchat_pick</code> refuse both too, in use or not: a message's kind and a turn's model are read through them. Every other table whose rows have neither <code>updated</code> nor <code>ended</code> refuses an <code>update</code> (the rule of <code>created</code> and <code>updated</code>, below). A bug in the program then cannot rewrite the chat's history.
     <ul>
-      <li>In SQLite, triggers do it. A trigger that refuses a <code>delete</code> lets it pass only when the row's chat is gone. SQLite deletes the chat's row first, then runs the cascade, so the cascade of a deleted chat passes and every other delete is refused. A REPLACE (<code>replace into</code>, <code>insert or replace</code>) deletes the row that it meets, and with <code>recursive_triggers = on</code> (below) that delete runs the delete trigger, so a REPLACE of a message, a node or an event is refused too. <code>everchat_turn_item</code> and <code>everchat_usage</code> allow a delete, so a REPLACE there, a delete and an insert, passes as those two statements would.</li>
-      <li>On MariaDB, the rights of the user do it, with no trigger [Q55]: on the three tables that refuse a delete, <code>SELECT</code> and <code>INSERT</code> only; on the two that refuse an update, no <code>UPDATE</code>. That a cascade passes there is not proved here: the checks of the <code>mariadb</code> package prove it.</li>
+      <li>In SQLite, triggers do it. A trigger that refuses a <code>delete</code> lets it pass only when the row's chat is gone. SQLite deletes the chat's row first, then runs the cascade, so the cascade of a deleted chat passes and every other delete is refused. A REPLACE (<code>replace into</code>, <code>insert or replace</code>) deletes the row that it meets, and with <code>recursive_triggers = on</code> (below) that delete runs the delete trigger, so a REPLACE of a message, a message's image (its row of <code>everchat_msg_image</code>), a node or an event is refused too: each of these needs the pragma. A delete or a REPLACE of an image that a message names is refused as well, through the cascade: it would delete the message's row of <code>everchat_msg_image</code>, whose trigger refuses; a cascade's delete runs the trigger, so this one does not need the pragma. The shared lists <code>everchat_kind</code> and <code>everchat_pick</code> have a delete trigger with no condition (<code>everchat_&lt;table&gt;_no_delete</code>): it refuses every delete and, with the pragma, every REPLACE. Without it, a REPLACE of a kind or a pick in use would pass, and give every message or turn that names it another kind or model: SQLite checks a reference that does not cascade only at the end of the statement, and by then a row with the same id is back. A table that refuses an update has the trigger <code>everchat_&lt;table&gt;_no_update</code>. Those of them where a delete passes (<code>everchat_tenant</code>, <code>everchat_head</code>, <code>everchat_turn_item</code>, <code>everchat_image</code>, <code>everchat_usage</code> and <code>everchat_log</code>, each as far as its cascade allows) allow a REPLACE as a delete and an insert: it passes as those two statements would.</li>
+      <li>On MariaDB, the rights of the user do it, with no trigger [Q55]. In the first version the user has <code>DELETE</code> on <code>everchat_log</code> only (the delete of a chat's old lines at its launch). It has no <code>DELETE</code> on the six tables that refuse one (the four of a chat and the two shared lists), and none on a table from which a cascade reaches them; by the references of section 8 those are <code>everchat_tenant</code>, <code>everchat_chat</code>, <code>everchat_launch</code>, <code>everchat_head</code> (through the turn), <code>everchat_turn</code>, <code>everchat_call</code> and <code>everchat_image</code> (through <code>everchat_msg_image</code>). It has no <code>UPDATE</code> on the twelve tables that refuse one, and on <code>everchat_chat</code> its <code>UPDATE</code> is a right on the columns <code>pick</code>, <code>goal</code>, <code>draft</code>, <code>taken</code>, <code>seq</code> and <code>updated</code> only (not proved here: the checks of the <code>mariadb</code> package prove it). A later version that deletes from another table adds that right then. The erase of a tenant needs a right that this user does not have: who does it, and with which rights, is the plan of the server package. That a cascade passes there is not proved here: the checks of the <code>mariadb</code> package prove it.</li>
     </ul></li>
   <li><strong>Times</strong> are integers: milliseconds since 1970-01-01 UTC. An integer takes 6 bytes, and the ISO 8601 text of draft 1 took 24. The program formats a time when it shows it to the model or to a person.</li>
   <li><strong>Order comes from ids, never from times.</strong> A clock can jump back, and a chat can move to another host. Times are for people.</li>
-  <li><strong><code>created</code> and <code>updated</code>.</strong> Every row of data has <code>created</code>. A row that can change also has the time of its last change: <code>updated</code>, or <code>ended</code> for a row that changes only once, when it closes (a turn, a call, a launch). A row that can never change has no <code>updated</code>. That absence is a statement: the rules above enforce it.</li>
+  <li><strong><code>created</code> and <code>updated</code>.</strong> Every row of data has <code>created</code>. A row that can change also has the time of its last change: <code>updated</code>, or <code>ended</code> for a row that changes only once, when it closes (a turn, a call, a launch). A row that can never change has no <code>updated</code>. That absence is a statement, and one rule enforces it: a table whose rows have neither <code>updated</code> nor <code>ended</code> refuses every <code>update</code> (in SQLite its trigger <code>everchat_&lt;table&gt;_no_update</code>, on MariaDB no <code>UPDATE</code> right). A test reads the rule from the file: each table has <code>updated</code> or <code>ended</code>, or that trigger, never both and never neither.</li>
   <li><strong>Who, what, when, where, why</strong> come from the structure, not from five more columns on each row. Section 14 has the table.</li>
   <li><strong>Small numbers for repeated values.</strong> A value that repeats on many rows of a large table, and whose list can grow, is a small integer that points to a small table (<code>everchat_kind</code>, <code>everchat_pick</code>). SQLite cannot change a <code>check</code> list without a copy of the whole table, so a list in a small table is the only cheap way to add a value later. A status on a small table stays a word with a <code>check</code>, because it is easy to read.</li>
   <li><strong>STRICT tables</strong> in SQLite: SQLite then checks each column's type.</li>
@@ -154,7 +155,7 @@ a { color: var(--accent); }
 
 <h2 id="code">2. What the code has</h2>
 
-<p>True at this commit. The code (<code>packages/sqlite/src/schema.ts</code>) still has the schema of one chat: the tables of draft 2 with the prefix <code>everchat_</code>, made whole on an empty file with no migrator, and the mark 3. It has one row of <code>everchat_chat</code> (<code>id = 1</code>) with a text UUID, ids that SQLite makes (<code>integer primary key</code>), the partial indexes, and the two agent tables of draft 2. It has no tenant, no event and no counter. It also has the table <code>everchat_image_original</code> and writes it; this schema has no such table, and the batch that brings the code to this schema takes out the table and its writes. The keys for many chats and the store bound to one chat are the next batch; the events come after it. Each later bead keeps this section true.</p>
+<p>True at this commit. The code (<code>packages/sqlite/src/schema.ts</code>) still has the schema of one chat: the tables of draft 2 with the prefix <code>everchat_</code>, made whole on an empty file with no migrator, and the mark 3. It has one row of <code>everchat_chat</code> (<code>id = 1</code>) with a text UUID, ids that SQLite makes (<code>integer primary key</code>), the partial indexes, and the two agent tables of draft 2. It has no tenant, no event and no counter. Its triggers are draft 2's: an update refused on <code>everchat_msg</code>, <code>everchat_node</code>, <code>everchat_turn_item</code>, <code>everchat_usage</code> and <code>everchat_agent_msg</code>, and a delete on <code>everchat_msg</code>, <code>everchat_node</code> and <code>everchat_agent_msg</code>; none of this draft's others. It also has the table <code>everchat_image_original</code> and writes it; this schema has no such table, and the batch that brings the code to this schema takes out the table and its writes. The keys for many chats and the store bound to one chat are the next batch; the events come after it. Each later bead keeps this section true.</p>
 
 <h2 id="map">3. The tables at a glance</h2>
 
@@ -200,6 +201,7 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(id)</code>. References: none. A delete of a tenant cascades to its chats.</li>
+  <li>SQLite trigger: <code>everchat_tenant_no_update</code>: a tenant's row never changes (section 1).</li>
 </ul>
 </div>
 
@@ -221,7 +223,8 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(id)</code>; <code>uuid</code> is unique over all tenants. EverChat makes the UUID, so a client cannot choose one to probe with. References: <code>tenant</code> to <code>everchat_tenant</code> (cascades); <code>pick</code> to <code>everchat_pick</code> (does not). Index: <code>everchat_chat_tenant (tenant)</code>, for a tenant's chats and its cascade.</li>
-  <li>A delete of a chat cascades to every row of the chat, in every table of a chat. SQLite trigger: <code>everchat_chat_no_delete</code>, which lets the delete pass only when the chat's tenant is gone (section 1). A statement on this table names the tenant (section 1).</li>
+  <li>A delete of a chat cascades to every row of the chat, in every table of a chat. SQLite triggers: <code>everchat_chat_no_delete</code>, which lets the delete pass only when the chat's tenant is gone (section 1), and <code>everchat_chat_no_move</code>: a chat's id, its tenant and its UUID never change, and an update that names one of them is refused, also when it sets the value that the row has. A statement on this table names the tenant (section 1).</li>
+  <li>On MariaDB the user's <code>UPDATE</code> on this table is a right on the columns <code>pick</code>, <code>goal</code>, <code>draft</code>, <code>taken</code>, <code>seq</code> and <code>updated</code> only, with no trigger (not proved here: the checks of the <code>mariadb</code> package prove it).</li>
 </ul>
 <p><code>taken</code> answers "which messages wait for a turn?" after a restart: the <code>user</code> and <code>work</code> messages with a higher id. A message that comes while a turn runs is logged at once, but the turn takes it in only after its step's results. The old code kept this in memory only.</p>
 <p><code>uuid</code> is the chat's id for the world outside. The factory calls it the session id, and it must be the same at every launch (ADR 0186, rule 3). The store turns it into text (<code>8-4-4-4-12</code> hex) at its edge, and back.</p>
@@ -270,6 +273,9 @@ a { color: var(--accent); }
 <tr><td><code>id</code></td><td><code>integer primary key</code></td><td><code>tinyint</code></td><td>1 <code>user</code> (the person), 2 <code>asst</code> (EverChat's reply; the old code says <code>ever</code>), 3 <code>tool</code> (a program the model ran), 4 <code>echo</code> (that program's result), 5 <code>work</code> (an agent's report), 6 <code>note</code> (a note from the program itself)</td></tr>
 <tr><td><code>name</code></td><td><code>text</code>, unique</td><td><code>varchar(16)</code></td><td></td></tr>
 </tbody></table></div>
+<ul>
+  <li>Key: <code>(id)</code>; <code>name</code> is unique. SQLite triggers: <code>everchat_kind_no_update</code> and <code>everchat_kind_no_delete</code>: a kind never changes and is never deleted, in use or not, so a REPLACE of a kind is refused too (section 1); a new kind is a new row.</li>
+</ul>
 <p><code>mind</code> (a thought) is not a kind here: thoughts are shown and never logged, as before.</p>
 </div>
 
@@ -309,6 +315,7 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(chat, msg, n)</code>; <code>without rowid</code> in SQLite. References: <code>(chat, msg)</code> to <code>everchat_msg (chat, i)</code>, <code>(chat, image)</code> to <code>everchat_image (chat, n)</code> (they cascade).</li>
+  <li>SQLite triggers: <code>everchat_msg_image_no_update</code> and <code>everchat_msg_image_no_delete</code> (a delete passes only when the chat is gone), as <code>everchat_msg</code> has: a row is part of its message, so a message cannot lose its images. A delete or a REPLACE of an image that a message names is refused through the cascade (section 1).</li>
 </ul>
 <p class="muted">It has no time of its own. It is written with its message and never changes, so the message's <code>created</code> is its time.</p>
 </div>
@@ -368,6 +375,7 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(chat, n)</code>; <code>(chat, name)</code> is unique. References: <code>chat</code> (cascades).</li>
+  <li>SQLite trigger: <code>everchat_image_no_update</code>. It has no delete trigger: an image that a message names cannot be deleted or replaced, since the cascade reaches <code>everchat_msg_image</code>, which refuses; an image that no message names can be deleted, and a REPLACE of it passes and writes the new row. No code does either.</li>
 </ul>
 <p>EverChat keeps only what it sends to the model; the original of an image belongs to the client [Q35, Q44]. So this schema has no table of originals (section 14).</p>
 <p class="muted">The blob is the last column, so a read of the other columns does not touch it.</p>
@@ -391,7 +399,7 @@ a { color: var(--accent); }
 <tr><td><code>created</code></td><td><code>integer</code></td><td><code>bigint</code></td><td></td></tr>
 </tbody></table></div>
 <ul>
-  <li>Key: <code>(id)</code>; <code>(vendor, model, effort, speed)</code> is unique. References: none.</li>
+  <li>Key: <code>(id)</code>; <code>(vendor, model, effort, speed)</code> is unique. References: none. SQLite triggers: <code>everchat_pick_no_update</code> and <code>everchat_pick_no_delete</code>: a pick never changes and is never deleted, in use or not, so a REPLACE of a pick is refused too (section 1); the program finds a pick or adds it (<code>insert … on conflict do nothing</code>).</li>
 </ul>
 </div>
 
@@ -407,7 +415,7 @@ a { color: var(--accent); }
 <tr><td><code>created</code></td><td><code>integer</code></td><td><code>bigint</code></td><td></td></tr>
 </tbody></table></div>
 <ul>
-  <li>Key: <code>(chat, n)</code>; <code>(chat, hash)</code> is unique. References: <code>chat</code> (cascades).</li>
+  <li>Key: <code>(chat, n)</code>; <code>(chat, hash)</code> is unique. References: <code>chat</code> (cascades). SQLite trigger: <code>everchat_head_no_update</code>: a head never changes; the program finds it by its hash or adds it.</li>
 </ul>
 <p class="muted">This also gives the cache rule in <code>askai.ts</code> the fact it lacks today: two requests can share a cache prefix only if they have the same head (docs/api-audit.md, A3).</p>
 </div>
@@ -483,7 +491,7 @@ a { color: var(--accent); }
 <tr><td><code>created</code>, <code>ended</code></td><td><code>integer</code></td><td><code>bigint</code></td><td></td></tr>
 </tbody></table></div>
 <ul>
-  <li>Key: <code>(chat, n)</code>. Checks: <code>(parent is null) = (vendor_id is not null)</code>; <code>(status = 'running') = (ended is null)</code>. References: <code>(chat, turn)</code> to <code>everchat_turn</code>, <code>(chat, parent)</code> to <code>everchat_call</code>, <code>(chat, launch)</code> to <code>everchat_launch</code> (they cascade).</li>
+  <li>Key: <code>(chat, n)</code>. Checks: <code>(parent is null) = (vendor_id is not null)</code>; <code>(status = 'running') = (ended is null)</code>. References: <code>(chat, turn)</code> to <code>everchat_turn</code>, <code>(chat, parent)</code> to <code>everchat_call</code>, <code>(chat, launch)</code> to <code>everchat_launch</code> (they cascade). The reference of the table to itself on MariaDB is not proved here: the checks of the <code>mariadb</code> package prove it.</li>
   <li>Indexes, in place of draft 2's three partial ones: <code>everchat_call_vendor</code>, unique on <code>(chat, turn, vendor_id)</code> (a unique index takes many nulls, so a function's row, with no vendor id, never clashes); <code>everchat_call_parent (chat, parent)</code>; <code>everchat_call_running (chat, status)</code>.</li>
 </ul>
 <ul>
@@ -593,6 +601,7 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(chat, n)</code>. References: <code>(chat, launch)</code> to <code>everchat_launch</code> (cascades).</li>
+  <li>SQLite trigger: <code>everchat_log_no_update</code>: a line never changes; old lines are deleted (above).</li>
 </ul>
 </div>
 
@@ -621,7 +630,7 @@ a { color: var(--accent); }
 
 <div class="card">
 <h3>For people: a readable query</h3>
-<p>Numbers for kinds and times are harder to read in the <code>sqlite3</code> shell. So the schema has a read-only query for people, the view <code>everchat_msg_read</code>. It costs no space. It has the chat in each row, and a reader puts the chat in its <code>where</code>. On MariaDB its time is <code>from_unixtime(m.created / 1000)</code>, since SQLite's <code>datetime(…, 'unixepoch')</code> does not exist there.</p>
+<p>Numbers for kinds and times are harder to read in the <code>sqlite3</code> shell. So the schema has a read-only query for people, the view <code>everchat_msg_read</code>. It costs no space. It has the chat in each row, and a reader puts the chat in its <code>where</code>. On MariaDB its time is <code>from_unixtime(m.created / 1000)</code>, since SQLite's <code>datetime(…, 'unixepoch')</code> does not exist there (not proved here: the checks of the <code>mariadb</code> package prove it).</p>
 </div>
 
 <h2 id="ddl">8. The SQLite DDL</h2>
@@ -636,6 +645,8 @@ create table everchat_tenant (
   id      blob    not null primary key check (length(id) = 16),
   created integer not null
 ) strict;
+create trigger everchat_tenant_no_update before update on everchat_tenant
+  begin select raise(abort, 'everchat_tenant is append only'); end;
 
 -- A model choice: a shared list. Other tables hold its number.
 create table everchat_pick (
@@ -647,6 +658,10 @@ create table everchat_pick (
   created integer not null,
   unique (vendor, model, effort, speed)
 ) strict;
+create trigger everchat_pick_no_update before update on everchat_pick
+  begin select raise(abort, 'everchat_pick is append only'); end;
+create trigger everchat_pick_no_delete before delete on everchat_pick
+  begin select raise(abort, 'everchat_pick is append only'); end;
 
 -- The kinds of message: a shared list, the same as KINDS in the code.
 create table everchat_kind (
@@ -654,6 +669,10 @@ create table everchat_kind (
   name text    not null unique
 ) strict;
 insert into everchat_kind (id, name) values (1, 'user'), (2, 'asst'), (3, 'tool'), (4, 'echo'), (5, 'work'), (6, 'note');
+create trigger everchat_kind_no_update before update on everchat_kind
+  begin select raise(abort, 'everchat_kind is append only'); end;
+create trigger everchat_kind_no_delete before delete on everchat_kind
+  begin select raise(abort, 'everchat_kind is append only'); end;
 
 -- Each chat of a tenant. The database makes its id; the UUID is its id outside.
 create table everchat_chat (
@@ -671,6 +690,8 @@ create table everchat_chat (
 create index everchat_chat_tenant on everchat_chat (tenant);
 create trigger everchat_chat_no_delete before delete on everchat_chat when exists (select 1 from everchat_tenant where id = old.tenant)
   begin select raise(abort, 'everchat_chat is deleted only with its tenant'); end;
+create trigger everchat_chat_no_move before update of id, tenant, uuid on everchat_chat
+  begin select raise(abort, 'everchat_chat keeps its id, its tenant and its uuid'); end;
 
 -- Each load of a chat. At most one live launch for each chat.
 create table everchat_launch (
@@ -700,6 +721,8 @@ create table everchat_head (
   primary key (chat, n),
   unique (chat, hash)
 ) strict;
+create trigger everchat_head_no_update before update on everchat_head
+  begin select raise(abort, 'everchat_head is append only'); end;
 
 -- Each turn of the chat.
 create table everchat_turn (
@@ -800,6 +823,8 @@ create table everchat_image (
   primary key (chat, n),
   unique (chat, name)
 ) strict;
+create trigger everchat_image_no_update before update on everchat_image
+  begin select raise(abort, 'everchat_image is append only'); end;
 
 -- Which images a message carries, in order.
 create table everchat_msg_image (
@@ -811,6 +836,10 @@ create table everchat_msg_image (
   foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade,
   foreign key (chat, image) references everchat_image (chat, n) on delete cascade
 ) strict, without rowid;
+create trigger everchat_msg_image_no_update before update on everchat_msg_image
+  begin select raise(abort, 'everchat_msg_image is append only'); end;
+create trigger everchat_msg_image_no_delete before delete on everchat_msg_image when exists (select 1 from everchat_chat where id = old.chat)
+  begin select raise(abort, 'everchat_msg_image is append only'); end;
 
 -- The tree of summaries. Node (l, i) covers the 2^l messages from i·2^l on.
 create table everchat_node (
@@ -874,6 +903,8 @@ create table everchat_log (
   primary key (chat, n),
   foreign key (chat, launch) references everchat_launch (chat, n) on delete cascade
 ) strict;
+create trigger everchat_log_no_update before update on everchat_log
+  begin select raise(abort, 'everchat_log is append only'); end;
 
 -- Each event but a piece, numbered in its chat: n is the chat's seq plus 1.
 create table everchat_event (
@@ -1172,7 +1203,13 @@ from everchat_msg m join everchat_kind k on k.id = m.kind;</code></pre>
 
 <h2 id="questions">15. Open questions</h2>
 
-<p>None of this page's own. The points left for the adapter's ADR are in section 13. Points that later work settles: the collation of the MariaDB tables, and the cascade on MariaDB under the rights of the user (section 1).</p>
+<p>None of this page's own. The points left for the adapter's ADR are in section 13. Points that later work settles: the collation of the MariaDB tables (section 1). And the MariaDB forms that no research ran, each not proved here, which the checks of the <code>mariadb</code> package prove:</p>
+<ul>
+  <li>The cascade under the rights of the user, and whether InnoDB lets a cascade pass on a child table where the user has no <code>DELETE</code> (section 1).</li>
+  <li>The composite references <code>(chat, x) … on delete cascade</code>, with the reference of <code>everchat_call</code> to itself (section 1).</li>
+  <li>The right of <code>UPDATE</code> on the columns of <code>everchat_chat</code> only, which keeps a chat's id, tenant and UUID (section 4).</li>
+  <li>The view's time, <code>from_unixtime(m.created / 1000)</code> (section 7).</li>
+</ul>
 
 </main>
 </body>
