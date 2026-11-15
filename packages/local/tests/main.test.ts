@@ -43,8 +43,8 @@ const RESTORED = ["\x1b[?25h", "\x1b[?2004l"]
 
 const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 // Why a launch ended: "exit" (a quit), "signal", "error", or "crash" (the next launch found it open).
-const launches = (file: string) => rows<{ id: number; ended: number | null; why: string | null }>(file, "select id, ended, why from everchat_launch order by id")
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
+const launches = (file: string) => rows<{ id: number; ended: number | null; why: string | null }>(file, "select n as id, ended, why from everchat_launch order by n")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select n as id, status from everchat_turn order by n")
 
 test("a launch in a terminal: a message, the reply as it streams, and a clean quit", async () => {
   const at = place()

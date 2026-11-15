@@ -65,7 +65,7 @@ test("it serves the page of a chat that no process has open, and a signal ends i
   const server = vendor(() => text("Hello."))
   open.push(server.stop)
   await chat(at, server.address, "hello there\n")
-  const before = rows(at.file, "select id, ended, why from everchat_launch")
+  const before = rows(at.file, "select n as id, ended, why from everchat_launch")
   const { out, proc, url } = await inspect(at)
   // The address alone on the standard output.
   expect(out).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{32}\/\n$/)
@@ -79,7 +79,7 @@ test("it serves the page of a chat that no process has open, and a signal ends i
   proc.kill("SIGTERM")
   expect(await proc.exited).toBe(130)
   // It took no launch, and it wrote nothing.
-  expect(rows(at.file, "select id, ended, why from everchat_launch")).toEqual(before)
+  expect(rows(at.file, "select n as id, ended, why from everchat_launch")).toEqual(before)
   expect((await fetch(url).catch(() => null)) === null).toBe(true)
 })
 

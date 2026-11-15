@@ -31,8 +31,8 @@ const run = async (at: ReturnType<typeof place>, address: string | undefined, in
 }
 
 const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
-const launches = (file: string) => rows<{ ended: number | null; why: string | null }>(file, "select ended, why from everchat_launch order by id")
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
+const launches = (file: string) => rows<{ ended: number | null; why: string | null }>(file, "select ended, why from everchat_launch order by n")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select n as id, status from everchat_turn order by n")
 
 test("a line of the standard input is a message, and each message goes to the standard output as text", async () => {
   const at = place()

@@ -82,7 +82,7 @@ const withSandbox = <A, E>(
 const functionRows = (file: string) =>
   rows<{ parent: number; fn: string; input: string; output: string | null; status: string }>(
     file,
-    "select parent, fn, input, output, status from everchat_call where parent is not null order by id"
+    "select parent, fn, input, output, status from everchat_call where parent is not null order by n"
   )
 
 // A program's result

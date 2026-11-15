@@ -19,16 +19,24 @@
 //   store makes each text well formed before the write, and gives back what
 //   it wrote. `size` is the length of that text in UTF-8 bytes.
 // - Times come from Effect's clock, in milliseconds. Order comes from ids.
+// - A store is bound to one chat. Each of its reads and writes is of that
+//   chat, and no member takes a chat: a row's number (`id`, a message's `i`)
+//   is a number in the chat. The local file has one chat, of one tenant,
+//   made by its first launch. A file can hold the chats of many tenants:
+//   `Chats` makes them, and finds a chat only by its tenant and its UUID. A
+//   chat's UUID, and a tenant's, is text here, 16 bytes in the file.
 //
-// The store has two parts. `Store` is all of it, for the launch that owns the
-// file. `Reads` is only its reads, for a process that does not own the file
+// The store has two parts, and a tag above them. `Store` is all of it, for
+// the launch that owns the file (or the chat). `Reads` is only its reads, for a process that does not own the file
 // (the inspector): it takes no launch and it writes nothing, over a
 // connection that cannot write. Such a process can read while a launch runs,
 // because the database is in WAL mode: a reader does not block the writer.
+// `Chats`, the tag of a deployment, makes chats and gives a `Store` or the
+// reads of one chat.
 //
 // Not here yet: the agents. They come with the code that needs them.
 
-import { Context, type Effect, type Option, Schema } from "effect"
+import { Context, type Effect, type Option, Schema, type Scope } from "effect"
 
 // Data
 // ----
@@ -134,7 +142,8 @@ export interface Launch extends LaunchInput {
   readonly created: number
 }
 
-// An image as it was sent to the model.
+// An image as it was sent to the model. Its original, when that was not
+// what was sent, is not kept (docs/schema.html, "Keep the original image?").
 export interface Image {
   readonly id: number
   readonly name: string
@@ -153,13 +162,6 @@ export interface NewImage {
   readonly height: number
   readonly source: "person" | "tool"
   readonly bytes: Uint8Array
-  // The image as it was given, when that is not what was sent.
-  readonly original?: {
-    readonly type: string
-    readonly width: number
-    readonly height: number
-    readonly bytes: Uint8Array
-  } | undefined
 }
 
 // What one request to a model used.
@@ -329,6 +331,15 @@ export class LaunchLive extends Schema.TaggedError<LaunchLive>()("LaunchLive", {
   created: Schema.Int
 }) {}
 
+// No chat of this tenant has this UUID. One answer, with no field, for a
+// UUID that no chat has, for a chat of another tenant, and for a text that
+// is no UUID: so a tenant cannot learn that another tenant's chat exists.
+export class NoChat extends Schema.TaggedError<NoChat>()("NoChat", {}) {
+  override get message() {
+    return "This tenant has no chat with this UUID."
+  }
+}
+
 // The services
 // ------------
 
@@ -457,6 +468,21 @@ export class Store extends Context.Service<Store, Reading & {
   addDiagnostics(rows: ReadonlyArray<NewDiagnostic>): Effect.Effect<void, StoreError>
   dropDiagnostics(before: number): Effect.Effect<number, StoreError>
 }>()("everchat/store/Store") {}
+
+// The chats of a deployment, in one database. A tenant and a chat are their
+// UUIDs, as text (8-4-4-4-12); a chat is found only by its tenant and its
+// UUID. `make` makes a chat of `tenant`, with its first pick, and gives the
+// chat's UUID; it makes the tenant's row when it is not there. `store` gives
+// the store of the chat for one launch, in a scope: it takes the chat (a
+// row of `launch`, as `storeLayer` does for the local file's chat), and
+// ends that launch when the scope closes. `reads` gives the chat's reads.
+// `store` and `reads` fail with `NoChat` for any chat that is not the
+// tenant's.
+export class Chats extends Context.Service<Chats, {
+  make(tenant: string, pick: Pick): Effect.Effect<string, StoreError>
+  store(tenant: string, chat: string, launch: LaunchInput): Effect.Effect<typeof Store.Service, NoChat | LaunchLive | StoreError, Scope.Scope>
+  reads(tenant: string, chat: string): Effect.Effect<Reading, NoChat | StoreError>
+}>()("everchat/store/Chats") {}
 
 export interface Options {
   readonly launch: LaunchInput

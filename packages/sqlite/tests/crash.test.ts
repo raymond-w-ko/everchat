@@ -52,7 +52,7 @@ test("a kill in the middle of an event leaves the event before it whole, and not
   // The id of the cut message is free again: the log has no gap.
   expect(after.next[0]?.i).toBe(1)
   expect(after.launch).toBe(2)
-  expect(rows(file, "select id, pid, why from everchat_launch order by id")).toEqual([
+  expect(rows(file, "select n as id, pid, why from everchat_launch order by n")).toEqual([
     { id: 1, pid: child.pid, why: "crash" },
     { id: 2, pid: process.pid, why: "exit" }
   ])
@@ -70,7 +70,7 @@ test("a start while another process has the file stops, and a start after its de
   }
   const launch = await withStore(file, Store.useSync((store) => store.launch.id))
   expect(launch).toBe(2)
-  expect(rows(file, "select why from everchat_launch order by id")).toEqual([{ why: "crash" }, { why: "exit" }])
+  expect(rows(file, "select why from everchat_launch order by n")).toEqual([{ why: "crash" }, { why: "exit" }])
 })
 
 test("the store works inside one compiled executable, away from node_modules", async () => {

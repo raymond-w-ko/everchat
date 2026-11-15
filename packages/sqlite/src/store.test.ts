@@ -2,29 +2,28 @@
 // views, and what a failed write leaves behind.
 
 import { expect, test } from "bun:test"
-import { Effect, Exit, Option, Schema } from "effect"
+import { Database as Sqlite } from "bun:sqlite"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { newFile, options, PICK, rows, withStore, write } from "../tests/help.ts"
+import { newFile, options, PICK, rows, withChats, withStore, write } from "../tests/help.ts"
 import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
-import { ProcessAlive, readsLayer, storeLayer } from "./sqlite.ts"
-import { DatabaseVersion, LaunchLive, type Part, Reads, Store, StoreError } from "@everchat/core/store"
+import { chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
+import { Chats, DatabaseVersion, LaunchLive, NoChat, type Part, Reads, Store, StoreError } from "@everchat/core/store"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
     file,
-    "select id, pid, ended is not null as ended, why from everchat_launch order by id"
+    "select n as id, pid, ended is not null as ended, why from everchat_launch order by n"
   )
 
-// Leaves a launch open in the file, as a crash does.
+// Leaves a launch open in the file, as a crash does: the file's chat with
+// one launch, of the process `pid` of `host`, that did not end.
 const crash = async (file: string, pid: number, host = "test-host") => {
-  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(file))))
-  write(file, "insert into everchat_launch (pid, host, cwd, version, run_tag, created) values (?, ?, '/work', '0', 'old', 1)", [
-    pid,
-    host
-  ])
+  await withStore(file, Effect.void)
+  write(file, "update everchat_launch set pid = ?, host = ?, run_tag = 'old', created = 1, ended = null, why = null", [pid, host])
 }
 
 // The launch
@@ -65,7 +64,7 @@ test("a launch records its pick from the command line", async () => {
   const pick = { vendor: "openai", model: "big", effort: "high", speed: "fast" }
   const launch = await withStore(file, Store.useSync((store) => store.launch), options({ pick }))
   expect(launch.pick).toEqual(pick)
-  expect(rows(file, "select p.model from everchat_launch l join everchat_pick p on p.id = l.pick")).toEqual([{ model: "big" }])
+  expect(rows(file, "select p.model from everchat_launch l join everchat_pick p on p.id = l.pick where l.chat = 1")).toEqual([{ model: "big" }])
 })
 
 test("a launch that fails ends with why = error, and one that is interrupted with why = signal", async () => {
@@ -115,6 +114,120 @@ test("an open launch with our own pid, or of another host, is a crash", async ()
   await crash(moved, 4242, "another-host")
   expect(await start(moved)).toBe(2)
   expect(launches(moved)[0]).toMatchObject({ why: "crash" })
+})
+
+// The file's tenant and its chat
+// -------------------------------
+
+// The counts of the tenants and the chats in `file`, and their ids.
+const owners = (file: string) => ({
+  tenants: rows<{ id: string }>(file, "select hex(id) as id from everchat_tenant"),
+  chats: rows<{ id: number; tenant: string; uuid: string }>(file, "select id, hex(tenant) as tenant, hex(uuid) as uuid from everchat_chat")
+})
+
+test("the first launch makes one tenant and one chat, and the second launch makes none", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  const first = owners(file)
+  expect([first.tenants.length, first.chats.length]).toEqual([1, 1])
+  expect(first.chats[0]!.tenant).toBe(first.tenants[0]!.id)
+  await withStore(file, Effect.void)
+  expect(owners(file)).toEqual(first)
+  expect(launches(file).map((launch) => launch.id)).toEqual([1, 2])
+})
+
+test("the chat's UUID is 16 bytes in the file, and the same UUID as text at the store's edge; the tenant's id is the 16 bytes of a UUIDv4", async () => {
+  const file = newFile()
+  const uuid = await withStore(file, Store.use((store) => Effect.map(store.chat, (chat) => chat.uuid)))
+  expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  expect(rows(file, "select typeof(uuid) as type, length(uuid) as size, lower(hex(uuid)) as hex from everchat_chat")).toEqual([
+    { type: "blob", size: 16, hex: uuid.replaceAll("-", "") }
+  ])
+  const [tenant] = rows<{ type: string; size: number; hex: string }>(file, "select typeof(id) as type, length(id) as size, lower(hex(id)) as hex from everchat_tenant")
+  expect([tenant!.type, tenant!.size]).toEqual(["blob", 16])
+  // The version nibble of a UUIDv4, and its variant.
+  expect(tenant!.hex).toMatch(/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/)
+  expect(tenant!.hex).not.toBe(uuid.replaceAll("-", ""))
+  // Read again by a later launch, and by the reads: the same text.
+  expect(await withStore(file, Store.use((store) => Effect.map(store.chat, (chat) => chat.uuid)))).toBe(uuid)
+  expect(await Effect.runPromise(Reads.use((reads) => Effect.map(reads.chat, (chat) => chat.uuid)).pipe(Effect.provide(readsLayer(file))))).toBe(uuid)
+})
+
+test("each table's first row of the chat has n 1 and the next 2; a message's i, a turn's item and a message's image start at 0", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const a = yield* store.putImage({ name: "a.png", type: "image/png", width: 1, height: 1, source: "person", bytes: new Uint8Array([1]) })
+    const b = yield* store.putImage({ name: "b.png", type: "image/png", width: 1, height: 1, source: "person", bytes: new Uint8Array([2]) })
+    expect([a, b]).toEqual([1, 2])
+    const messages = yield* store.append([{ kind: "user", text: "one", images: [a, b] }, { kind: "user", text: "two" }])
+    expect(messages.map((message) => message.i)).toEqual([0, 1])
+    expect([yield* store.putHead("{}"), yield* store.putHead("[]")]).toEqual([1, 2])
+    const first = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const second = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 1 })
+    expect([first.id, second.id]).toEqual([1, 2])
+    expect([yield* store.addTurnItem(first.id, "user", "{}"), yield* store.addTurnItem(first.id, "turn", "{}")]).toEqual([0, 1])
+    expect(yield* store.addTurnItem(second.id, "user", "{}")).toBe(0)
+    const program = yield* store.startCall({ turn: first.id, vendorId: "call_1", fn: "run", input: "x" })
+    expect([program, yield* store.startCall({ turn: first.id, parent: program, fn: "shell", input: "[]" })]).toEqual([1, 2])
+    yield* store.addUsage({ served: "turn", turn: first.id, pick: PICK, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 })
+    yield* store.addUsage({ served: "turn", turn: second.id, pick: PICK, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 })
+    yield* store.addDiagnostics([{ level: "info", source: "test", text: "one", created: 1 }, { level: "info", source: "test", text: "two", created: 2 }])
+  }))
+  for (const table of ["everchat_launch", "everchat_head", "everchat_turn", "everchat_call", "everchat_image", "everchat_usage", "everchat_log"]) {
+    expect([table, rows<{ n: number }>(file, `select n from ${table} where chat = 1 order by n`).map((row) => row.n)]).toEqual([table, [1, 2]])
+  }
+  expect(rows(file, "select turn, n from everchat_turn_item where chat = 1 order by turn, n")).toEqual([{ turn: 1, n: 0 }, { turn: 1, n: 1 }, { turn: 2, n: 0 }])
+  expect(rows(file, "select msg, n from everchat_msg_image where chat = 1 order by n")).toEqual([{ msg: 0, n: 0 }, { msg: 0, n: 1 }])
+  expect(rows(file, "select i from everchat_msg where chat = 1 order by i")).toEqual([{ i: 0 }, { i: 1 }])
+})
+
+// The store and its own connection: the `SqlClient` that it writes with.
+const withConnection = <A, E>(file: string, effect: Effect.Effect<A, E, Store | SqlClient.SqlClient>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(storeLayerNoDatabase(options()).pipe(Layer.provideMerge(Database.layer(file))))))
+
+// The error's text of `statement` on `sql`, or "passed".
+const refused = (sql: SqlClient.SqlClient, statement: string, params: ReadonlyArray<unknown> = []) =>
+  Effect.map(Effect.result(sql.unsafe(statement, params)), (result) => (result._tag === "Success" ? "passed" : String(result.failure.reason.cause)))
+
+test("through the store's own connection, a REPLACE of a message, a node and an event is refused, and so are a delete, a REPLACE and a move of the chat's row", async () => {
+  const file = newFile()
+  const errors = await withConnection(file, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    yield* store.append([{ kind: "user", text: "kept" }])
+    yield* store.putNodes([{ l: 0, i: 0, text: "user: kept" }])
+    const [chat] = yield* sql<{ id: number; tenant: Uint8Array; uuid: Uint8Array; pick: number }>`select id, tenant, uuid, pick from everchat_chat`
+    const { id, pick, tenant, uuid } = chat!
+    // No statement of the store writes an event yet: one row, by hand. It
+    // names no message, so that each REPLACE below meets only its own
+    // table's trigger.
+    yield* sql`insert into everchat_event (chat, n, type, created) values (${id}, 1, 'start', 1)`
+    return {
+      message: yield* refused(sql, "replace into everchat_msg (chat, i, kind, text, size, launch, created) values (?, 0, 1, 'other', 5, 1, 1)", [id]),
+      message2: yield* refused(sql, "insert or replace into everchat_msg (chat, i, kind, text, size, launch, created) values (?, 0, 1, 'other', 5, 1, 1)", [id]),
+      node: yield* refused(sql, "insert or replace into everchat_node (chat, l, i, text, size, created) values (?, 0, 0, 'other', 5, 1)", [id]),
+      event: yield* refused(sql, "replace into everchat_event (chat, n, type, created) values (?, 1, 'end', 1)", [id]),
+      deleted: yield* refused(sql, "delete from everchat_chat where tenant = ? and id = ?", [tenant, id]),
+      replaced: yield* refused(sql, "replace into everchat_chat (id, tenant, uuid, pick, created, updated) values (?, ?, ?, ?, 1, 1)", [id, tenant, uuid, pick]),
+      moved: yield* refused(sql, "update everchat_chat set tenant = ? where tenant = ? and id = ?", [new Uint8Array(16), tenant, id]),
+      chat: yield* store.chat,
+      count: yield* store.count
+    }
+  }))
+  expect(errors.message).toContain("everchat_msg is append only")
+  expect(errors.message2).toContain("everchat_msg is append only")
+  expect(errors.node).toContain("everchat_node is written once")
+  expect(errors.event).toContain("everchat_event is append only")
+  expect(errors.deleted).toContain("everchat_chat is deleted only with its tenant")
+  expect(errors.replaced).toContain("everchat_chat is deleted only with its tenant")
+  expect(errors.moved).toContain("everchat_chat keeps its id, its tenant and its uuid")
+  expect([errors.count, errors.chat.pick]).toEqual([1, PICK])
+  expect(rows(file, "select i, text from everchat_msg")).toEqual([{ i: 0, text: "kept" }])
+  expect(rows(file, "select text from everchat_node")).toEqual([{ text: "user: kept" }])
+  expect(rows(file, "select type from everchat_event")).toEqual([{ type: "start" }])
+  expect(rows(file, "select count(*) as n from everchat_chat")).toEqual([{ n: 1 }])
 })
 
 // The chat's row
@@ -311,10 +424,9 @@ test("a store error inside a transaction takes back the writes before it", async
 // Images, heads, usage
 // --------------------
 
-test("an image is stored once by name, with its original only when one is given", async () => {
+test("an image is stored once by name", async () => {
   const file = newFile()
   const png = new Uint8Array([1, 2, 3])
-  const big = new Uint8Array(100_000).fill(7)
   const result = await withStore(file, Effect.gen(function*() {
     const store = yield* Store
     const sent = { name: "aa.png", type: "image/png", width: 2, height: 1, source: "person" as const, bytes: png }
@@ -326,8 +438,7 @@ test("an image is stored once by name, with its original only when one is given"
       width: 1568,
       height: 1000,
       source: "tool",
-      bytes: png,
-      original: { type: "image/png", width: 4000, height: 2551, bytes: big }
+      bytes: png
     })
     const [message] = yield* store.append([{ kind: "user", text: "look", images: [b, a] }])
     return { a, again, b, image: yield* store.image(a), none: yield* store.image(99), of: yield* store.imagesOf(message!.i) }
@@ -338,9 +449,8 @@ test("an image is stored once by name, with its original only when one is given"
   const image = Option.getOrThrow(result.image)
   expect([image.name, image.type, image.width, image.height, image.source]).toEqual(["aa.png", "image/png", 2, 1, "person"])
   expect([...image.bytes]).toEqual([1, 2, 3])
-  expect(rows(file, "select image, width, length(bytes) as n from everchat_image_original")).toEqual([
-    { image: result.b, width: 4000, n: 100_000 }
-  ])
+  // A message's images, in their order.
+  expect(rows(file, "select msg, n, image from everchat_msg_image order by n")).toEqual([{ msg: 0, n: 0, image: result.b }, { msg: 0, n: 1, image: result.a }])
 })
 
 test("a head is stored once, and found by its text", async () => {
@@ -369,7 +479,7 @@ test("a usage row points to its pick, and equal picks are one row", async () => 
   expect(rows(file, "select count(*) as n from everchat_pick")).toEqual([{ n: 2 }])
   expect(rows(file, `
     select u.served, u.node_l, u.node_i, p.model, u.request, u.input, u.cache_read, u.cache_write, u.output, u.searches, u.micros, u.expected
-    from everchat_usage u join everchat_pick p on p.id = u.pick order by u.id`)).toEqual([
+    from everchat_usage u join everchat_pick p on p.id = u.pick order by u.n`)).toEqual([
     { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_1", input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: null, expected: null },
     { served: "compaction", node_l: 0, node_i: 1, model: "small", request: null, input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: 1234, expected: 9100 }
   ])
@@ -474,7 +584,7 @@ test("the reads' connection cannot write", async () => {
   const failed = await Effect.runPromise(
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
-      return yield* Effect.flip(sql`insert into everchat_msg (i, kind, text, size, launch, created) values (1, 1, 'two', 3, 1, 1)`)
+      return yield* Effect.flip(sql`insert into everchat_msg (chat, i, kind, text, size, launch, created) values (1, 1, 1, 'two', 3, 1, 1)`)
     }).pipe(Effect.provide(Database.readonly(file)))
   )
   expect(String(failed.reason.cause)).toContain("readonly database")
@@ -564,4 +674,278 @@ test("the tree by level, the turns, the calls, the usage and the launches are re
     ])
     expect((yield* reads.launches(5)).map((one) => [one.id, one.host, one.cwd, one.version, one.why])).toEqual([[1, "test-host", "/work", "0.0.0-test", "exit"]])
   }))
+})
+
+// The tag of a deployment
+// -----------------------
+
+// Two tenants of a hosted deployment, by their UUIDs.
+const TENANT_A = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a"
+const TENANT_B = "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"
+const LAUNCH = options().launch
+
+// A UUID of the file's hex, as text.
+const asUuid = (hex: string) => {
+  const h = hex.toLowerCase()
+  return [h.slice(0, 8), h.slice(8, 12), h.slice(12, 16), h.slice(16, 20), h.slice(20)].join("-")
+}
+
+test("Chats: two tenants with a chat each in one file", async () => {
+  const file = newFile()
+  const made = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const a = yield* chats.make(TENANT_A, PICK)
+    const b = yield* chats.make(TENANT_B, { ...PICK, model: "gpt-other" })
+    const storeA = yield* chats.store(TENANT_A, a, LAUNCH)
+    const storeB = yield* chats.store(TENANT_B, b, LAUNCH)
+    const readsA = yield* chats.reads(TENANT_A, a)
+    return {
+      a,
+      b,
+      seen: [(yield* storeA.chat).uuid, (yield* storeB.chat).uuid, (yield* readsA.chat).uuid],
+      models: [(yield* storeA.chat).pick.model, (yield* storeB.chat).pick.model]
+    }
+  }))
+  expect(made.a).not.toBe(made.b)
+  expect(made.seen).toEqual([made.a, made.b, made.a])
+  expect(made.models).toEqual(["gpt-test", "gpt-other"])
+  const { chats, tenants } = owners(file)
+  expect(tenants.map((tenant) => asUuid(tenant.id)).sort()).toEqual([TENANT_A, TENANT_B])
+  expect(chats.map((chat) => [asUuid(chat.tenant), asUuid(chat.uuid)]).sort()).toEqual([[TENANT_A, made.a], [TENANT_B, made.b]])
+})
+
+test("Chats: store and reads with tenant A and the UUID of B's chat fail with NoChat, equal in every field to a UUID that no chat has and a text that is no UUID", async () => {
+  const file = newFile()
+  const failures = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const a = yield* chats.make(TENANT_A, PICK)
+    const b = yield* chats.make(TENANT_B, PICK)
+    // The tenant and the chat that each call names.
+    const asked: ReadonlyArray<readonly [string, string]> = [
+      [TENANT_A, b], // B's chat
+      [TENANT_A, crypto.randomUUID()], // no chat has it
+      [TENANT_A, "not a uuid"], // no UUID
+      [TENANT_A, a.toUpperCase() + "0"], // no UUID: one digit too many
+      [crypto.randomUUID(), a], // a tenant that is not there
+      [TENANT_B, a] // A's chat, asked by B
+    ]
+    const got: Array<unknown> = []
+    for (const [tenant, chat] of asked) {
+      got.push(yield* Effect.flip(chats.store(tenant, chat, LAUNCH)))
+      got.push(yield* Effect.flip(chats.reads(tenant, chat)))
+    }
+    return got
+  }))
+  expect(failures).toHaveLength(12)
+  const shape = (error: unknown) => ({
+    isNoChat: error instanceof NoChat,
+    tag: (error as NoChat)._tag,
+    message: (error as NoChat).message,
+    keys: Object.keys(error as object),
+    json: JSON.stringify(error),
+    text: String(error)
+  })
+  const first = shape(failures[0])
+  expect(first).toEqual({
+    isNoChat: true,
+    tag: "NoChat",
+    message: "This tenant has no chat with this UUID.",
+    keys: ["_tag"],
+    json: "{\"_tag\":\"NoChat\"}",
+    text: "NoChat: This tenant has no chat with this UUID."
+  })
+  for (const failure of failures) expect(shape(failure)).toEqual(first)
+  // A store that was refused took no launch.
+  expect(launches(file)).toEqual([])
+})
+
+test("Chats: make for a tenant that is there makes no second tenant's row", async () => {
+  const file = newFile()
+  const made = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    return [yield* chats.make(TENANT_A, PICK), yield* chats.make(TENANT_A, PICK)]
+  }))
+  const { chats, tenants } = owners(file)
+  expect(tenants.map((tenant) => asUuid(tenant.id))).toEqual([TENANT_A])
+  expect(chats.map((chat) => asUuid(chat.uuid)).sort()).toEqual([...made].sort())
+  expect(chats.every((chat) => asUuid(chat.tenant) === TENANT_A)).toBe(true)
+  // A tenant that is no UUID makes nothing.
+  const refused = await withChats(file, Effect.flip(Chats.use((chats) => chats.make("not a uuid", PICK))))
+  expect(refused).toBeInstanceOf(StoreError)
+  expect(owners(file).chats).toHaveLength(2)
+})
+
+test("Chats: two stores of two chats, open at the same time, each with its own launch, write and read their own rows", async () => {
+  const file = newFile()
+  const seen = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const a = yield* chats.store(TENANT_A, yield* chats.make(TENANT_A, PICK), LAUNCH)
+    const b = yield* chats.store(TENANT_B, yield* chats.make(TENANT_B, PICK), LAUNCH)
+    const say = (store: typeof a, text: string) => store.append([{ kind: "user", text, line: null, turn: null, call: null }])
+    // The writes interleave: a, b, a, b.
+    yield* say(a, "a 1")
+    yield* say(b, "b 1")
+    const turnA = yield* a.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    yield* say(b, "b 2")
+    const turnB = yield* b.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    yield* say(a, "a 2")
+    yield* a.addDiagnostics([{ level: "info", source: "test", text: "from a", created: 1 }])
+    yield* b.addDiagnostics([{ level: "info", source: "test", text: "from b", created: 1 }])
+    const of = (store: typeof a) =>
+      Effect.gen(function*() {
+        return {
+          launch: store.launch.id,
+          texts: (yield* store.messages(0, 10)).map((message) => message.text),
+          turns: (yield* store.turns(null, 10)).map((turn) => turn.id),
+          diagnostics: (yield* store.diagnostics()).map((line) => line.text),
+          launches: (yield* store.launches(10)).map((launch) => [launch.id, launch.ended])
+        }
+      })
+    return { a: yield* of(a), b: yield* of(b), turns: [turnA.id, turnB.id] }
+  }))
+  expect(seen.turns).toEqual([1, 1])
+  expect(seen.a).toEqual({ launch: 1, texts: ["a 1", "a 2"], turns: [1], diagnostics: ["from a"], launches: [[1, null]] })
+  expect(seen.b).toEqual({ launch: 1, texts: ["b 1", "b 2"], turns: [1], diagnostics: ["from b"], launches: [[1, null]] })
+  // Two launch rows, one for each chat, both ended with the scope.
+  expect(rows(file, "select chat, n, why from everchat_launch order by chat")).toEqual([
+    { chat: 1, n: 1, why: "exit" },
+    { chat: 2, n: 1, why: "exit" }
+  ])
+})
+
+test("Chats: the local layers still make one tenant and one chat, and the tag finds that chat", async () => {
+  const file = newFile()
+  const uuid = await withStore(file, Store.use((store) => Effect.map(store.chat, (chat) => chat.uuid)))
+  const { chats, tenants } = owners(file)
+  expect([tenants.length, chats.length]).toEqual([1, 1])
+  const tenant = asUuid(tenants[0]!.id)
+  // The tag finds the local chat by its tenant and its UUID, and its store
+  // takes the next launch of the file.
+  const found = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const store = yield* chats.store(tenant, uuid, LAUNCH)
+    return [(yield* store.chat).uuid, store.launch.id, (yield* (yield* chats.reads(tenant, uuid)).chat).uuid]
+  }))
+  expect(found).toEqual([uuid, 2, uuid])
+  await withStore(file, Effect.void)
+  expect(owners(file)).toEqual({ chats, tenants })
+  expect(launches(file).map((launch) => launch.id)).toEqual([1, 2, 3])
+})
+
+// A load that is cancelled
+// ------------------------
+
+const TENANT_C = "55555555-5555-4555-8555-555555555555"
+
+// The launches of `file`, through a second connection, read-only, while the
+// store's own connection is open.
+const observed = (observer: Sqlite) =>
+  observer.query("select chat, n, ended is not null as ended, why from everchat_launch order by chat, n").all() as Array<
+    { chat: number; n: number; ended: number; why: string | null }
+  >
+
+// The opening of a store, in a scope of its own that stays open, in a fiber
+// that yields after every `ops` operations, so that a test can interrupt it
+// between two of its steps.
+const opening = (chats: typeof Chats.Service, chat: string, ops: number) =>
+  Effect.forkChild(
+    chats.store(TENANT_C, chat, LAUNCH).pipe(
+      Effect.andThen(Effect.never),
+      Effect.scoped,
+      Effect.provideService(Scheduler.MaxOpsBeforeYield, ops)
+    )
+  )
+
+test("Chats: an opening interrupted after its launch is visible to a second connection ends that launch as signal", async () => {
+  // The case of the review ec-dhlup (F1). The opening fiber yields every 64
+  // operations, and this fiber polls the file between its yields: it
+  // interrupts at the first yield after the commit shows, the window
+  // between the commit and the registration of the launch's end that the
+  // old `open` left. With the end registered at the commit, any point
+  // after it gives `signal`.
+  const file = newFile()
+  await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const chat = yield* chats.make(TENANT_C, PICK)
+    const observer = new Sqlite(file, { readonly: true })
+    try {
+      const worker = yield* opening(chats, chat, 64)
+      let visible = false
+      for (let k = 0; k < 2000 && !visible; k++) {
+        visible = observed(observer).length > 0
+        if (!visible) yield* Effect.yieldNow
+      }
+      yield* Fiber.interrupt(worker)
+      expect(visible).toBe(true)
+      const launches = observed(observer)
+      expect(launches).toEqual([{ chat: 1, n: 1, ended: 1, why: "signal" }])
+    } finally {
+      observer.close()
+    }
+  }))
+})
+
+test("Chats: an opening interrupted before its commit leaves no row of everchat_launch, and its wait for the connection is interruptible", async () => {
+  // The window is sure: another transaction holds the store's one
+  // connection, so the opening waits for it, before its first write, until
+  // the interruption.
+  const file = newFile()
+  const layer = chatsLayerNoDatabase.pipe(Layer.provideMerge(Database.layer(file)))
+  await Effect.runPromise(Effect.gen(function*() {
+    const chats = yield* Chats
+    const sql = yield* SqlClient.SqlClient
+    const chat = yield* chats.make(TENANT_C, PICK)
+    const release = yield* Deferred.make<void>()
+    const held = yield* Deferred.make<void>()
+    const holder = yield* Effect.forkChild(sql.withTransaction(Effect.andThen(Deferred.succeed(held, undefined), Deferred.await(release))))
+    yield* Deferred.await(held)
+    const worker = yield* opening(chats, chat, 64)
+    yield* Effect.sleep("50 millis")
+    // Still waiting: it has not ended.
+    expect(worker.pollUnsafe()).toBeUndefined()
+    const stopped = yield* Fiber.interrupt(worker).pipe(Effect.timeoutOption("2 seconds"))
+    expect(Option.isSome(stopped)).toBe(true)
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(holder)
+    const observer = new Sqlite(file, { readonly: true })
+    try {
+      expect(observed(observer)).toEqual([])
+    } finally {
+      observer.close()
+    }
+  }).pipe(Effect.provide(layer)))
+})
+
+test("Chats: an opening interrupted at any point leaves no launch, or one that ended as signal; never one that is live", async () => {
+  // Each round interrupts a new opening after k yields of this fiber, with
+  // the opening yielding every 8 operations: the rounds cover the points
+  // before the transaction, inside it, at the commit, and after the store
+  // is made. Whatever the point, a closed scope leaves no live launch and
+  // no crash.
+  const file = newFile()
+  const outcomes = await withChats(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const observer = new Sqlite(file, { readonly: true })
+    const seen: Array<string> = []
+    try {
+      for (let k = 0; k < 120; k++) {
+        const chat = yield* chats.make(TENANT_C, PICK)
+        const id = (observer.query("select max(id) as id from everchat_chat").get() as { id: number }).id
+        const worker = yield* opening(chats, chat, 8)
+        for (let y = 0; y < k; y++) yield* Effect.yieldNow
+        yield* Fiber.interrupt(worker)
+        const launches = observed(observer).filter((launch) => launch.chat === id)
+        seen.push(
+          launches.length === 0 ? "none" : launches.length === 1 && launches[0]!.ended === 1 && launches[0]!.why === "signal" ? "signal" : JSON.stringify(launches)
+        )
+      }
+    } finally {
+      observer.close()
+    }
+    return seen
+  }))
+  expect(outcomes.filter((outcome) => outcome !== "none" && outcome !== "signal")).toEqual([])
+  // The rounds reach both sides of the commit.
+  expect(outcomes[0]).toBe("none")
+  expect(outcomes.at(-1)).toBe("signal")
 })

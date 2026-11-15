@@ -87,7 +87,7 @@ const idle = (screen: Screen) => sees(screen, IDLE)
 const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 
 
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select n as id, status from everchat_turn order by n")
 
 const send = (screen: Screen, text: string) => {
   screen.type(text)

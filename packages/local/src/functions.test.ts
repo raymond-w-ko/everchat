@@ -83,7 +83,7 @@ test("a shell command's process group is in its call's row while it runs", async
     const program = yield* store.startCall({ turn: turn.id, vendorId: "call_1", fn: "run", input: "" })
     const id = yield* store.startCall({ turn: turn.id, parent: program, fn: "shell", input: "[]" })
     const fiber = yield* Effect.forkChild(functions.call("shell", ["sleep 60"], { turn: turn.id, program, call: id }))
-    const pgid = () => rows<{ pgid: number | null }>(file, `select pgid from everchat_call where id = ${id}`)[0]!.pgid
+    const pgid = () => rows<{ pgid: number | null }>(file, `select pgid from everchat_call where n = ${id}`)[0]!.pgid
     for (let k = 0; k < 400 && pgid() === null; k++) {
       yield* Effect.sleep("5 millis")
     }

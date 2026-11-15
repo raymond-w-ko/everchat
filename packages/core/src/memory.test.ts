@@ -437,7 +437,7 @@ test("a message is written with its free nodes, and a compaction with its usage"
     yield* memory.push([{ kind: "user", text: sized(600) }])
     yield* memory.idle
   }))
-  assert.deepStrictEqual(rows(file, "select served, node_l, node_i, cache_read, request from everchat_usage order by id"), [
+  assert.deepStrictEqual(rows(file, "select served, node_l, node_i, cache_read, request from everchat_usage order by n"), [
     { served: "compaction", node_l: 0, node_i: 1, cache_read: 900, request: "req_1" }
   ])
 })

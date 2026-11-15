@@ -1,15 +1,16 @@
 // Shared parts of the tests of the store, and of the packages that need a
 // real store in their tests: a new home, a launch, a run of an effect with
-// the store, and reads and writes straight to the file.
+// the store or with the tag of a deployment, and reads and writes straight
+// to the file.
 
 import { Database as Sqlite } from "bun:sqlite"
-import { Effect } from "effect"
+import { Effect, type Scope } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import * as Database from "../src/database.ts"
-import { ProcessAlive, storeLayer } from "../src/sqlite.ts"
-import { type LaunchInput, type Options, type Pick, Store } from "@everchat/core/store"
+import { chatsLayer, ProcessAlive, storeLayer } from "../src/sqlite.ts"
+import { type Chats, type LaunchInput, type Options, type Pick, Store } from "@everchat/core/store"
 
 export const PICK: Pick = { vendor: "openai", model: "gpt-test", effort: "medium", speed: "slow" }
 
@@ -30,6 +31,18 @@ export const withStore = <A, E>(
   alive?: (pid: number) => boolean
 ) => {
   const run = effect.pipe(Effect.provide(storeLayer(file, opts)))
+  return Effect.runPromise(alive === undefined ? run : Effect.provideService(run, ProcessAlive, alive))
+}
+
+// Runs `effect` with the tag `Chats` over `file`, in one scope: a store
+// that it takes ends its launch when the effect ends. `alive` as in
+// `withStore`.
+export const withChats = <A, E>(
+  file: string,
+  effect: Effect.Effect<A, E, Chats | Scope.Scope>,
+  alive?: (pid: number) => boolean
+) => {
+  const run = effect.pipe(Effect.scoped, Effect.provide(chatsLayer(file)))
   return Effect.runPromise(alive === undefined ? run : Effect.provideService(run, ProcessAlive, alive))
 }
 

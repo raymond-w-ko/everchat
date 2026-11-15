@@ -308,7 +308,9 @@ test("a turn's request: the head, the view's lines with their nodes, the steps, 
   expect((await inspect(file, (ask) => ask.body(2, 1)))!.body).toEqual(await Effect.runPromise(body(sent[2]!)))
   expect(await inspect(file, (ask) => ask.body(9, null))).toBe(null)
   // A body that the wire cannot build says why.
-  write(file, "update everchat_pick set vendor = 'anthropic'")
+  // A pick is never changed (the table refuses it): the turn gets another.
+  write(file, "insert into everchat_pick (vendor, model, effort, speed, created) values ('anthropic', 'claude-test', 'high', 'slow', 1)")
+  write(file, "update everchat_turn set pick = (select id from everchat_pick where vendor = 'anthropic') where n = 1")
   expect(await inspect(file, (ask) => ask.body(1, 1))).toEqual({ upto: 1, vendor: "anthropic", body: null, error: 'no wire for the vendor "anthropic"' })
 })
 

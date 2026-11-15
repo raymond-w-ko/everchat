@@ -68,7 +68,7 @@ const eventually = (check: () => boolean) =>
 const lastText = (item: Item | undefined) => (item?.kind === "user" ? item.blocks[item.blocks.length - 1] : undefined)
 
 const messages = (file: string) => rows<{ i: number; kind: string; text: string; turn: number | null; call: number | null }>(file, "select i, kind, text, turn, call from everchat_msg_read order by i")
-const turns = (file: string) => rows(file, "select id, status, why, first_msg from everchat_turn order by id")
+const turns = (file: string) => rows(file, "select n as id, status, why, first_msg from everchat_turn order by n")
 const items = (file: string, turn = 1) => rows<{ kind: string }>(file, `select kind from everchat_turn_item where turn = ${turn} order by n`).map((row) => row.kind)
 
 // One turn
@@ -134,7 +134,7 @@ test("a program runs between two requests: its call is written, and the model's 
     ["echo", "boom", 2],
     ["asst", "It is 2.", null]
   ])
-  assert.deepStrictEqual(rows(file, "select id, turn, parent, vendor_id, fn, input, output, size, shown, status from everchat_call order by id"), [
+  assert.deepStrictEqual(rows(file, "select n as id, turn, parent, vendor_id, fn, input, output, size, shown, status from everchat_call order by n"), [
     { id: 1, turn: 1, parent: null, vendor_id: "call_1", fn: "run", input: "return 1 + 1", output: "2", size: 1, shown: 1, status: "done" },
     { id: 2, turn: 1, parent: null, vendor_id: "call_2", fn: "run", input: "throw new Error('boom')", output: "boom", size: 4, shown: 4, status: "failed" }
   ])

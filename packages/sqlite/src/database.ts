@@ -16,10 +16,16 @@
 //   last transactions.
 // - `foreign_keys = on`: SQLite ignores references unless a connection asks
 //   for the check.
+// - `recursive_triggers = on`: a REPLACE (`replace into`, `insert or
+//   replace`) deletes the row that it meets, and only with this pragma does
+//   that delete run the table's delete trigger. So the triggers that keep a
+//   message, a message's image, a node, an event and the chat's row refuse
+//   a REPLACE too (docs/schema.html, section 1). The two pragmas of the
+//   block of the page's section 8 are these two.
 // - `journal_mode = wal`, set by `ready` only after the check of the file
 //   (below) has passed: on a new file once its schema is made, and on a
 //   file with the mark (where it changes nothing if the file is in WAL
-//   already). The two pragmas above last only as long as the connection.
+//   already). The three pragmas above last only as long as the connection.
 //
 // The file and its mark (`pragma user_version`, schema.ts):
 //
@@ -67,6 +73,7 @@ const ready = (filename: string) =>
       const sql = yield* SqlClient.SqlClient
       yield* sql.unsafe("pragma synchronous = full")
       yield* sql.unsafe("pragma foreign_keys = on")
+      yield* sql.unsafe("pragma recursive_triggers = on")
       yield* sql.withTransaction(Effect.gen(function*() {
         const have = yield* version
         if (have === VERSION) return

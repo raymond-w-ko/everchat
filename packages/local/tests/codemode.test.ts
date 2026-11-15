@@ -60,9 +60,9 @@ const back = (asked: Request | undefined): string => {
 const calls = (file: string) =>
   rows<{ id: number; parent: number | null; fn: string; status: string; output: string | null; size: number | null; shown: number | null; pgid: number | null }>(
     file,
-    "select id, parent, fn, status, output, size, shown, pgid from everchat_call order by id"
+    "select n as id, parent, fn, status, output, size, shown, pgid from everchat_call order by n"
   )
-const diagnostics = (file: string) => rows<{ level: string; source: string; text: string }>(file, "select level, source, text from everchat_log order by seq")
+const diagnostics = (file: string) => rows<{ level: string; source: string; text: string }>(file, "select level, source, text from everchat_log order by n")
 const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 
 const eventually = (check: () => boolean) =>
