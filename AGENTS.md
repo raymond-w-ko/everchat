@@ -589,7 +589,10 @@ The rules that keep the boundaries:
   (`Bun.Transpiler.scanImports`) alone decides what each file of each
   package imports. The script sees value imports only: a type-only import
   (`import type`, `export type`, a list of only `type` names) and a `.d.ts`
-  file are the type check's. It prints one line for each fault,
+  file are the type check's. The script does not see an import's type: it
+  takes an `.html` import as a page that imports nothing, but Bun bundles
+  an HTML import that has no `with { type: "text" }`, and the walk does not
+  read the scripts of that bundle; import a page as text. It prints one line for each fault,
   `<file>:<line>: <rule>: <specifier>`; the line is a hint. The rules:
   `manifest` (a package imports only itself and its own dependencies; a
   test may also use its
@@ -615,15 +618,32 @@ The rules that keep the boundaries:
   `budget`: no file of the core that is not a test reaches
   `packages/local/`, `packages/openai/`, `packages/sqlite/` or
   `packages/codemode/`; no such file of `sqlite` or `codemode` reaches
-  `packages/local/` or the other two of the three; and the entry `.` of
-  `openai` reaches only its own files and `packages/core/src/request.ts`.
+  `packages/local/` or the other two of the three; and each entry of
+  `openai` (the row names them all) reaches only its own files and
+  `packages/core/src/request.ts`.
   A row needs `forbid`, `only`, or both, and a row for a package that the
-  tree lacks is a fault. The lists are the tables `BUILTINS` and `BUDGETS`
-  at the top of the file. `check` takes its tables as a parameter
-  (`check(root, tables)`), so that a test gives tables that fit its
-  fixture; the command uses the real ones. Write a relative import with
-  the `.ts` file's path: `tools/graph.ts` faults on one that
-  names no `.ts` file (`./x.js`, `./x.mts`, `./x` with no extension, a
+  tree lacks is a fault. A row is also a fault at `tools/graph.ts:1`, and
+  is not walked, when its `from`, `forbid` or `only` is given and empty,
+  or when an entry of its `from` is not in the package's `exports` or
+  names a file that the script cannot read. A row that lists entries
+  names each entry of the package's `exports`, so that a new entry cannot
+  slip past it. A file that is not a test imports no test's file, relative
+  or by an entry such as `./testing` (`manifest`): that would bring the
+  tests' development packages into run-time code. A source whose real
+  path is not a `.ts` file (a link `zz.test.ts` to a file `zztest`, which
+  `bun test` still runs) is a `way out` fault at its line 1, since no rule
+  can read it. So is any other file found under a package's directory,
+  by a link into another package too, that the rules do not read, unless
+  it is, by its name and by its real path, of the same kind: `.d.ts`,
+  `.json`, or a kind on `NOT_CODE` (so a `.js` or `.mts` file, a file with
+  no extension, and a link `x.test.js` to a `.ts` file that no rule reads,
+  outside the packages or under another package's `node_modules`, are
+  faults): no rule could check it. The lists are the
+  tables `BUILTINS` and `BUDGETS` at the top of the file. `check` takes
+  its tables as a parameter (`check(root, tables)`), so that a test gives
+  tables that fit its fixture; the command uses the real ones. Write a
+  relative import with the `.ts` file's path: `tools/graph.ts` faults on
+  one that names no `.ts` file (`./x.js`, `./x.mts`, `./x` with no extension, a
   missing file), since it cannot follow it. It reads the imports of the
   packages' own source files only, so a value import of any other `.ts`
   file, of a `.d.ts` file or of one under `node_modules` is a fault too:

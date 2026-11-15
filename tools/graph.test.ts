@@ -316,6 +316,8 @@ test("budget, only: a start that reaches, through another package's file, a file
 // The two faults of an import that the script cannot follow to a .ts file:
 // the way out, and the budget of `row` when its walk passes it.
 const NO_FILE = "names no .ts file (write the file's path, with .ts)"
+// The fault of a file of a kind that the script cannot check, at line 1.
+const UNCHECKED = (file: string, name = file) => file + ":1: way out, a kind of file that the script cannot check: " + name
 const lost = (at: string, specifier: string, row?: string) => [
   at + ": way out, " + NO_FILE + ": " + specifier,
   ...(row === undefined ? [] : [at + ": budget, " + row + " cannot follow it: it " + NO_FILE + ": " + specifier])
@@ -346,13 +348,15 @@ test("budget fails closed: the same through ./z.mts, a kind of code that the scr
   const only: Tables = { ...FIXTURE, budgets: [{ package: "@everchat/local", from: ["./x"], only: [B] }] }
   const x = "packages/local/src/x.ts"
   const mts = { [x]: `import { z } from "./z.mts"\nexport const x = z\n`, "packages/local/src/z.mts": `import { a } from "@everchat/core"\nexport const z = a\n` }
-  expect(run(workspace(mts), only)).toEqual(lost(x + ":1", "./z.mts", "@everchat/local"))
+  // z.mts is itself a kind of file that no rule checks.
+  expect(run(workspace(mts), only)).toEqual([UNCHECKED("packages/local/src/z.mts"), ...lost(x + ":1", "./z.mts", "@everchat/local")])
   // Through b.ts, an allowed file of the core: ./c.mts, allowed too, reaches
   // tools/outside.ts, which is not.
   const root = workspace({ [B]: `import "./c.mts"\nexport const b = 1\n`, "packages/core/src/c.mts": `import "../../../tools/outside.ts"\n` })
-  expect(run(root, { ...only, budgets: [{ ...only.budgets[0]!, only: ["packages/core/src/"] }] })).toEqual(lost(B + ":1", "./c.mts", "@everchat/local"))
+  expect(run(root, { ...only, budgets: [{ ...only.budgets[0]!, only: ["packages/core/src/"] }] })).toEqual([UNCHECKED("packages/core/src/c.mts"), ...lost(B + ":1", "./c.mts", "@everchat/local")])
   // With only b.ts allowed, c.mts is itself the reach outside it.
   expect(run(root, only)).toEqual([
+    UNCHECKED("packages/core/src/c.mts"),
     lost(B + ":1", "./c.mts")[0],
     B + ":1: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/c.mts: ./c.mts"
   ])
@@ -372,7 +376,7 @@ test("an import of the workspace that names no file is a fault; an import of a t
   const exports = (file: string) => JSON.stringify({ name: "@everchat/core", exports: { ".": "./src/a.ts", "./b": "./src/b.ts", "./c": file }, dependencies: { effect: "1" }, devDependencies: { "@everchat/local": "workspace:*" } })
   const entry = { [x]: `import { c } from "@everchat/core/c"\nexport const x = c\n` }
   expect(run(workspace({ ...entry, "packages/core/package.json": exports("./src/c.ts") }))).toEqual(lost(x + ":1", "@everchat/core/c"))
-  expect(run(workspace({ ...entry, "packages/core/package.json": exports("./src/c.js"), "packages/core/src/c.js": `export const c = 1\n` }))).toEqual(lost(x + ":1", "@everchat/core/c"))
+  expect(run(workspace({ ...entry, "packages/core/package.json": exports("./src/c.js"), "packages/core/src/c.js": `export const c = 1\n` }))).toEqual([UNCHECKED("packages/core/src/c.js"), ...lost(x + ":1", "@everchat/core/c")])
   // Through a walk, an entry with no file fails the budget too.
   const only: Tables = { ...FIXTURE, budgets: [{ package: "@everchat/local", from: ["./x"], only: ["packages/core/src/"] }] }
   expect(run(workspace({ ...entry, "packages/core/package.json": exports("./src/c.ts") }), only)).toEqual(lost(x + ":1", "@everchat/core/c", "@everchat/local"))
@@ -389,19 +393,21 @@ test("an import of the workspace that names no file is a fault; an import of a t
 // whose real name does not end in exactly .ts, or a .ts file that is no
 // package's own source (a .d.ts, one under node_modules). The import of it,
 // at b.ts:1, and the files on disk. Each file reaches local, which neither
-// row may.
+// row may. `self`: the fault of the file itself, at its line 1, when it is
+// of a kind that no rule checks, or a source that no rule can read.
 const REACH = `import "../../local/src/x.ts"\n`
-const CANNOT: ReadonlyArray<{ readonly specifier: string; readonly files: Record<string, string>; readonly links?: Record<string, string> }> = [
-  { specifier: "./z.JS", files: { "packages/core/src/z.JS": REACH } },
-  { specifier: "./z.TS", files: { "packages/core/src/z.TS": REACH } },
-  { specifier: "./z.Mjs", files: { "packages/core/src/z.Mjs": REACH } },
+const CANNOT: ReadonlyArray<{ readonly specifier: string; readonly files: Record<string, string>; readonly links?: Record<string, string>; readonly self?: string }> = [
+  { specifier: "./z.JS", files: { "packages/core/src/z.JS": REACH }, self: UNCHECKED("packages/core/src/z.JS") },
+  { specifier: "./z.TS", files: { "packages/core/src/z.TS": REACH }, self: UNCHECKED("packages/core/src/z.TS") },
+  { specifier: "./z.Mjs", files: { "packages/core/src/z.Mjs": REACH }, self: UNCHECKED("packages/core/src/z.Mjs") },
   // A file with no extension: Bun runs it as code, and picks it before zz.ts.
-  { specifier: "./zz", files: { "packages/core/src/zz": REACH } },
-  { specifier: "./zz", files: { "packages/core/src/zz": REACH, "packages/core/src/zz.ts": `export const zz = 1\n` } },
-  // A link z.ts to a file with no extension: decided on the real path.
-  { specifier: "./z.ts", files: { "packages/core/src/zz": REACH }, links: { "packages/core/src/z.ts": "zz" } },
+  { specifier: "./zz", files: { "packages/core/src/zz": REACH }, self: UNCHECKED("packages/core/src/zz") },
+  { specifier: "./zz", files: { "packages/core/src/zz": REACH, "packages/core/src/zz.ts": `export const zz = 1\n` }, self: UNCHECKED("packages/core/src/zz") },
+  // A link z.ts to a file with no extension: decided on the real path. The
+  // link is a source by its name that no rule can read.
+  { specifier: "./z.ts", files: { "packages/core/src/zz": REACH }, links: { "packages/core/src/z.ts": "zz" }, self: "packages/core/src/zz:1: way out, " + NO_FILE + ": packages/core/src/z.ts" },
   // A kind that is not on the list of those that are not code.
-  { specifier: "./z.yaml", files: { "packages/core/src/z.yaml": REACH } },
+  { specifier: "./z.yaml", files: { "packages/core/src/z.yaml": REACH }, self: UNCHECKED("packages/core/src/z.yaml") },
   // A declaration file: its name ends in .ts, but it is no source of the
   // package, so no rule reads its imports. Bun runs it as code.
   { specifier: "./z.d.ts", files: { "packages/core/src/z.d.ts": REACH } },
@@ -416,9 +422,10 @@ test("the script follows only a .ts file of a package's own or a kind on its lis
     // local's x.ts reaches b.ts; b.ts imports the file. Both are in the
     // core, which the row allows: the one fault is that the walk cannot
     // follow the file.
-    expect([one.specifier, run(root, only)]).toEqual([one.specifier, lost(B + ":1", one.specifier, "@everchat/local")])
+    const self = one.self === undefined ? [] : [one.self]
+    expect([one.specifier, run(root, only)]).toEqual([one.specifier, [...self, ...lost(B + ":1", one.specifier, "@everchat/local")]])
     // The core's row forbids local, and b.ts is one of its starts.
-    expect([one.specifier, run(root)]).toEqual([one.specifier, lost(B + ":1", one.specifier, "@everchat/core")])
+    expect([one.specifier, run(root)]).toEqual([one.specifier, [...self, ...lost(B + ":1", one.specifier, "@everchat/core")]])
   }
   // A directory is no file either.
   const directory = workspace({ [B]: `import "./d"\nexport const b = 1\n`, "packages/core/src/d/x.txt": `text\n` })
@@ -443,6 +450,188 @@ test("budget: a row for a package that the tree does not have, or with no rule, 
   expect(run(workspace(), missing)).toEqual(["tools/graph.ts:1: budget, no package: @everchat/openai"])
   const none = { ...FIXTURE, budgets: [{ package: "@everchat/core", from: "files" }] } as unknown as Tables
   expect(run(workspace(), none)).toEqual(["tools/graph.ts:1: budget, neither forbid nor only: @everchat/core"])
+})
+
+test("budget: each way to turn a row off is a fault at tools/graph.ts:1, and the row is not walked", () => {
+  // local's ./x reaches b.ts, which reaches a.ts: the row below faults there.
+  const root = workspace({ [B]: `export const b = 1\nimport "./a.ts"\n` })
+  const row = { package: "@everchat/local", from: ["./x"], only: [B] }
+  const with_ = (budget: object) => ({ ...FIXTURE, budgets: [budget] }) as unknown as Tables
+  expect(run(root, with_(row))).toEqual([B + ":2: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/a.ts: ./a.ts"])
+  // An entry of from that is not in the exports (and ./x, which it no longer names).
+  expect(run(root, with_({ ...row, from: ["./nope"] }))).toEqual([
+    "tools/graph.ts:1: budget, not an entry of @everchat/local: ./nope",
+    "tools/graph.ts:1: budget, not named by the row of @everchat/local: ./x"
+  ])
+  // An empty from.
+  expect(run(root, with_({ ...row, from: [] }))).toEqual([
+    "tools/graph.ts:1: budget, no entry in from: @everchat/local",
+    "tools/graph.ts:1: budget, not named by the row of @everchat/local: ./x"
+  ])
+  // An empty forbid, with no only: the core's row, whose files reach local.
+  const core = JSON.stringify({ name: "@everchat/core", exports: { ".": "./src/a.ts", "./b": "./src/b.ts" }, dependencies: { effect: "1", "@everchat/local": "workspace:*" } })
+  const reach = workspace({ "packages/core/package.json": core, [B]: `import { x } from "@everchat/local/x"\nexport const b = x\n` })
+  expect(run(reach)).toEqual([B + ":1: budget, @everchat/core must not reach packages/local/: @everchat/local/x"])
+  expect(run(reach, with_({ package: "@everchat/core", from: "files", forbid: [] }))).toEqual(["tools/graph.ts:1: budget, an empty forbid: @everchat/core"])
+  // An empty only, given beside a forbid.
+  expect(run(root, with_({ ...row, only: [], forbid: ["packages/core/src/a.ts"] }))).toEqual(["tools/graph.ts:1: budget, an empty only: @everchat/local"])
+})
+
+test("budget: a start that the script cannot read is a fault at tools/graph.ts:1, naming the entry", () => {
+  const local = (exports: Record<string, string>) => JSON.stringify({ name: "@everchat/local", exports: { "./x": "./src/x.ts", ...exports }, dependencies: { "@everchat/core": "workspace:*", effect: "1" }, devDependencies: { "happy-dom": "1" } })
+  const row = (entry: string): Tables => ({ ...FIXTURE, budgets: [{ package: "@everchat/local", from: ["./x", entry], only: [B] }] })
+  // A missing file.
+  expect(run(workspace({ "packages/local/package.json": local({ "./y": "./src/y.ts" }) }), row("./y"))).toEqual([
+    "tools/graph.ts:1: budget, cannot read the start of @everchat/local: ./y"
+  ])
+  // A file that is not .ts: code (also a kind that no rule checks), and a page.
+  expect(run(workspace({ "packages/local/package.json": local({ "./y": "./src/y.js" }), "packages/local/src/y.js": `import "@everchat/core"\n` }), row("./y"))).toEqual([
+    UNCHECKED("packages/local/src/y.js"),
+    "tools/graph.ts:1: budget, cannot read the start of @everchat/local: ./y"
+  ])
+  expect(run(workspace({ "packages/local/package.json": local({ "./y": "./src/y.html" }), "packages/local/src/y.html": `<p>a page</p>\n` }), row("./y"))).toEqual([
+    "tools/graph.ts:1: budget, cannot read the start of @everchat/local: ./y"
+  ])
+  // A .ts file that is no member: one under node_modules.
+  expect(run(workspace({ "packages/local/package.json": local({ "./y": "./node_modules/y/y.ts" }), "packages/local/node_modules/y/y.ts": `import "@everchat/core"\n` }), row("./y"))).toEqual([
+    "tools/graph.ts:1: budget, cannot read the start of @everchat/local: ./y"
+  ])
+})
+
+test("budget: a row with entries names each entry of the exports, so that a new one cannot slip past it", () => {
+  // A new entry ./extra that ./x does not import, and that reaches a.ts.
+  const local = JSON.stringify({ name: "@everchat/local", exports: { "./x": "./src/x.ts", "./extra": "./src/extra.ts" }, dependencies: { "@everchat/core": "workspace:*", effect: "1" }, devDependencies: { "happy-dom": "1" } })
+  const root = workspace({ "packages/local/package.json": local, "packages/local/src/extra.ts": `import { a } from "@everchat/core"\nexport const extra = a\n` })
+  const row = { package: "@everchat/local", from: ["./x"], only: [B] }
+  expect(run(root, { ...FIXTURE, budgets: [row] })).toEqual(["tools/graph.ts:1: budget, not named by the row of @everchat/local: ./extra"])
+  // Named, it is walked, and its reach is found.
+  expect(run(root, { ...FIXTURE, budgets: [{ ...row, from: ["./x", "./extra"] }] })).toEqual([
+    "packages/local/src/extra.ts:1: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/a.ts: @everchat/core"
+  ])
+  // A string of exports is the one entry ".".
+  const one = JSON.stringify({ name: "@everchat/local", exports: "./src/x.ts", dependencies: { "@everchat/core": "workspace:*", effect: "1" }, devDependencies: { "happy-dom": "1" } })
+  // (The core's test imports local's ./x, which this local does not have.)
+  const plain = { "packages/local/package.json": one, "packages/core/src/a.test.ts": `import { test } from "node:test"\ntest("a", () => {})\n` }
+  expect(run(workspace(plain), { ...FIXTURE, budgets: [{ ...row, from: ["."] }] })).toEqual([])
+  expect(run(workspace(plain), { ...FIXTURE, budgets: [{ ...row, from: [] }] })).toEqual([
+    "tools/graph.ts:1: budget, no entry in from: @everchat/local",
+    "tools/graph.ts:1: budget, not named by the row of @everchat/local: ."
+  ])
+})
+
+test("a file that no rule can read is a fault at its line 1: a source whose real path is not .ts, a file of a kind off the list", () => {
+  // A link zz.test.ts to a file with no extension, which imports a built-in
+  // off the list of the core's tests: bun test runs it by its name.
+  const link = workspace({ "packages/core/src/zztest": `import * as fs from "node:fs"\nexport const z = fs\n` }, { "packages/core/src/zz.test.ts": "zztest" })
+  expect(run(link)).toEqual(["packages/core/src/zztest:1: way out, " + NO_FILE + ": packages/core/src/zz.test.ts"])
+  // A .mts and a .js file of a package, which nothing imports.
+  const kinds = workspace({ "packages/core/src/z.mts": `import "node:fs"\n`, "packages/local/src/y.js": `export const y = 1\n` })
+  expect(run(kinds)).toEqual([UNCHECKED("packages/core/src/z.mts"), UNCHECKED("packages/local/src/y.js")])
+  // The kinds on the list: .ts, .d.ts, .json, .html and .txt. A file under
+  // node_modules is no package's own.
+  const good = workspace({
+    "packages/core/src/c.d.ts": `export declare const c: number\n`,
+    "packages/core/src/data.json": `{}\n`,
+    "packages/core/src/page.html": `<p>a page</p>\n`,
+    "packages/core/src/notes.txt": `notes\n`,
+    "packages/core/node_modules/z/z.js": `export const z = 1\n`
+  })
+  expect(run(good)).toEqual([])
+  // A link of a kind on the list to a file of a kind off it: the real path
+  // decides, and the file is told once.
+  expect(run(workspace({ "packages/core/src/z.bin": `x\n` }, { "packages/core/src/z.txt": "z.bin" }))).toEqual([UNCHECKED("packages/core/src/z.bin")])
+})
+
+test("a file that is no checked member is of one plain kind by its name and by its real path, or it is a fault at its line 1", () => {
+  // A shared test outside every package, which loads a built-in off the
+  // list of the core's tests. bun test runs a link to it by its name, and
+  // no rule reads it: each link is a fault at the real file's line 1,
+  // naming the link.
+  const SHARED = "tools/shared.ts"
+  const shared = { [SHARED]: `import { test } from "node:test"\nimport * as fs from "node:fs"\ntest("s", () => void fs)\n` }
+  for (const name of ["x.test.js", "x.test.mts", "x.test.tsx", "x.json"]) {
+    const link = "packages/core/src/" + name
+    expect(run(workspace(shared, { [link]: "../../../" + SHARED }))).toEqual([UNCHECKED(SHARED, link)])
+  }
+  // A link of a runnable name to a .d.ts file: the kinds differ.
+  const D = "packages/core/src/c.d.ts"
+  expect(run(workspace({ [D]: `export declare const c: number\n` }, { "packages/core/src/x.test.js": "c.d.ts" }))).toEqual([UNCHECKED(D, "packages/core/src/x.test.js")])
+  // A link of any name to a checked member is no fault here: the member is
+  // checked, and a built-in off the list in it still faults, at the member.
+  const M = "packages/core/src/m.ts"
+  expect(run(workspace({ [M]: `import * as fs from "node:fs"\nexport const m = fs\n` }, { "packages/core/src/x.test.js": "m.ts" }))).toEqual([
+    M + ":1: built-in, not on @everchat/core's list: node:fs"
+  ])
+  expect(run(workspace({}, { "packages/core/src/x.test.js": "b.ts" }))).toEqual([])
+  // The plain kinds under their own names, and links between two of one kind.
+  const good = workspace({
+    [D]: `export declare const c: number\n`,
+    "packages/core/src/data.json": `{}\n`,
+    "packages/core/src/page.html": `<p>a page</p>\n`,
+    "packages/core/src/notes.txt": `notes\n`
+  }, { "packages/core/src/e.d.ts": "c.d.ts", "packages/core/src/more.json": "data.json" })
+  expect(run(good)).toEqual([])
+})
+
+test("the rule at line 1 judges every file found under a package, by a link into another package too", () => {
+  // local's files that no rule reads: a .ts and a .js file under its
+  // node_modules, which load node:fs, a .d.ts file, a text file and a JSON
+  // file of its src.
+  const Z = "packages/local/node_modules/z/z.ts"
+  const ZJS = "packages/local/node_modules/z/z.js"
+  const L = "packages/local/src/l.d.ts"
+  const N = "packages/local/src/n.txt"
+  const theirs = {
+    [Z]: `import * as fs from "node:fs"\nexport const z = fs\n`,
+    [ZJS]: `import * as fs from "node:fs"\nexport const z = fs\n`,
+    [L]: `export declare const l: number\n`,
+    [N]: `notes\n`,
+    "packages/local/src/data.json": `{}\n`
+  }
+  const at = (link: string, target: string) => run(workspace(theirs, { ["packages/core/src/" + link]: target }))
+  // Faults at the real file's line 1, naming the link.
+  for (const name of ["x.test.js", "x.test.mts", "x.test.tsx"]) {
+    expect(at(name, "../../local/node_modules/z/z.ts")).toEqual([UNCHECKED(Z, "packages/core/src/" + name)])
+  }
+  expect(at("x.test.js", "../../local/src/l.d.ts")).toEqual([UNCHECKED(L, "packages/core/src/x.test.js")])
+  expect(at("x.test.ts", "../../local/src/l.d.ts")).toEqual([L + ":1: way out, " + NO_FILE + ": packages/core/src/x.test.ts"])
+  expect(at("x.json", "../../local/src/n.txt")).toEqual([UNCHECKED(N, "packages/core/src/x.json")])
+  // A linked directory, not named node_modules, into local's node_modules.
+  expect(at("lib", "../../local/node_modules/z")).toEqual([
+    Z + ":1: way out, " + NO_FILE + ": packages/core/src/lib/z.ts",
+    UNCHECKED(ZJS, "packages/core/src/lib/z.js")
+  ])
+  // No fault from this rule: a link to a member of local, which local's
+  // rules check, once (here with no built-in on local's list, so that its
+  // node:fs faults); links of one plain kind; a linked directory to
+  // local's src.
+  expect(at("x.test.js", "../../local/src/x.ts")).toEqual([])
+  const strict: Tables = { ...FIXTURE, builtins: { ...FIXTURE.builtins, "@everchat/local": { src: [], tests: "any" } } }
+  expect(run(workspace(theirs, { "packages/core/src/x.test.js": "../../local/src/x.ts" }), strict)).toEqual([
+    "packages/local/src/x.ts:2: built-in, not on @everchat/local's list: node:fs"
+  ])
+  expect(run(workspace(theirs, { "packages/core/src/e.d.ts": "../../local/src/l.d.ts", "packages/core/src/more.json": "../../local/src/data.json" }))).toEqual([])
+  expect(at("lsrc", "../../local/src")).toEqual([])
+})
+
+test("manifest: a file that is not a test imports no test's file, relative or by an entry", () => {
+  const y = "packages/local/src/y.ts"
+  // local's tests/help.ts imports happy-dom, a development package.
+  expect(run(workspace({ [y]: `import { w } from "../tests/help.ts"\nexport const y = w\n` }))).toEqual([
+    y + ":1: manifest, a test's file, which only a test may import: ../tests/help.ts"
+  ])
+  expect(run(workspace({ [y]: `\nimport "./x.test.ts"\n`, "packages/local/src/x.test.ts": `export const t = 1\n` }))).toEqual([
+    y + ":2: manifest, a test's file, which only a test may import: ./x.test.ts"
+  ])
+  // Another package's ./testing entry, which names a test's file.
+  const core = JSON.stringify({ name: "@everchat/core", exports: { ".": "./src/a.ts", "./b": "./src/b.ts", "./testing": "./tests/help.ts" }, dependencies: { effect: "1" }, devDependencies: { "@everchat/local": "workspace:*" } })
+  const testing = { "packages/core/package.json": core, "packages/core/tests/help.ts": `export const help = 1\n` }
+  expect(run(workspace({ ...testing, [y]: `import { help } from "@everchat/core/testing"\nexport const y = help\n` }))).toEqual([
+    y + ":1: manifest, a test's file, which only a test may import: @everchat/core/testing"
+  ])
+  // A test may import both.
+  const t = "packages/local/tests/t.test.ts"
+  expect(run(workspace({ ...testing, [t]: `import { w } from "./help.ts"\nimport { help } from "@everchat/core/testing"\nexport const t = [w, help]\n` }))).toEqual([])
 })
 
 test("check takes the real tables when it is given none", () => {

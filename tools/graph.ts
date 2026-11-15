@@ -8,7 +8,9 @@
 //
 // - manifest (K5): a bare specifier names the package itself or one of its
 //   `dependencies`, `peerDependencies` or `optionalDependencies`. A test
-//   may also use `devDependencies`.
+//   may also use `devDependencies`. So a file that is not a test imports
+//   no test's file, relative or by an entry (`./testing`): it would bring
+//   the tests' development packages and built-ins into run-time code.
 // - way out (K3): a relative specifier stays in its package's directory.
 //   It, or an entry of a workspace package, also names a file that this
 //   script can follow (`kind`: a `.ts` file of a package's own, or a kind on
@@ -18,7 +20,15 @@
 //   runs as code). The script reads the imports of the packages' own source
 //   files only, the files that every rule checks: a value import of any
 //   other `.ts` file, a `.d.ts` or one under `node_modules`, is one that it
-//   cannot follow.
+//   cannot follow. A file that no rule can read is a fault at its line 1:
+//   a source whose real path is not a `.ts` file (a link `zz.test.ts` to a
+//   file `zztest`, which `bun test` runs by its name), and a file that is
+//   not a checked member and is not, by its name and by its real path, of
+//   the same plain kind (`.d.ts`, `.json`, or NOT_CODE): a `.js` or `.mts`
+//   file, a file with no extension, or a link `x.test.js` to a `.ts` file
+//   that no rule reads. The rule judges every file found under a package's
+//   directory, by a link into another package too (its `.d.ts` files, its
+//   `node_modules`); ownership decides only whose member a file is.
 // - entry (K3): an import of a workspace package names a path of its
 //   `exports`.
 // - built-in (K3): a `node:` or `bun:` module is on its package's list
@@ -31,7 +41,12 @@
 //   names the only files allowed, a file outside them and outside its own
 //   package (BUDGETS). The walk fails closed: an import of the workspace
 //   that it cannot follow to a file is a fault of each budget that reaches
-//   it.
+//   it. A row that the script could not hold is a fault at
+//   `tools/graph.ts:1`, and is not walked: a package that the tree lacks,
+//   no `forbid` and no `only`, an empty `from`, `forbid` or `only`, an
+//   entry of `from` that is not in the exports, or whose file the script
+//   cannot read; and a `from` that lists entries but not each entry of the
+//   package's `exports`, so that a new entry cannot slip past the row.
 //
 // `check` takes the tables (BUILTINS, BUDGETS) as a parameter, so that a
 // test gives tables that fit its fixture; the command uses the real ones.
@@ -89,9 +104,10 @@ export type Builtins = Readonly<Record<string, { readonly src: Rule; readonly te
 // the root; a file under one of them must not be reached. `only`: paths
 // from the root, each a file or a directory that ends in "/"; each file
 // that the starts reach must be under one of them, or in the row's own
-// package. A row has `forbid`, `only`, or both. A row for a package that
-// the tree does not have is a fault: a wrong name must not turn a budget
-// off.
+// package. A row has `forbid`, `only`, or both, none of them empty; a
+// `from` that lists entries names each of the package's. A row for a
+// package that the tree does not have is a fault, and so is each other
+// row that breaks these: a wrong name must not turn a budget off.
 export type Budget = {
   readonly package: string
   readonly from: "files" | ReadonlyArray<string>
@@ -99,7 +115,7 @@ export type Budget = {
 
 export const BUDGETS: ReadonlyArray<Budget> = [
   { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
-  { package: "@everchat/openai", from: ["."], only: ["packages/core/src/request.ts"] },
+  { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
   { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/"] },
   { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/"] }
 ]
@@ -158,13 +174,19 @@ const inside = (dir: string, file: string) => {
 const isTest = (pkg: Package, file: string) =>
   file.endsWith(".test.ts") || (inside(pkg.dir, file) && path.relative(pkg.dir, file).split(path.sep)[0] === "tests")
 
-// The real paths of the TypeScript files under `dir`, through symlinks too
-// (each real directory once). Not `node_modules`, not `.d.ts`.
-const sources = (dir: string, seen = new Set<string>()): Array<string> => {
+// The files under `dir`, through symlinks too (each real directory once),
+// not under `node_modules`: the path by which each is found (`name`), and
+// its real path (`at`).
+interface Found {
+  readonly name: string
+  readonly at: string
+}
+const files = (dir: string, seen = new Set<string>()): Array<Found> => {
   const at = real(dir)
   if (seen.has(at)) return []
   seen.add(at)
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  // By name, so that the faults come in the same order on every file system.
+  return fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).flatMap((entry) => {
     const full = path.join(dir, entry.name)
     let stat: fs.Stats
     try {
@@ -172,10 +194,14 @@ const sources = (dir: string, seen = new Set<string>()): Array<string> => {
     } catch {
       return [] // a broken link: nothing can load it
     }
-    if (stat.isDirectory()) return entry.name === "node_modules" ? [] : sources(full, seen)
-    return stat.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts") ? [real(full)] : []
+    if (stat.isDirectory()) return entry.name === "node_modules" ? [] : files(full, seen)
+    return stat.isFile() ? [{ name: full, at: real(full) }] : []
   })
 }
+
+// A TypeScript source, by the name that it is found by: it ends in `.ts`,
+// not `.d.ts`. A runner loads a file by that name (`bun test`, an entry).
+const isSource = (found: Found) => found.name.endsWith(".ts") && !found.name.endsWith(".d.ts")
 
 const nameOf = (specifier: string) => specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/")
 
@@ -190,13 +216,31 @@ const isFile = (file: string) => fs.existsSync(file) && fs.statSync(file).isFile
 // - `.txt`: a text file (the fixtures of graph.test.ts).
 const NOT_CODE = new Set([".html", ".txt"])
 
+// The plain kinds of file, which are not source, matched exactly on a path's
+// end: `.d.ts` (which the type checks read), `.json` (a manifest, a type
+// program), and the kinds of NOT_CODE. A file of a package that is not a
+// checked member must be of one of them by its name and by its real path,
+// the same: a runner loads a file by its name, and what it loads is the
+// real file. Any other file is one that no rule checks, and Bun may run it
+// (a `.js`, `.mts` or `.tsx` file, a file with no extension, a link of such
+// a name to a `.ts` file that is no member, a link of any name to one).
+const plain = (file: string): string | null => {
+  if (file.endsWith(".d.ts")) return ".d.ts"
+  const ext = path.extname(file)
+  return ext === ".json" || NOT_CODE.has(ext) ? ext : null
+}
+
 const NO_FILE = "names no .ts file (write the file's path, with .ts)"
+const UNCHECKED = "a kind of file that the script cannot check"
+const TEST = "manifest, a test's file, which only a test may import"
 
 // The faults of the packages under `root`, as lines, by `tables`.
 export const check = (given: string, tables: Tables = TABLES): Array<string> => {
   const root = real(given)
   const base = path.join(root, "packages")
-  const packages: Array<Package> = fs.readdirSync(base)
+  // In the order of their directories' names, so that the faults come in
+  // the same order on every file system.
+  const packages: Array<Package> = fs.readdirSync(base).sort()
     .filter((name) => isFile(path.join(base, name, "package.json")))
     .map((name) => {
       const dir = real(path.join(base, name))
@@ -210,7 +254,12 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
   // package's (a link to a file outside every package is checked as the
   // package's that links it). A link to another package's file is that
   // package's.
-  const members = new Map(packages.map((pkg) => [pkg, [...new Set(sources(pkg.dir))].filter((file) => (owner(file) ?? pkg) === pkg)]))
+  // The files found under each package's directory, whoever owns them: the
+  // rule at line 1 judges each of them. Ownership decides only whose member
+  // a file is.
+  const found = new Map(packages.map((pkg) => [pkg, files(pkg.dir)]))
+  const own = new Map(packages.map((pkg) => [pkg, found.get(pkg)!.filter((one) => (owner(one.at) ?? pkg) === pkg)]))
+  const members = new Map(packages.map((pkg) => [pkg, [...new Set(own.get(pkg)!.filter(isSource).map((one) => one.at))]]))
   // The files that the rules of each file check: every package's own. The
   // one set of the files that the script reads.
   const readable = new Set([...members.values()].flat())
@@ -232,6 +281,7 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
   const faults: Array<string> = []
   const fault = (file: string, line: number, rule: string, specifier: string) =>
     faults.push(path.relative(root, file) + ":" + line + ": " + rule + ": " + specifier)
+  const relative = (file: string) => path.relative(root, file).split(path.sep).join("/")
   const parsed = new Map<string, Array<Import>>()
   const read = (file: string) => {
     let got = parsed.get(file)
@@ -259,6 +309,27 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
   }
 
   for (const pkg of packages) {
+    // The files that no rule can read, at the real file's line 1, each
+    // once for each package that it is found under: every file found under
+    // the package's directory, by a link into another package too. One
+    // whose real path the rules read (a member of any package) is checked
+    // by its owner's rules, whatever name led to it. Else first a source
+    // name (a link `zz.test.ts` to a file `zztest`, which a runner loads by
+    // its name); then each other file, whose name and real path are of the
+    // same plain kind (`plain`), or it is a fault.
+    const told = new Set<string>()
+    for (const one of found.get(pkg)!) {
+      if (told.has(one.at) || !isSource(one) || kind(one.at) === "read") continue
+      told.add(one.at)
+      fault(one.at, 1, "way out, " + NO_FILE, relative(one.name))
+    }
+    for (const one of found.get(pkg)!) {
+      if (told.has(one.at) || kind(one.at) === "read") continue
+      const named = plain(one.name)
+      if (named !== null && named === plain(one.at)) continue
+      told.add(one.at)
+      fault(one.at, 1, "way out, " + UNCHECKED, relative(one.name))
+    }
     const manifest = pkg.manifest
     for (const file of members.get(pkg)!) {
       const test = isTest(pkg, file)
@@ -287,6 +358,10 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
           } else if (found === null || !followable(found)) {
             fault(file, one.line, "way out, " + NO_FILE, specifier)
           }
+          // A file that is not a test imports a test's file.
+          if (!test && found !== null && isTest(owner(found) ?? pkg, found)) {
+            fault(file, one.line, TEST, specifier)
+          }
         } else {
           if (!declared.has(nameOf(specifier))) {
             fault(file, one.line, "manifest, not declared by " + pkg.name, specifier)
@@ -302,6 +377,10 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
             // An entry whose file is missing, or is code that the script
             // does not read.
             fault(file, one.line, "way out, " + NO_FILE, specifier)
+          }
+          // A file that is not a test imports a test's file, by an entry.
+          if (!test && target !== undefined && entry !== null && isTest(target, entry)) {
+            fault(file, one.line, TEST, specifier)
           }
         }
       }
@@ -323,10 +402,31 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
       faults.push("tools/graph.ts:1: budget, neither forbid nor only: " + budget.package)
       continue
     }
+    // The faults of the row itself, each of which would turn it off, or let
+    // an entry past it: a row with one is not walked.
+    const row: Array<string> = []
+    const wrong = (why: string, what: string) => row.push("tools/graph.ts:1: budget, " + why + ": " + what)
+    const startOf = (entry: string) => resolve(pkg.dir, pkg.name + entry.slice(1))
+    if (budget.from !== "files") {
+      const keys = typeof pkg.manifest.exports === "string" ? ["."] : Object.keys(pkg.manifest.exports ?? {})
+      if (budget.from.length === 0) wrong("no entry in from", budget.package)
+      for (const entry of budget.from) {
+        const start = keys.includes(entry) ? startOf(entry) : null
+        if (!keys.includes(entry)) wrong("not an entry of " + budget.package, entry)
+        else if (start === null || kind(start) !== "read") wrong("cannot read the start of " + budget.package, entry)
+      }
+      // Each entry, so that the next one cannot slip past the row.
+      for (const entry of keys) if (!budget.from.includes(entry)) wrong("not named by the row of " + budget.package, entry)
+    }
+    if (budget.forbid !== undefined && budget.forbid.length === 0) wrong("an empty forbid", budget.package)
+    if (budget.only !== undefined && budget.only.length === 0) wrong("an empty only", budget.package)
+    if (row.length > 0) {
+      faults.push(...row)
+      continue
+    }
     const starts = budget.from === "files"
       ? members.get(pkg)!.filter((file) => !isTest(pkg, file))
-      : budget.from.map((entry) => resolve(pkg.dir, pkg.name + entry.slice(1))).filter((file): file is string => file !== null)
-    const relative = (file: string) => path.relative(root, file).split(path.sep).join("/")
+      : budget.from.map((entry) => startOf(entry)!)
     const forbidden = (file: string) => (budget.forbid ?? []).some((prefix) => relative(file).startsWith(prefix))
     // Outside `only`, and outside the row's own package.
     const outside = (file: string) =>
