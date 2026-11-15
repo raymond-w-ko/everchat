@@ -1,18 +1,12 @@
 {
   "name": "everchat",
   "private": true,
-  "dependencies": {
-    "@earendil-works/pi-codemode": "1.5.2",
-    "@earendil-works/pi-tui": "1.5.2",
-    "@effect/platform-bun": "4.1.2",
-    "@effect/sql-sqlite-bun": "4.1.2",
-    "effect": "^4.1.2",
-    "quickjs-wasi": "3.6.2"
-  },
+  "workspaces": ["packages/*"],
   "devDependencies": {
-    "@types/bun": "^1.4.4",
-    "@xterm/headless": "5.5.0",
-    "happy-dom": "21.0.4",
-    "typescript": "^7.0.2"
+    "@everchat/core": "workspace:*",
+    "@everchat/local": "workspace:*",
+    "@types/bun": "1.4.4",
+    "effect": "4.1.2",
+    "typescript": "7.0.2"
   }
 }

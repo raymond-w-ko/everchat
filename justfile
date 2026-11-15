@@ -7,15 +7,19 @@ default:
 test *args:
     bun test --isolate {{args}}
 
-# Check the types of the new code: all of it, and the core alone, with no Bun
-# and no Node types (tsconfig.core.json).
+# Check the types, one program for each package: the core alone, with no Bun
+# and no Node types (its guard); the core's tests, with the Bun types; the
+# package local, its tests too. Then the boundaries of the packages, which
+# the types do not see: their imports and their manifests (tools/graph.ts).
 check:
-    bunx tsc --noEmit -p .
-    bunx tsc --noEmit -p tsconfig.core.json
+    bunx tsc --noEmit -p packages/core
+    bunx tsc --noEmit -p packages/core/tsconfig.test.json
+    bunx tsc --noEmit -p packages/local
+    bun tools/graph.ts
 
 # Run EverChat from its source, in this terminal.
 run *args:
-    bun src/main.ts {{args}}
+    bun packages/local/src/main.ts {{args}}
 
 # Make a sample chat in a new home, with no model, to look at in the
 # inspector (tools/sample.ts): `just sample /tmp/sample`, and then
@@ -24,13 +28,13 @@ sample home turns="200":
     bun tools/sample.ts {{home}} {{turns}}
 
 # Build EverChat as one executable, `everchat`. The sandbox's worker thread
-# is the second entrypoint (src/worker.ts says why).
+# is the second entrypoint (packages/local/src/worker.ts says why).
 build:
-    bun build --compile src/main.ts src/worker.ts --outfile everchat
+    bun build --compile packages/local/src/main.ts packages/local/src/worker.ts --outfile everchat
 
 # Build the executable, and run the tests of the whole program on it.
 test-build: build
-    EVERCHAT_BIN=./everchat bun test --isolate tests/main.test.ts tests/pipe.test.ts tests/inspect.test.ts
+    EVERCHAT_BIN=./everchat bun test --isolate packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts
 
 # The full check: the types, the tests from source, and the tests of the
 # whole program on the executable.

@@ -38,9 +38,13 @@ that we do not use.
   build needs no upgrade [Q38]. See "Use Effect as much as possible"
   below.
 - TypeScript (`tsc`) checks the types. Bun runs the code without a check, so
-  `just check` is a separate step. It runs two programs: all of the code,
-  and the core's files alone, with no Bun and no Node types
-  (`tsconfig.core.json`).
+  `just check` is a separate step. It runs one program for each package:
+  the core's files with no Bun and no Node types
+  (`packages/core/tsconfig.json`), the core's tests with the Bun types
+  (`packages/core/tsconfig.test.json`), and `local` with its tests, with the
+  Bun types (`packages/local/tsconfig.json`). Then `tools/graph.ts` checks
+  what the types do not see: the imports and the manifests of the packages
+  (see "Be modular").
 
 ## Learning more about Effect
 
@@ -54,21 +58,43 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 
 ## Layout
 
-The new code:
+The new code is a Bun workspace (`"workspaces"` in the root `package.json`)
+with two packages, each in `packages/<name>/` with its own `package.json`:
 
-- `src/`: all TypeScript modules, flat, plus the files they import.
-- `src/x.test.ts`: the tests of one module sit next to it (`x.ts`).
-- `tests/`: tests that cover many modules at once, or that need a second
-  process. `tests/help.ts` holds what the tests share, and `tests/child.ts`
-  is the program that such a test starts. `tests/screen.ts` is a terminal
-  in memory, `tests/pty.ts` runs a process in a real pseudo-terminal, and
-  `tests/vendor.ts` is a fake vendor for a whole process (see "The
-  terminal and pipe mode").
-- `src/main.ts`: the program's entry. `just run` starts it from its source,
-  and `just build` makes the executable `everchat`. `just test-build`
-  builds it and runs the tests of the whole program on it.
-- `src/inspector.html`: the inspector's page (see "The inspector"). It is
-  the one file of `src/` that a browser runs.
+- `packages/core/` (`@everchat/core`): the core. Its modules, flat, are in
+  `packages/core/src/`: the memory, the turn loop, requests, the cache, the
+  head and the prompt, the cap of a result, and the tags of the seams (the
+  store, the sandbox, the functions). It has no runtime API (see "Be
+  modular"). `packages/core/tsconfig.core.d.ts` declares, for the core's
+  own type check only, what it may use beyond `ESNext`.
+- `packages/local/` (`@everchat/local`): the rest, the local build. Its
+  modules, flat, are in `packages/local/src/`: the terminal, pipe mode, the
+  shell and the file functions, the inspector, the store on SQLite
+  (`packages/local/src/sqlite.ts`), the engine in a worker thread
+  (`packages/local/src/thread.ts`), the wire for OpenAI, and the entry of
+  the program.
+- `packages/<name>/src/x.test.ts`: the tests of one module sit next to it
+  (`x.ts`), in its package. A test goes with the code that it tests, so
+  four tests named after a module of the core are in `local`:
+  `sandbox.test.ts` (the engine of `thread.ts`), `functions.test.ts` (most
+  of it the local functions), `limit.test.ts` (most of it the files of
+  `limitfile.ts`), and `store.test.ts` (the store in `sqlite.ts`). The
+  tests of the core reach the SQLite store and the shared test code of
+  `local` by its name, as a development dependency of the core
+  (`@everchat/local/testing`, `@everchat/local/sqlite`).
+- `packages/local/tests/`: tests of the whole program, or of many modules
+  at once, or that need a second process. `packages/local/tests/help.ts`
+  holds what the tests share, and `packages/local/tests/child.ts` is the
+  program that such a test starts. `packages/local/tests/screen.ts` is a
+  terminal in memory, `packages/local/tests/pty.ts` runs a process in a real
+  pseudo-terminal, and `packages/local/tests/vendor.ts` is a fake vendor for
+  a whole process (see "The terminal and pipe mode").
+- `packages/local/src/main.ts`: the program's entry. `just run` starts it
+  from its source, and `just build` makes the executable `everchat`.
+  `just test-build` builds it and runs the tests of the whole program on
+  it.
+- `packages/local/src/inspector.html`: the inspector's page (see "The
+  inspector"). It is the one file of the packages that a browser runs.
 
 Run the full check (see "Checks") before you say that a change is done.
 
@@ -80,20 +106,27 @@ The rest:
 - `docs/`: the design documents.
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
-- `tools/`: scripts that are not part of the program, of the type check, or
-  of the tests. `tools/golden.ts` makes `tests/golden.json` from the old
+- `tools/`: scripts outside the packages, which import them by their names
+  (the root `package.json` names both). `tools/graph.ts` is a step of
+  `just check` (see "Be modular"), and `tools/graph.test.ts` its tests.
+  `tools/golden.ts` makes `packages/local/tests/golden.json` from the old
   code. `tools/probe.ts` sends real requests to a vendor (see "Model access
   through the author's inference gateway"). `tools/sample.ts` makes a chat
   with no model, to look at in the inspector (`just sample <home>`).
-- `ref/`: the old code, for reading only. See "A rewrite, in place". It has
-  the same layout inside (`ref/src/`, `ref/tests/`), and also the old site
-  (`ref/web/`), the old iOS app (`ref/ios/`, which follows Swift naming), and
-  the old `README.md`, `ISSUES.md`, and `justfile`.
+- `ref/`: the old code, for reading only, outside the packages. See "A
+  rewrite, in place". It has the old layout inside (`ref/src/`,
+  `ref/tests/`), and also the old site (`ref/web/`), the old iOS app
+  (`ref/ios/`, which follows Swift naming), and the old `README.md`,
+  `ISSUES.md`, and `justfile`.
 
 ## Checks
 
-- Full check: `just full`, about 70 s.
-- Scoped check: `just scoped <test files>`, for the files of one change.
+- Full check: `just full`, about 70 s (68 s after the move into packages:
+  the same as before).
+- Scoped check: `just scoped <test files>`, for the files of one change,
+  with their paths from the root (for example
+  `just scoped packages/core/src/memory.test.ts`). It runs `just check`
+  first.
 - Full check in a worktree: yes
 - Worktree setup: `bun install --frozen-lockfile`
 
@@ -209,13 +242,15 @@ Code mode is the only primary tool that EverChat gives the model. What the old
 code gives the model as separate tools (shell, read, write, edit, and the
 memory tools) become functions that the program can call.
 
-How it is built (`src/sandbox.ts`, `src/thread.ts`, `src/functions.ts`,
-`src/localfunctions.ts`):
+How it is built (`packages/core/src/sandbox.ts`,
+`packages/local/src/thread.ts`, `packages/core/src/functions.ts`,
+`packages/local/src/localfunctions.ts`):
 
 - A program is JavaScript. It runs in a QuickJS engine that is compiled to
-  WebAssembly, in a worker thread (the library `pi-codemode`). In there it
-  has no files, no network, and no timers. `src/sandbox.ts` holds the tag
-  `Sandbox`; the engine of a local chat is `threadLayer` in `src/thread.ts`.
+  WebAssembly, in a worker thread (the library `pi-codemode`). In there it has
+  no files, no network, and no timers. `packages/core/src/sandbox.ts` holds the
+  tag `Sandbox`; the engine of a local chat is `threadLayer` in
+  `packages/local/src/thread.ts`.
 - The engine is QuickJS on all builds, so the model's programs behave the
   same on each [Q38]. Each program gets a new engine [Q8]. On Cloudflare,
   programs run in a separate Worker: a program that computes inside the
@@ -223,13 +258,13 @@ How it is built (`src/sandbox.ts`, `src/thread.ts`, `src/functions.ts`,
 - Each function runs on EverChat's side. It is a row in `call` from its
   start, and the hooks will run there. So no command can pass a hook unseen.
 - The tool's description lists the functions as TypeScript declarations
-  (`src/head.ts`), in the order of `DECLARATIONS` in
-  `src/localfunctions.ts`. That order is part of the prompt cache's key. To
-  add a function that needs only the memory and the store, add its
-  declaration, its arguments' schema, and its code to `core` in
-  `src/functions.ts`. To add a local one (the shell, the files, the work
-  directory), add them in `src/localfunctions.ts`. Either way, give it its
-  place in `DECLARATIONS`, and add a test.
+  (`packages/core/src/head.ts`), in the order of `DECLARATIONS` in
+  `packages/local/src/localfunctions.ts`. That order is part of the prompt
+  cache's key. To add a function that needs only the memory and the store, add
+  its declaration, its arguments' schema, and its code to `core` in
+  `packages/core/src/functions.ts`. To add a local one (the shell, the files,
+  the work directory), add them in `packages/local/src/localfunctions.ts`.
+  Either way, give it its place in `DECLARATIONS`, and add a test.
 - A hosted chat has no `shell` and no file functions. It gets a common set
   of functions, and the functions of its provider over MCP; EverChat
   validates their definitions, the arguments, and the results [Q21, Q28,
@@ -238,14 +273,15 @@ How it is built (`src/sandbox.ts`, `src/thread.ts`, `src/functions.ts`,
   end and does not wait for it. So the program's exit must not wait for
   worker threads.
 - The executable (`bun build --compile`) has no `node_modules`, where the
-  library looks for its two files. So `src/thread.ts` names both itself, in a
-  way that holds from source and in the executable: the worker thread's
-  program is our own `src/worker.ts`, the second entrypoint of the build,
-  and the QuickJS file is imported as a file, so the build puts it into
-  the executable. `src/worker.ts` must stay next to `src/main.ts`.
-- `quickjs-wasi` is in `package.json` for that import. Its version must be
-  the one that `pi-codemode` names, and a test checks it. Change both
-  together.
+  library looks for its two files. So `packages/local/src/thread.ts` names both
+  itself, in a way that holds from source and in the executable: the worker
+  thread's program is our own `packages/local/src/worker.ts`, the second
+  entrypoint of the build, and the QuickJS file is imported as a file, so the
+  build puts it into the executable. `packages/local/src/worker.ts` must stay
+  next to `packages/local/src/main.ts`.
+- `quickjs-wasi` is in `packages/local/package.json` for that import. Its
+  version must be the one that `pi-codemode` names, and a test checks it.
+  Change both together.
 - After a change to the sandbox, the build, or the dependencies, run
   `just test-build`: `just test` runs from source, and does not show a
   fault that only the executable has.
@@ -253,12 +289,12 @@ How it is built (`src/sandbox.ts`, `src/thread.ts`, `src/functions.ts`,
 ### The terminal and pipe mode
 
 The local build has two interfaces, and one launch has one of them
-(`src/main.ts` chooses): the terminal, when the standard input and the
-standard output are both a terminal, and pipe mode, when one of them is
+(`packages/local/src/main.ts` chooses): the terminal, when the standard input
+and the standard output are both a terminal, and pipe mode, when one of them is
 not.
 
-The terminal is the person's interface, and the one that the factory uses.
-How it is built (`src/terminal.ts`, `src/paint.ts`):
+The terminal is the person's interface, and the one that the factory uses. How
+it is built (`packages/local/src/terminal.ts`, `packages/local/src/paint.ts`):
 
 - The library `pi-tui` draws the screen and reads the keys: the input with
   its editing keys, the markdown, and a renderer that writes only the rows
@@ -267,11 +303,12 @@ How it is built (`src/terminal.ts`, `src/paint.ts`):
   messages are in the terminal's own scrollback, and the terminal's scroll,
   select and copy work on them.
 - A row that a component gives must not be wider than the screen: `pi-tui`
-  fails on such a row. `Wrapped` and `Row` in `src/paint.ts` keep to that.
+  fails on such a row. `Wrapped` and `Row` in `packages/local/src/paint.ts`
+  keep to that.
 
-Pipe mode is for scripts and for tests (`src/pipe.ts`): each line of the
-standard input is a message, one after the other, and each message that
-enters the log goes to the standard output as text. It is the same chat
+Pipe mode is for scripts and for tests (`packages/local/src/pipe.ts`): each
+line of the standard input is a message, one after the other, and each message
+that enters the log goes to the standard output as text. It is the same chat
 with the same parts, so it is the cheap way to run the whole program: no
 pseudo-terminal and no terminal emulator.
 
@@ -289,31 +326,33 @@ What holds for both:
 - The log is the truth of what an interface shows. The turn loop's events
   say when a message entered the log, and carry what streams. An interface
   subscribes first, then reads the log, and shows each message once, in
-  the order of the ids (`src/follow.ts`). Use that module in a new
+  the order of the ids (`packages/core/src/follow.ts`). Use that module in a new
   interface, and do not show a message from an event alone.
-- No control character of a text reaches the terminal or the standard
-  output (`clean` in `src/paint.ts`). Use it for every text that you show.
-- What streams (the thought, the text, the program that the model writes)
-  is never in the database. A step is written when it ends, whole. An
-  interface that shows what streams shows it paced (`src/pace.ts`): a
-  whole paragraph at a time, and not each word. That module knows no
-  terminal, so a later interface can use it as it is. The terminal shows
-  the thought and the text paced, and a program whole when it starts to
-  run. Pipe mode shows nothing that streams: only whole messages.
+- No control character of a text reaches the terminal or the standard output
+  (`clean` in `packages/local/src/paint.ts`). Use it for every text that you
+  show.
+- What streams (the thought, the text, the program that the model writes) is
+  never in the database. A step is written when it ends, whole. An interface
+  that shows what streams shows it paced (`packages/core/src/pace.ts`): a whole
+  paragraph at a time, and not each word. That module knows no terminal, so a
+  later interface can use it as it is. The terminal shows the thought and the
+  text paced, and a program whole when it starts to run. Pipe mode shows
+  nothing that streams: only whole messages.
 
 How to test them:
 
-- `tests/pipe.test.ts` runs the whole program in pipe mode, as a process
-  with pipes, against a fake vendor on this machine (`tests/vendor.ts`).
-  Use it first for anything that does not need the screen or the keys: a
-  turn, a program, a restart, a signal, the arguments, the exit code.
-- `tests/screen.ts` is a terminal in memory (xterm.js with no window). A
-  test gives it to the terminal's layer, types with `type`, and reads the
-  rows that a person would see. Use it for what the screen shows and what
-  a key does (`tests/terminal.test.ts`).
-- `tests/pty.ts` runs the whole program as a process in a real
-  pseudo-terminal (`tests/main.test.ts`). Use it for what only a real
-  terminal shows: the launch of the screen, the signals, a closed window.
+- `packages/local/tests/pipe.test.ts` runs the whole program in pipe mode, as a
+  process with pipes, against a fake vendor on this machine
+  (`packages/local/tests/vendor.ts`). Use it first for anything that does not
+  need the screen or the keys: a turn, a program, a restart, a signal, the
+  arguments, the exit code.
+- `packages/local/tests/screen.ts` is a terminal in memory (xterm.js with no
+  window). A test gives it to the terminal's layer, types with `type`, and
+  reads the rows that a person would see. Use it for what the screen shows and
+  what a key does (`packages/local/tests/terminal.test.ts`).
+- `packages/local/tests/pty.ts` runs the whole program as a process in a real
+  pseudo-terminal (`packages/local/tests/main.test.ts`). Use it for what only a
+  real terminal shows: the launch of the screen, the signals, a closed window.
 - `just test-build` runs the whole-program files on the executable
   (`EVERCHAT_BIN=<file>` names the program to start).
 
@@ -333,21 +372,21 @@ message, and it changes nothing.
 
 How it is built, in four parts that each know only the one before:
 
-- The store's reads (`Reads` in `src/store.ts`, its SQL in `src/sqlite.ts`):
-  the store with no launch and no write, over a connection that cannot
-  write. So the inspector is a process of its own. It runs next to a launch
-  of the chat, or with none, and the chat's process has no server in it. A
-  new query for the inspector goes in `src/sqlite.ts`, because no other
-  module uses SQL.
-- The read module (`src/inspect.ts`): it turns the reads into what the
-  page shows, as plain data. It knows no HTTP. Test it directly.
-- The server (`src/inspector.ts`): the page, and the read module's answers
-  as JSON. Every route is a GET. Only `everchat inspect` loads this module
-  (a dynamic import in `src/main.ts`), so a launch of the chat does not
-  load an HTTP server.
-- The page (`src/inspector.html`): one file with its style and its script,
-  no framework and no build step. The build puts it into the executable as
-  text.
+- The store's reads (`Reads` in `packages/core/src/store.ts`, its SQL in
+  `packages/local/src/sqlite.ts`): the store with no launch and no write, over
+  a connection that cannot write. So the inspector is a process of its own. It
+  runs next to a launch of the chat, or with none, and the chat's process has
+  no server in it. A new query for the inspector goes in
+  `packages/local/src/sqlite.ts`, because no other module uses SQL.
+- The read module (`packages/local/src/inspect.ts`): it turns the reads into
+  what the page shows, as plain data. It knows no HTTP. Test it directly.
+- The server (`packages/local/src/inspector.ts`): the page, and the read
+  module's answers as JSON. Every route is a GET. Only `everchat inspect` loads
+  this module (a dynamic import in `packages/local/src/main.ts`), so a launch
+  of the chat does not load an HTTP server.
+- The page (`packages/local/src/inspector.html`): one file with its style and
+  its script, no framework and no build step. The build puts it into the
+  executable as text.
 
 The rules that it keeps:
 
@@ -361,9 +400,9 @@ The rules that it keeps:
   (`h` in the page's script makes each element). The content security
   policy lets only the page's own script run, by its hash. So the page has
   exactly one `<script>`, and it loads nothing from another place.
-- A view is shown as it is now, which is more than the database's row. The
-  row is written only when a batch changes a view. Between batches, a view
-  grows by one leaf for each new message (`grown` in `src/memory.ts`).
+- A view is shown as it is now, which is more than the database's row. The row
+  is written only when a batch changes a view. Between batches, a view grows by
+  one leaf for each new message (`grown` in `packages/core/src/memory.ts`).
 - The body of a request is the one that the wire builds now from the kept
   turn items. It is not a copy of the bytes that were sent.
 - What streams is not in the database, so the inspector does not show it.
@@ -372,17 +411,18 @@ The rules that it keeps:
 
 How to test it:
 
-- `src/inspect.test.ts` asks the read module about a chat that a fake wire
-  made (`withChat` in `tests/help.ts`).
-- `src/inspector.test.ts` asks the server: who may read, and what each
-  route answers.
-- `tests/page.test.ts` runs the page's script in a browser with no window
-  (the library `happy-dom`) against the real server, and reads what a
-  person would see. That browser has no layout. After a change to how the
-  page looks, look at it in a real browser: `just sample <home>` makes a
-  chat to look at, with no model.
-- `tests/inspect.test.ts` runs `everchat inspect` as a process, next to a
-  launch of the chat. `just test-build` runs it on the executable too.
+- `packages/local/src/inspect.test.ts` asks the read module about a chat that a
+  fake wire made (`withChat` in `packages/local/tests/help.ts`).
+- `packages/local/src/inspector.test.ts` asks the server: who may read, and
+  what each route answers.
+- `packages/local/tests/page.test.ts` runs the page's script in a browser with
+  no window (the library `happy-dom`) against the real server, and reads what a
+  person would see. That browser has no layout. After a change to how the page
+  looks, look at it in a real browser: `just sample <home>` makes a chat to
+  look at, with no model.
+- `packages/local/tests/inspect.test.ts` runs `everchat inspect` as a process,
+  next to a launch of the chat. `just test-build` runs it on the executable
+  too.
 
 ### One system prompt for every kind of request
 
@@ -456,11 +496,10 @@ it. In particular, the core (the memory and the agent loop) must not depend on
 the server, the web, accounts, or billing. In the old code the chat logic
 lives in `ref/src/server.ts`, so this is a large change.
 
-The target ("Layout" describes today's flat `src/`): one repository with
-workspaces, and nine packages named `@everchat/<name>`, with one version
-[Q31, Q45]. The packages import the TypeScript sources of each other, with no
-build step, and nothing goes to npm at first. A person outside can then use
-one package at a time.
+The target: one repository with workspaces, and nine packages named
+`@everchat/<name>`, with one version [Q31, Q45]. The packages import the
+TypeScript sources of each other, with no build step, and nothing goes to npm
+at first. A person outside can then use one package at a time.
 
 | Package | Holds | May import |
 | --- | --- | --- |
@@ -474,15 +513,78 @@ one package at a time.
 | `@everchat/cloudflare` | the Durable Object of a chat | `core`, `openai`, `sqlite`, `codemode` |
 | `@everchat/wakeups` | reminders and routines, optional | `core` |
 
+Today two of them exist: `@everchat/core` and `@everchat/local` ("Layout").
+`sqlite`, `codemode` and `openai` are still inside `local`
+(`packages/local/src/sqlite.ts`, `packages/local/src/thread.ts`,
+`packages/local/src/openai.ts`); later work cuts them out.
+
 The rules that keep the boundaries:
 
 - The core has no runtime API, with one exception: `createHash` from
-  `node:crypto`, which runs the same on Bun, Node and `workerd` [Q45]. The
-  tests of the core use `node:test`, so that they run on Bun and on Node.
-- Two checks hold the boundaries [Q45]: the imports of each package (no
-  relative import into another package, no entry that reaches a file it may
-  not), and its manifest (each import names a dependency of the package's own
-  `package.json`).
+  `node:crypto`, which runs the same on Bun, Node and `workerd` [Q45].
+- No relative import leaves its package. Import another package by its name
+  and an entry of its `exports` (`@everchat/core/memory`). `exports` is the
+  package's contract: one entry for each module that another package may
+  import, each a `.ts` source. A module that another package needs gets its
+  entry; the core has no index that loads all of it.
+- A dependency goes in the `package.json` of the package that imports it,
+  at an exact version (`"effect": "4.1.2"`); a dependency that only the
+  tests use is one of its `devDependencies`. Another package of the
+  workspace is `"workspace:*"`. After a change of a manifest, run
+  `bun install`, so that `bun.lock` and `node_modules` fit it.
+- The tests of the core use `node:test` and `node:assert`, so that they run
+  on Bun and on Node: `test`, `beforeEach` and `afterEach` from `node:test`,
+  each assertion from `node:assert/strict` (`import * as assert`), and a
+  timeout as `test(name, { timeout: 60_000 }, fn)`. No helper module for the
+  tests goes in `packages/core/src/`: every file there that is not a test is
+  in the core's own type check, which has no Node types. A test of the core
+  that imports `@everchat/local` (the SQLite store, the shared test code)
+  reaches `bun:sqlite`, so it runs on Bun only for now.
+- Two checks hold the boundaries [Q45], in `just check`: the type check of
+  each package (the core's has no Bun and no Node types), and
+  `tools/graph.ts`, for what the types do not see. Bun's parser
+  (`Bun.Transpiler.scanImports`) alone decides what each file of each
+  package imports, and the script prints one line for each fault,
+  `<file>:<line>: <rule>: <specifier>`; the line is a hint. The rules:
+  `manifest` (a package imports only itself and its own dependencies; a
+  test may also use its
+  `devDependencies`), `way out` (a relative import stays in its package),
+  `entry` (an import of a workspace package names an entry of its
+  `exports`), `built-in` (a `node:` or `bun:` module is on its package's
+  list: for the core's files, `node:crypto` only; which of its names the
+  core may use, `createHash`, is held by the core's type check, for a name
+  that a file uses by its type, but not for a name made at run time: see
+  "Reflection" below), and
+  `budget` (no file of the core that is not a test reaches
+  `packages/local/` through its value imports). The lists are the tables
+  `BUILTINS` and `BUDGETS` at the top of the file. When it fails, fix the
+  import that its line names: declare the dependency, import by the
+  package's name and an entry, or keep the code that needs a module out of
+  the core. What the two checks do not hold, each an accepted risk:
+  - Reflection (ec-lzw7). A file of the core reaches a runtime API through
+    a value of type `any`: for example `Reflect.get(crypto, "randomUUID")()`
+    on an import of the whole `node:crypto`, or `Reflect.get(globalThis,
+    "process")` with no import at all. Both pass `just check`: the type
+    check holds the names that a file uses by their types, and the script
+    holds the modules that a file imports; neither sees a name that is made
+    at run time. It is rare: only code that is written to go around the
+    types does this, and the type check refuses each other name of
+    `node:crypto` that a file uses directly (`import { randomUUID }` and
+    `crypto.randomUUID()` each fail). To recover, remove the line: no
+    record is lost. The review of a change to the core looks for `Reflect`,
+    `globalThis` and `any`. What would fix it is not an import check: a
+    lint rule that forbids those three in the core, or a run of the core
+    where the API is absent (the core's tests on Node, the Cloudflare smoke
+    test).
+  - An ambient import (ec-ofuo). An `import` with no `type` inside a
+    `declare module "x" { ... }` block, in a `.ts` file that is not a
+    `.d.ts` file, loads nothing, but Bun's parser lists it, so the script
+    may print a fault for it (`manifest`, `built-in`). It is rare: the tree
+    has no such block, and ambient declarations are in `.d.ts` files, which
+    the script does not read. It fails safe: the check refuses, and it
+    never passes a real import. Write `import type` in the block (Bun's
+    parser then lists nothing), or put the block in a `.d.ts` file. What
+    would fix it: an import list from a parser that knows ambient blocks.
 - Three builds prove the design [Q4, Q6, Q14]: local, server, and a
   Cloudflare smoke test (`workerd`, a Durable Object for each chat with its
   own SQLite). Each build is one host with its own implementations of the
@@ -513,8 +615,9 @@ refactor the old code step by step.
 - The old code still runs from inside `ref/`. `cd ref && just test` runs its
   tests. Use this to compare the port with the old behavior.
 - One file outside `ref/` imports from it: `tools/golden.ts`. It runs the old
-  memory on a fixed chat and writes what it made to `tests/golden.json`. The
-  golden test (`tests/golden.test.ts`) runs the new memory on the same chat
+  memory on a fixed chat and writes what it made to
+  `packages/local/tests/golden.json`. The golden test
+  (`packages/local/tests/golden.test.ts`) runs the new memory on the same chat
   and compares. The file goes away when `ref/` does.
 - The documents in `docs/` that describe the old code cite its files without
   `ref/` (for example `src/memory.ts`). Read such a path as a path in `ref/`.
@@ -648,19 +751,18 @@ Write the new code with Effect. In particular:
 - Use Effect's own modules (for example `effect/sql`, `effect/cli`) before
   other libraries, where they fit.
 - The arguments are read with `effect/cli`, and the standard input, the
-  standard output, the file system and the paths in `src/main.ts` and
-  `src/pipe.ts` are Effect's services (`Stdio`, `FileSystem`, `Path`),
-  from `@effect/platform-bun`. Import one module of that package
-  (`@effect/platform-bun/BunServices`), not its index: the index loads all
-  of it, and each start pays for that.
-- Do not write to stdout or stderr (`console.log`, `process.stderr`).
-  EverChat is one process in a terminal, and such a line breaks the screen.
-  Two modules may: `src/main.ts`, and only when the screen is not up (the
-  usage and what else `effect/cli` prints, the reason why the program
-  could not start, and the inspector's address), and `src/pipe.ts`, whose
-  output is the standard output.
-  To say something about the program's own work, log it with Effect
-  (`Effect.logWarning`, `Effect.logError`), with the module's name as the
-  annotation `source`. The logger writes it to the table `log`
-  (`src/diagnostics.ts`). That file also says where the logger's layer must
-  go, so that every fiber has it.
+  standard output, the file system and the paths in
+  `packages/local/src/main.ts` and `packages/local/src/pipe.ts` are Effect's
+  services (`Stdio`, `FileSystem`, `Path`), from `@effect/platform-bun`. Import
+  one module of that package (`@effect/platform-bun/BunServices`), not its
+  index: the index loads all of it, and each start pays for that.
+- Do not write to stdout or stderr (`console.log`, `process.stderr`). EverChat
+  is one process in a terminal, and such a line breaks the screen. Two modules
+  may: `packages/local/src/main.ts`, and only when the screen is not up (the
+  usage and what else `effect/cli` prints, the reason why the program could not
+  start, and the inspector's address), and `packages/local/src/pipe.ts`, whose
+  output is the standard output. To say something about the program's own work,
+  log it with Effect (`Effect.logWarning`, `Effect.logError`), with the
+  module's name as the annotation `source`. The logger writes it to the table
+  `log` (`packages/core/src/diagnostics.ts`). That file also says where the
+  logger's layer must go, so that every fiber has it.

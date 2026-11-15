@@ -1,0 +1,10 @@
+// The program of the package `local`: its sources and its tests, with the
+// Bun types. The core's files that it imports are checked here too, with
+// those types; the core's own program checks them without.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src", "tests"]
+}

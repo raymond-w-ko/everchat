@@ -1,0 +1,17 @@
+// The core's own program, its guard: every file of the core but the tests,
+// with no Bun and no Node types, and a `lib` of what Bun, Node and `workerd`
+// share. `tsc` follows imports, so a file passes only if all that it imports
+// passes too. `tsconfig.core.d.ts` declares, for this program only, what the
+// core may use beyond `ESNext`: `createHash` of `node:crypto`, `TextEncoder`,
+// `TextDecoder`. The tests are checked with the Bun types, by
+// `tsconfig.test.json`.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": []
+  },
+  "files": ["tsconfig.core.d.ts"],
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

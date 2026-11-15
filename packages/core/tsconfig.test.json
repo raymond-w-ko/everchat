@@ -1,0 +1,9 @@
+// The core's tests, with the Bun types (`bun:test`). They reach the SQLite
+// store and the test helpers of `@everchat/local`, a development dependency.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src"]
+}

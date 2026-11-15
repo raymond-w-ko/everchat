@@ -1,10 +1,11 @@
+// The options that every package's program shares (packages/*/tsconfig*.json).
+// Each package names its own files, `lib` and `types`; this file checks none.
 {
   "compilerOptions": {
     "target": "ESNext",
     "module": "Preserve",
     "moduleResolution": "bundler",
     "lib": ["ESNext"],
-    "types": ["bun"],
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
@@ -15,5 +16,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "tests"]
+  "files": []
 }

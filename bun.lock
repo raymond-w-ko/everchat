@@ -4,19 +4,42 @@
   "workspaces": {
     "": {
       "name": "everchat",
+      "devDependencies": {
+        "@everchat/core": "workspace:*",
+        "@everchat/local": "workspace:*",
+        "@types/bun": "1.4.4",
+        "effect": "4.1.2",
+        "typescript": "7.0.2",
+      },
+    },
+    "packages/core": {
+      "name": "@everchat/core",
+      "version": "0.1.0",
+      "dependencies": {
+        "@earendil-works/pi-codemode": "1.5.2",
+        "effect": "4.1.2",
+      },
+      "devDependencies": {
+        "@everchat/local": "workspace:*",
+        "@types/bun": "1.4.4",
+      },
+    },
+    "packages/local": {
+      "name": "@everchat/local",
+      "version": "0.1.0",
       "dependencies": {
         "@earendil-works/pi-codemode": "1.5.2",
         "@earendil-works/pi-tui": "1.5.2",
         "@effect/platform-bun": "4.1.2",
         "@effect/sql-sqlite-bun": "4.1.2",
-        "effect": "^4.1.2",
+        "@everchat/core": "workspace:*",
+        "effect": "4.1.2",
         "quickjs-wasi": "3.6.2",
       },
       "devDependencies": {
-        "@types/bun": "^1.4.4",
+        "@types/bun": "1.4.4",
         "@xterm/headless": "5.5.0",
         "happy-dom": "21.0.4",
-        "typescript": "^7.0.2",
       },
     },
   },
@@ -30,6 +53,10 @@
     "@effect/platform-node-shared": ["@effect/platform-node-shared@4.1.2", "", { "dependencies": { "@types/ws": "^8.18.2", "ws": "^8.22.1" }, "peerDependencies": { "effect": "^4.1.2" } }, "sha512-wSwl9A/G1hcVvF8nLI+YfB3EyOIDvWS6+lsTZBkmgDnPBL7m8YWZF+1HD+mdEsb52SUGfukip46Q3gRwSdk3QA=="],
 
     "@effect/sql-sqlite-bun": ["@effect/sql-sqlite-bun@4.1.2", "", { "peerDependencies": { "effect": "^4.1.2" } }, "sha512-Cwe0fSqklOg8pjoY+i0rszSciI3WiKfauQc+k+okpcfTGqON45YZ3a9XmP4uUbk7dhim3qiPP92IjBjL6jDZgw=="],
+
+    "@everchat/core": ["@everchat/core@workspace:packages/core"],
+
+    "@everchat/local": ["@everchat/local@workspace:packages/local"],
 
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
 

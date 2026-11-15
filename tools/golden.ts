@@ -1,4 +1,4 @@
-// Makes tests/golden.json from the OLD code (ref/). Run: bun tools/golden.ts
+// Makes packages/local/tests/golden.json from the OLD code (ref/). Run: bun tools/golden.ts
 //
 // tests/golden.test.ts runs the new memory on the same chat and compares.
 // This is the one file outside ref/ that imports from ref/. It is not part
@@ -92,6 +92,6 @@ const gold = {
   marks,
 };
 Memory.stop(mem);
-fs.writeFileSync(new URL("../tests/golden.json", import.meta.url), JSON.stringify(gold) + "\n");
+fs.writeFileSync(new URL("../packages/local/tests/golden.json", import.meta.url), JSON.stringify(gold) + "\n");
 console.log(JSON.stringify({ ...gold, view: gold.view.length, seen: gold.seen.length, marks: gold.marks.length }));
 process.exit(0);

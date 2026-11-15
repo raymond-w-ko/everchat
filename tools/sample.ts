@@ -21,11 +21,11 @@
 import { Effect } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { FILE } from "../src/database.ts"
-import { Memory } from "../src/memory.ts"
-import type { Reply, Request } from "../src/request.ts"
-import { Turns } from "../src/turn.ts"
-import { fakeWire, reply, withChat } from "../tests/help.ts"
+import { FILE } from "@everchat/local/database"
+import { Memory } from "@everchat/core/memory"
+import type { Reply, Request } from "@everchat/core/request"
+import { Turns } from "@everchat/core/turn"
+import { fakeWire, reply, withChat } from "@everchat/local/testing"
 
 const [home, turnsArg] = process.argv.slice(2)
 if (home === undefined) {

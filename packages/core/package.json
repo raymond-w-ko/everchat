@@ -1,0 +1,31 @@
+{
+  "name": "@everchat/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/turn.ts",
+    "./ask": "./src/ask.ts",
+    "./cache": "./src/cache.ts",
+    "./compactor": "./src/compactor.ts",
+    "./diagnostics": "./src/diagnostics.ts",
+    "./follow": "./src/follow.ts",
+    "./functions": "./src/functions.ts",
+    "./head": "./src/head.ts",
+    "./limit": "./src/limit.ts",
+    "./memory": "./src/memory.ts",
+    "./pace": "./src/pace.ts",
+    "./request": "./src/request.ts",
+    "./sandbox": "./src/sandbox.ts",
+    "./store": "./src/store.ts",
+    "./turn": "./src/turn.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-codemode": "1.5.2",
+    "effect": "4.1.2"
+  },
+  "devDependencies": {
+    "@everchat/local": "workspace:*",
+    "@types/bun": "1.4.4"
+  }
+}
