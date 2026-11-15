@@ -51,6 +51,22 @@ test("a cut never parts the two halves of one character", () => {
   expect(Buffer.byteLength(capped("é".repeat(100), 51))).toBe(50)
 })
 
+test("a text of at most a third of the bound in units comes back as it is; one unit more is scanned", () => {
+  // At the bound (10 units, 30 bytes): no scan, and each of these fits
+  // exactly, a lone surrogate too (3 bytes, as U+FFFD).
+  for (const text of ["€".repeat(10), "\uD83D".repeat(10), "a".repeat(10), "😀".repeat(5)]) {
+    expect(text.length * 3).toBe(30)
+    expect(capped(text, 30)).toBe(text)
+  }
+  // One unit over the bound: the scan decides. ASCII fits.
+  expect(capped("a".repeat(11), 30)).toBe("a".repeat(11))
+  expect(capped("€".repeat(10) + "a", 31)).toBe("€".repeat(10) + "a")
+  // One unit over the bound, and it does not fit: cut as before.
+  expect(capped("€".repeat(11), 30)).toBe("€".repeat(10))
+  expect(capped("€".repeat(10) + "😀", 33)).toBe("€".repeat(10))
+  expect(Buffer.byteLength(capped("€".repeat(11), 30))).toBe(30)
+})
+
 test("a short result has no file, and its bytes are counted", async () => {
   const file = newFile()
   await withLimit(file, Effect.gen(function*() {

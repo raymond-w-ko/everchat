@@ -34,24 +34,25 @@ export const HARD = 64 * 1024 * 1024
 // The characters that the line between the head and the tail may take.
 const ROOM = 512
 
-// The bytes of one character of `text` at `at`, in UTF-8, and how many
-// code units it takes (2 for a surrogate pair). A lone surrogate is written
-// as U+FFFD, in 3 bytes, as Node's `Buffer.byteLength` counts it.
-const char = (text: string, at: number): readonly [bytes: number, units: number] => {
+// The bytes of one character of `text` at `at`, in UTF-8. Only a surrogate
+// pair takes 4, and it is 2 code units; every other character is 1. A lone
+// surrogate is written as U+FFFD, in 3 bytes, as Node's `Buffer.byteLength`
+// counts it.
+const char = (text: string, at: number): number => {
   const code = text.charCodeAt(at)
-  if (code < 0x80) return [1, 1]
-  if (code < 0x800) return [2, 1]
-  if (code >> 10 === 0x36 && at + 1 < text.length && text.charCodeAt(at + 1) >> 10 === 0x37) return [4, 2]
-  return [3, 1]
+  if (code < 0x80) return 1
+  if (code < 0x800) return 2
+  if (code >> 10 === 0x36 && at + 1 < text.length && text.charCodeAt(at + 1) >> 10 === 0x37) return 4
+  return 3
 }
 
 // The bytes of `text` in UTF-8.
 export const bytes = (text: string): number => {
   let total = 0
   for (let at = 0; at < text.length;) {
-    const [size, units] = char(text, at)
+    const size = char(text, at)
     total += size
-    at += units
+    at += size === 4 ? 2 : 1
   }
   return total
 }
@@ -78,16 +79,23 @@ export const shorten = (text: string, limit: number, where: string): string => {
 // A text of at most `most` bytes: the start of `text`, never with half a
 // character at its end. The longest start that fits, then one unit less if
 // the cut is before the second half of a pair.
+//
+// One code unit takes at most 3 bytes (a pair: 2 units, 4 bytes), so a text
+// of no more than `most / 3` units fits for sure, and is not scanned: an
+// ordinary result is far under the hard limit.
 export const capped = (text: string, most: number): string => {
+  if (text.length * 3 <= most) {
+    return text
+  }
   let total = 0
   let at = 0
   while (at < text.length) {
-    const [size, units] = char(text, at)
+    const size = char(text, at)
     if (total + size > most) {
       break
     }
     total += size
-    at += units
+    at += size === 4 ? 2 : 1
   }
   return at === text.length ? text : text.slice(0, parts(text, at) ? at - 1 : at)
 }
