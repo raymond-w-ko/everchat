@@ -5,11 +5,28 @@
     "": {
       "name": "everchat",
       "devDependencies": {
+        "@everchat/codemode": "workspace:*",
         "@everchat/core": "workspace:*",
         "@everchat/local": "workspace:*",
+        "@everchat/openai": "workspace:*",
+        "@everchat/sqlite": "workspace:*",
         "@types/bun": "1.4.4",
         "effect": "4.1.2",
         "typescript": "7.0.2",
+      },
+    },
+    "packages/codemode": {
+      "name": "@everchat/codemode",
+      "version": "0.1.0",
+      "dependencies": {
+        "@earendil-works/pi-codemode": "1.5.2",
+        "@everchat/core": "workspace:*",
+        "effect": "4.1.2",
+        "quickjs-wasi": "3.6.2",
+      },
+      "devDependencies": {
+        "@everchat/sqlite": "workspace:*",
+        "@types/bun": "1.4.4",
       },
     },
     "packages/core": {
@@ -21,6 +38,7 @@
       },
       "devDependencies": {
         "@everchat/local": "workspace:*",
+        "@everchat/sqlite": "workspace:*",
         "@types/bun": "1.4.4",
       },
     },
@@ -31,15 +49,39 @@
         "@earendil-works/pi-codemode": "1.5.2",
         "@earendil-works/pi-tui": "1.5.2",
         "@effect/platform-bun": "4.1.2",
-        "@effect/sql-sqlite-bun": "4.1.2",
+        "@everchat/codemode": "workspace:*",
         "@everchat/core": "workspace:*",
+        "@everchat/openai": "workspace:*",
+        "@everchat/sqlite": "workspace:*",
         "effect": "4.1.2",
-        "quickjs-wasi": "3.6.2",
       },
       "devDependencies": {
         "@types/bun": "1.4.4",
         "@xterm/headless": "5.5.0",
         "happy-dom": "21.0.4",
+      },
+    },
+    "packages/openai": {
+      "name": "@everchat/openai",
+      "version": "0.1.0",
+      "dependencies": {
+        "@everchat/core": "workspace:*",
+        "effect": "4.1.2",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.4",
+      },
+    },
+    "packages/sqlite": {
+      "name": "@everchat/sqlite",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effect/sql-sqlite-bun": "4.1.2",
+        "@everchat/core": "workspace:*",
+        "effect": "4.1.2",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.4",
       },
     },
   },
@@ -54,9 +96,15 @@
 
     "@effect/sql-sqlite-bun": ["@effect/sql-sqlite-bun@4.1.2", "", { "peerDependencies": { "effect": "^4.1.2" } }, "sha512-Cwe0fSqklOg8pjoY+i0rszSciI3WiKfauQc+k+okpcfTGqON45YZ3a9XmP4uUbk7dhim3qiPP92IjBjL6jDZgw=="],
 
+    "@everchat/codemode": ["@everchat/codemode@workspace:packages/codemode"],
+
     "@everchat/core": ["@everchat/core@workspace:packages/core"],
 
     "@everchat/local": ["@everchat/local@workspace:packages/local"],
+
+    "@everchat/openai": ["@everchat/openai@workspace:packages/openai"],
+
+    "@everchat/sqlite": ["@everchat/sqlite@workspace:packages/sqlite"],
 
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
 

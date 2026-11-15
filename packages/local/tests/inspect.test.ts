@@ -6,8 +6,8 @@
 import { afterEach, expect, test } from "bun:test"
 import { Effect } from "effect"
 import * as fs from "node:fs"
-import * as Database from "../src/database.ts"
-import { migrations } from "../src/migrations.ts"
+import * as Database from "@everchat/sqlite/database"
+import { migrations } from "@everchat/sqlite/migrations"
 import { rows } from "./help.ts"
 import { env, place, PROGRAM, text, vendor } from "./vendor.ts"
 

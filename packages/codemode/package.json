@@ -1,0 +1,19 @@
+{
+  "name": "@everchat/codemode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./thread": "./src/thread.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-codemode": "1.5.2",
+    "@everchat/core": "workspace:*",
+    "effect": "4.1.2",
+    "quickjs-wasi": "3.6.2"
+  },
+  "devDependencies": {
+    "@everchat/sqlite": "workspace:*",
+    "@types/bun": "1.4.4"
+  }
+}

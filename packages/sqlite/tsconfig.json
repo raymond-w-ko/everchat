@@ -1,0 +1,11 @@
+// The program of the package `sqlite`: its sources and its tests, with the
+// Bun types for now (`sqlite.ts` uses Bun's driver, `Bun.CryptoHasher` and
+// `process`). The core's files that it imports are checked here too, with
+// those types.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src", "tests"]
+}

@@ -21,7 +21,7 @@
 import { Effect } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { FILE } from "@everchat/local/database"
+import { FILE } from "@everchat/sqlite/database"
 import { Memory } from "@everchat/core/memory"
 import type { Reply, Request } from "@everchat/core/request"
 import { Turns } from "@everchat/core/turn"

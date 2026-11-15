@@ -12,7 +12,7 @@ import { limitLayer } from "./limitfile.ts"
 import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
 import { Memory } from "@everchat/core/memory"
 import { Shell } from "./shell.ts"
-import { storeLayer } from "./sqlite.ts"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 
 // One launch with the real functions. The work directory is the home.

@@ -83,20 +83,20 @@ import * as os from "node:os"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import * as Compactor from "@everchat/core/compactor"
-import * as Database from "./database.ts"
+import * as Database from "@everchat/sqlite/database"
 import * as Diagnostics from "@everchat/core/diagnostics"
 import { Inspect } from "./inspect.ts"
-import { Gateway } from "./gateway.ts"
+import { gatewayLayer } from "./gateway.ts"
 import { limitLayer } from "./limitfile.ts"
 import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
 import { Memory } from "@everchat/core/memory"
-import { openaiLayer } from "./openai.ts"
+import { openaiLayer } from "@everchat/openai"
 import { Pipe } from "./pipe.ts"
 import { Shell } from "./shell.ts"
-import { readsLayer, storeLayer } from "./sqlite.ts"
+import { readsLayer, storeLayer } from "@everchat/sqlite/bun"
 import type { Pick } from "@everchat/core/store"
 import { Terminal } from "./terminal.ts"
-import { threadLayer } from "./thread.ts"
+import { threadLayer } from "@everchat/codemode/thread"
 import { Turns } from "@everchat/core/turn"
 
 export const VERSION = "0.1.0"
@@ -133,18 +133,25 @@ It prints the page's address. The address holds a token that is new at each
 start: only who has the address can read the chat. The server listens on this
 machine only (127.0.0.1).`
 
+// The program of the sandbox's worker thread. In the executable, every
+// module's address is the executable's own, and Bun finds an entrypoint of
+// the build by its path from the first entrypoint's directory. So worker.ts
+// must stay next to this file. (The library's own default finds the same
+// file in the executable today, but only because of that file's name.)
+const WORKER = new URL("./worker.ts", import.meta.url)
+
 // The program but its interface, for one launch.
 export const layer = (given: { readonly home: string; readonly file: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
     Layer.provideMerge(storeLayer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
-  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(Gateway.layer)))), Layer.provideMerge(base))
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(gatewayLayer)))), Layer.provideMerge(base))
   const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, declarations: DECLARATIONS })), Layer.provideMerge(asking))
   const limits = limitLayer().pipe(Layer.provideMerge(memory))
   const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(limits))
   const functions = functionsLayer({ cwd: given.cwd }).pipe(Layer.provideMerge(shell))
-  const sandbox = threadLayer().pipe(Layer.provideMerge(functions))
+  const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
   return Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(sandbox))
 }
 

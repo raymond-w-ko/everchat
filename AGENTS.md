@@ -41,8 +41,11 @@ that we do not use.
   `just check` is a separate step. It runs one program for each package:
   the core's files with no Bun and no Node types
   (`packages/core/tsconfig.json`), the core's tests with the Bun types
-  (`packages/core/tsconfig.test.json`), and `local` with its tests, with the
-  Bun types (`packages/local/tsconfig.json`). Then `tools/graph.ts` checks
+  (`packages/core/tsconfig.test.json`), then `openai`, `sqlite`, `codemode`
+  and `local`, each with its tests and with the Bun types for now
+  (`packages/openai/tsconfig.json`, `packages/sqlite/tsconfig.json`,
+  `packages/codemode/tsconfig.json`, `packages/local/tsconfig.json`). Then
+  `tools/graph.ts` checks
   what the types do not see: the imports and the manifests of the packages
   (see "Be modular").
 
@@ -59,33 +62,55 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 ## Layout
 
 The new code is a Bun workspace (`"workspaces"` in the root `package.json`)
-with two packages, each in `packages/<name>/` with its own `package.json`:
+with five packages, each in `packages/<name>/` with its own `package.json`.
+A package's entries are the keys of its `exports` (see "Be modular"):
 
 - `packages/core/` (`@everchat/core`): the core. Its modules, flat, are in
   `packages/core/src/`: the memory, the turn loop, requests, the cache, the
   head and the prompt, the cap of a result, and the tags of the seams (the
   store, the sandbox, the functions). It has no runtime API (see "Be
   modular"). `packages/core/tsconfig.core.d.ts` declares, for the core's
-  own type check only, what it may use beyond `ESNext`.
+  own type check only, what it may use beyond `ESNext`. Its entries: `.`
+  (the turn loop) and one for each module that another package imports.
+- `packages/openai/` (`@everchat/openai`): the wire for OpenAI. Its
+  entries: `.` (`packages/openai/src/openai.ts`, the wire), and one for
+  the tag of the address and the key that each request goes to, its
+  error, and the one form of the address (see the section on model
+  access). Where the address and the key come from is `local`'s.
+- `packages/sqlite/` (`@everchat/sqlite`): the store on SQLite, with Bun's
+  driver. Its entries: `./bun` (`packages/sqlite/src/sqlite.ts`, the
+  store), `./database` (`packages/sqlite/src/database.ts`, it opens the
+  file), `./migrations` (`packages/sqlite/src/migrations.ts`, the changes
+  of the tables), and `./testing` (`packages/sqlite/tests/help.ts`, what the
+  tests that need a real store share). It has no entry `.`.
+- `packages/codemode/` (`@everchat/codemode`): the engine of the sandbox,
+  in a worker thread. Its entry: `./thread`
+  (`packages/codemode/src/thread.ts`).
 - `packages/local/` (`@everchat/local`): the rest, the local build. Its
   modules, flat, are in `packages/local/src/`: the terminal, pipe mode, the
-  shell and the file functions, the inspector, the store on SQLite
-  (`packages/local/src/sqlite.ts`), the engine in a worker thread
-  (`packages/local/src/thread.ts`), the wire for OpenAI, and the entry of
-  the program.
+  shell and the file functions, the inspector, the reading of the address
+  and the key from the environment and a file, the worker thread's
+  program (`packages/local/src/worker.ts`, see "Code mode is the only
+  primary tool"), and the entry of the program. Its entries: `./limitfile`,
+  `./localfunctions`, `./shell`, `./testing` (`packages/local/tests/help.ts`),
+  and the one for that reading.
 - `packages/<name>/src/x.test.ts`: the tests of one module sit next to it
   (`x.ts`), in its package. A test goes with the code that it tests, so
-  four tests named after a module of the core are in `local`:
-  `sandbox.test.ts` (the engine of `thread.ts`), `functions.test.ts` (most
-  of it the local functions), `limit.test.ts` (most of it the files of
-  `limitfile.ts`), and `store.test.ts` (the store in `sqlite.ts`). The
-  tests of the core reach the SQLite store and the shared test code of
-  `local` by its name, as a development dependency of the core
-  (`@everchat/local/testing`, `@everchat/local/sqlite`).
+  four tests named after a module of the core are in other packages:
+  `sandbox.test.ts` in `codemode` (the engine of `thread.ts`),
+  `store.test.ts` in `sqlite` (the store in `sqlite.ts`), and in `local`
+  `functions.test.ts` (most of it the local functions) and `limit.test.ts`
+  (most of it the files of `limitfile.ts`). The tests of the core reach the
+  SQLite store and the shared test code by the names of their packages,
+  as development dependencies of the core (`@everchat/sqlite/bun`,
+  `@everchat/local/testing`).
+- `packages/sqlite/tests/`: the tests of the store that need a second
+  process. `packages/sqlite/tests/child.ts` is the program that such a
+  test starts (`packages/sqlite/tests/crash.test.ts`).
 - `packages/local/tests/`: tests of the whole program, or of many modules
   at once, or that need a second process. `packages/local/tests/help.ts`
-  holds what the tests share, and `packages/local/tests/child.ts` is the
-  program that such a test starts. `packages/local/tests/screen.ts` is a
+  holds what the tests share, and exports again the helpers of
+  `packages/sqlite/tests/help.ts`. `packages/local/tests/screen.ts` is a
   terminal in memory, `packages/local/tests/pty.ts` runs a process in a real
   pseudo-terminal, and `packages/local/tests/vendor.ts` is a fake vendor for
   a whole process (see "The terminal and pipe mode").
@@ -107,7 +132,7 @@ The rest:
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
 - `tools/`: scripts outside the packages, which import them by their names
-  (the root `package.json` names both). `tools/graph.ts` is a step of
+  (the root `package.json` names all five). `tools/graph.ts` is a step of
   `just check` (see "Be modular"), and `tools/graph.test.ts` its tests.
   `tools/golden.ts` makes `packages/local/tests/golden.json` from the old
   code. `tools/probe.ts` sends real requests to a vendor (see "Model access
@@ -125,7 +150,8 @@ The rest:
   the same as before).
 - Scoped check: `just scoped <test files>`, for the files of one change,
   with their paths from the root (for example
-  `just scoped packages/core/src/memory.test.ts`). It runs `just check`
+  `just scoped packages/core/src/memory.test.ts` or
+  `just scoped packages/sqlite/src/store.test.ts`). It runs `just check`
   first.
 - Full check in a worktree: yes
 - Worktree setup: `bun install --frozen-lockfile`
@@ -243,14 +269,22 @@ code gives the model as separate tools (shell, read, write, edit, and the
 memory tools) become functions that the program can call.
 
 How it is built (`packages/core/src/sandbox.ts`,
-`packages/local/src/thread.ts`, `packages/core/src/functions.ts`,
+`packages/codemode/src/thread.ts`, `packages/core/src/functions.ts`,
 `packages/local/src/localfunctions.ts`):
 
 - A program is JavaScript. It runs in a QuickJS engine that is compiled to
   WebAssembly, in a worker thread (the library `pi-codemode`). In there it has
   no files, no network, and no timers. `packages/core/src/sandbox.ts` holds the
   tag `Sandbox`; the engine of a local chat is `threadLayer` in
-  `packages/local/src/thread.ts`.
+  `packages/codemode/src/thread.ts`.
+- A program has a memory limit and a compute limit (`MEMORY` and `COMPUTE`
+  in `packages/core/src/sandbox.ts`; see the glossary). The compute limit
+  bounds one stretch of compute with no function at work, and starts again
+  after each function. The engine also takes a compute budget (the option
+  `budget` of `threadLayer`): the most time that a program may compute
+  with no function at work, summed over the whole program. It does not
+  bound what a program computes while a function is at work. The local
+  use has none.
 - The engine is QuickJS on all builds, so the model's programs behave the
   same on each [Q38]. Each program gets a new engine [Q8]. On Cloudflare,
   programs run in a separate Worker: a program that computes inside the
@@ -273,15 +307,18 @@ How it is built (`packages/core/src/sandbox.ts`,
   end and does not wait for it. So the program's exit must not wait for
   worker threads.
 - The executable (`bun build --compile`) has no `node_modules`, where the
-  library looks for its two files. So `packages/local/src/thread.ts` names both
-  itself, in a way that holds from source and in the executable: the worker
-  thread's program is our own `packages/local/src/worker.ts`, the second
-  entrypoint of the build, and the QuickJS file is imported as a file, so the
-  build puts it into the executable. `packages/local/src/worker.ts` must stay
-  next to `packages/local/src/main.ts`.
-- `quickjs-wasi` is in `packages/local/package.json` for that import. Its
-  version must be the one that `pi-codemode` names, and a test checks it.
-  Change both together.
+  library looks for its two files. So both are options of `threadLayer`, in
+  a way that holds from source and in the executable. The QuickJS file is
+  imported as a file in `packages/codemode/src/thread.ts`, so the build puts
+  it into the executable; it is the default. The worker thread's program is
+  our own `packages/local/src/worker.ts`, the second entrypoint of the
+  build, which `packages/local/src/main.ts` gives as the option `worker`;
+  with none, the library's own worker runs, from `node_modules` (the tests
+  of `codemode` use that). `packages/local/src/worker.ts` must stay next to
+  `packages/local/src/main.ts`.
+- `quickjs-wasi` is in `packages/codemode/package.json` for that import. Its
+  version must be the one that `pi-codemode` names, and a test checks it
+  (`packages/codemode/src/sandbox.test.ts`). Change both together.
 - After a change to the sandbox, the build, or the dependencies, run
   `just test-build`: `just test` runs from source, and does not show a
   fault that only the executable has.
@@ -373,11 +410,11 @@ message, and it changes nothing.
 How it is built, in four parts that each know only the one before:
 
 - The store's reads (`Reads` in `packages/core/src/store.ts`, its SQL in
-  `packages/local/src/sqlite.ts`): the store with no launch and no write, over
+  `packages/sqlite/src/sqlite.ts`): the store with no launch and no write, over
   a connection that cannot write. So the inspector is a process of its own. It
   runs next to a launch of the chat, or with none, and the chat's process has
   no server in it. A new query for the inspector goes in
-  `packages/local/src/sqlite.ts`, because no other module uses SQL.
+  `packages/sqlite/src/sqlite.ts`, because no other module uses SQL.
 - The read module (`packages/local/src/inspect.ts`): it turns the reads into
   what the page shows, as plain data. It knows no HTTP. Test it directly.
 - The server (`packages/local/src/inspector.ts`): the page, and the read
@@ -513,10 +550,13 @@ at first. A person outside can then use one package at a time.
 | `@everchat/cloudflare` | the Durable Object of a chat | `core`, `openai`, `sqlite`, `codemode` |
 | `@everchat/wakeups` | reminders and routines, optional | `core` |
 
-Today two of them exist: `@everchat/core` and `@everchat/local` ("Layout").
-`sqlite`, `codemode` and `openai` are still inside `local`
-(`packages/local/src/sqlite.ts`, `packages/local/src/thread.ts`,
-`packages/local/src/openai.ts`); later work cuts them out.
+Today five of them exist: `@everchat/core`, `@everchat/openai`,
+`@everchat/sqlite`, `@everchat/codemode` and `@everchat/local` ("Layout").
+Each of the three cut out of `local` holds less than its row says:
+`openai` has the wire for OpenAI and none for Anthropic, `sqlite` an
+entry for Bun only (`./bun`), and `codemode` the engine in a worker thread
+only (`./thread`).
+`mariadb`, `server`, `cloudflare` and `wakeups` do not exist yet.
 
 The rules that keep the boundaries:
 
@@ -540,8 +580,9 @@ The rules that keep the boundaries:
   check, which has no Node types, and under the list of built-ins of the
   core's files, so a helper that imports `node:test` or `node:assert` fails
   both checks; a helper that needs neither passes. A test of the core
-  that imports `@everchat/local` (the SQLite store, the shared test code)
-  reaches `bun:sqlite`, so it runs on Bun only for now.
+  that imports `@everchat/sqlite` or `@everchat/local` (the SQLite store,
+  the shared test code) reaches `bun:sqlite`, so it runs on Bun only for
+  now.
 - Two checks hold the boundaries [Q45], in `just check`: the type check of
   each package (the core's has no Bun and no Node types), and
   `tools/graph.ts`, for what the types do not see. Bun's parser
@@ -552,7 +593,11 @@ The rules that keep the boundaries:
   `<file>:<line>: <rule>: <specifier>`; the line is a hint. The rules:
   `manifest` (a package imports only itself and its own dependencies; a
   test may also use its
-  `devDependencies`), `way out` (a relative import stays in its package),
+  `devDependencies`), `way out` (a relative import stays in its package;
+  it, or an entry of a workspace package, names a `.ts` file of a
+  package's own sources or an existing file of a kind that is not code,
+  on the script's list `NOT_CODE` (`.html`, `.txt`: the inspector's page),
+  since the script cannot follow another one),
   `entry` (an import of a workspace package names an entry of its
   `exports`), `built-in` (a `node:` or `bun:` module is on its package's
   list: for the core's tests, `node:assert/strict`, `node:crypto`,
@@ -560,10 +605,29 @@ The rules that keep the boundaries:
   Node too; for the core's files, `node:crypto` only; which of its names the
   core may use, `createHash`, is held by the core's type check, for a name
   that a file uses by its type, but not for a name made at run time: see
-  "Reflection" below), and
-  `budget` (no file of the core that is not a test reaches
-  `packages/local/` through its value imports). The lists are the tables
-  `BUILTINS` and `BUDGETS` at the top of the file. When it fails, fix the
+  "Reflection" below; for the files of `openai`, `sqlite` and `codemode`,
+  none, and any for their tests; for `local`, any), and
+  `budget` (the files that a row starts from, through their value imports
+  and across packages, reach no file under its `forbid`, and, when it has
+  `only`, no file outside those paths and its own package; the walk
+  fails closed: an import of the workspace that it cannot follow is a
+  fault of each row whose walk reaches it). The rows of
+  `budget`: no file of the core that is not a test reaches
+  `packages/local/`, `packages/openai/`, `packages/sqlite/` or
+  `packages/codemode/`; no such file of `sqlite` or `codemode` reaches
+  `packages/local/` or the other two of the three; and the entry `.` of
+  `openai` reaches only its own files and `packages/core/src/request.ts`.
+  A row needs `forbid`, `only`, or both, and a row for a package that the
+  tree lacks is a fault. The lists are the tables `BUILTINS` and `BUDGETS`
+  at the top of the file. `check` takes its tables as a parameter
+  (`check(root, tables)`), so that a test gives tables that fit its
+  fixture; the command uses the real ones. Write a relative import with
+  the `.ts` file's path: `tools/graph.ts` faults on one that
+  names no `.ts` file (`./x.js`, `./x.mts`, `./x` with no extension, a
+  missing file), since it cannot follow it. It reads the imports of the
+  packages' own source files only, so a value import of any other `.ts`
+  file, of a `.d.ts` file or of one under `node_modules` is a fault too:
+  write a `.d.ts` import as `import type`. When it fails, fix the
   import that its line names: declare the dependency, import by the
   package's name and an entry, or keep the code that needs a module out of
   the core. What the two checks do not hold, each an accepted risk:

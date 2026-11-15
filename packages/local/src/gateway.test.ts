@@ -6,7 +6,8 @@ import { Effect, Redacted } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { address, file, Gateway, GatewayError, KEY_VARIABLE, URL_VARIABLE } from "./gateway.ts"
+import { address, Gateway, GatewayError } from "@everchat/openai/gateway"
+import { file, gatewayLayer, KEY_VARIABLE, readGateway, URL_VARIABLE } from "./gateway.ts"
 
 const KEY = "sk-secret-key-0123456789"
 
@@ -16,8 +17,8 @@ const proxy = (content: string) => {
   return name
 }
 
-const read = (env: Record<string, string | undefined>, filename: string) => Effect.runPromise(Gateway.read(env, filename))
-const refused = (env: Record<string, string | undefined>, filename: string) => Effect.runPromise(Effect.flip(Gateway.read(env, filename)))
+const read = (env: Record<string, string | undefined>, filename: string) => Effect.runPromise(readGateway(env, filename))
+const refused = (env: Record<string, string | undefined>, filename: string) => Effect.runPromise(Effect.flip(readGateway(env, filename)))
 
 test("the inference gateway file is ~/.config/ai/proxy.json", () => {
   expect(file("/home/someone")).toBe("/home/someone/.config/ai/proxy.json")
@@ -77,7 +78,7 @@ test("the layer takes the key out of the process's environment", async () => {
   process.env[URL_VARIABLE] = "http://env.test/v1"
   process.env[KEY_VARIABLE] = KEY
   try {
-    const gateway = await Effect.runPromise(Gateway.use((gateway) => Effect.succeed(gateway)).pipe(Effect.provide(Gateway.layer)))
+    const gateway = await Effect.runPromise(Gateway.use((gateway) => Effect.succeed(gateway)).pipe(Effect.provide(gatewayLayer)))
     expect([gateway.address, Redacted.value(gateway.key)]).toEqual(["http://env.test", KEY])
     expect(process.env[KEY_VARIABLE]).toBeUndefined()
   } finally {

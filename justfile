@@ -9,11 +9,15 @@ test *args:
 
 # Check the types, one program for each package: the core alone, with no Bun
 # and no Node types (its guard); the core's tests, with the Bun types; the
-# package local, its tests too. Then the boundaries of the packages, which
-# the types do not see: their imports and their manifests (tools/graph.ts).
+# packages openai, sqlite, codemode and local, their tests too, with the Bun
+# types. Then the boundaries of the packages, which the types do not see:
+# their imports and their manifests (tools/graph.ts).
 check:
     bunx tsc --noEmit -p packages/core
     bunx tsc --noEmit -p packages/core/tsconfig.test.json
+    bunx tsc --noEmit -p packages/openai
+    bunx tsc --noEmit -p packages/sqlite
+    bunx tsc --noEmit -p packages/codemode
     bunx tsc --noEmit -p packages/local
     bun tools/graph.ts
 

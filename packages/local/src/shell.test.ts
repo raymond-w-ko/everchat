@@ -7,7 +7,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, write } from "../tests/help.ts"
 import { Shell, sweep, TAG } from "./shell.ts"
-import { storeLayer } from "./sqlite.ts"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 
 const withShell = <A, E>(
@@ -25,8 +25,9 @@ const run = (command: string, seconds?: number) => Shell.use((shell) => shell.ru
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0)
-    // A process that was killed and not yet collected still has an id.
-    return !fs.readFileSync("/proc/" + pid + "/stat", "utf8").includes(") Z ")
+    // A process that was killed and not yet collected (Z), or that is dead
+    // and being collected (X), still has an id.
+    return !/\) [ZX] /.test(fs.readFileSync("/proc/" + pid + "/stat", "utf8"))
   } catch {
     return false
   }
@@ -62,15 +63,18 @@ test("a character that comes in two reads stays whole", async () => {
 
 test("a command does not get the gateway's address and key, and it carries the run tag", async () => {
   const file = newFile()
+  // A tag of its own: the end of a launch kills every process of this user
+  // that carries its tag, also another run's of this test.
+  const tag = "the-tag-" + crypto.randomUUID()
   process.env.EVERCHAT_GATEWAY_KEY = "secret-key"
   process.env.EVERCHAT_GATEWAY_URL = "http://secret"
   try {
     await withShell(file, Effect.gen(function*() {
       const out = yield* run("env")
       expect(out).not.toContain("secret")
-      expect(out).toContain(TAG + "=the-tag\n")
+      expect(out).toContain(TAG + "=" + tag + "\n")
       expect(out).toContain("PATH=")
-    }), { runTag: "the-tag" })
+    }), { runTag: tag })
   } finally {
     delete process.env.EVERCHAT_GATEWAY_KEY
     delete process.env.EVERCHAT_GATEWAY_URL
@@ -113,8 +117,9 @@ test("a stop kills the command and what it started, and the call's process group
     expect(pgid).toBeGreaterThan(0)
     expect(alive(child)).toBe(true)
     yield* Fiber.interrupt(fiber)
-    expect(yield* Effect.promise(() => eventually(() => !alive(child)))).toBe(true)
-    expect(alive(pgid)).toBe(false)
+    // The interrupt returns once the group is told: SIGKILL is sent, and each
+    // process of the group dies when the system gets to it.
+    expect(yield* Effect.promise(() => eventually(() => !alive(child) && !alive(pgid)))).toBe(true)
   }))
 })
 

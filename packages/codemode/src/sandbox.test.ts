@@ -4,10 +4,10 @@
 
 import { expect, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
-import { newFile, options, PICK, rows } from "../tests/help.ts"
+import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
 import { type Caller, FunctionError, Functions } from "@everchat/core/functions"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
-import { storeLayer } from "./sqlite.ts"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 import { threadLayer } from "./thread.ts"
 
@@ -60,7 +60,7 @@ const withSandbox = <A, E>(
   file: string,
   fake: ReturnType<typeof fakes>,
   effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
-  over: { memory?: number; compute?: number } = {}
+  over: { memory?: number; compute?: number; budget?: number } = {}
 ) => {
   const store = storeLayer(file, options())
   const sandbox = threadLayer(over).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
@@ -220,6 +220,65 @@ test("the compute limit stops a program that loops, and not one that waits for a
       expect(late.failed).toBe(true)
       expect(late.output).toStartWith("The program was stopped: it computed")
     }), { compute: 250 })
+})
+
+// A program that computes for about `ms` milliseconds, `times` times, and
+// calls a function after each. The sandbox has no timers, so it waits on
+// the clock: `Date.now()` is the host's in there.
+const busy = (ms: number, times: number) =>
+  `for (let i = 0; i < ${times}; i++) { const end = Date.now() + ${ms}; while (Date.now() < end) {} await nothing() }\nreturn "done"`
+
+const BUDGET = "The program was stopped: it used up its compute budget, 0.3 s of compute in all with no function at work. Do less in one program."
+
+test("with no budget, the compute limit starts again after each function", async () => {
+  const file = newFile()
+  await withSandbox(file, fakes(), (run) =>
+    Effect.gen(function*() {
+      // 3 times 150 ms, more than the limit in all, less in each stretch.
+      expect(yield* run(busy(150, 3))).toEqual({ output: "done", failed: false })
+    }), { compute: 250 })
+})
+
+test("the compute budget stops a program that computes too long in all, and not one that waits", async () => {
+  const file = newFile()
+  const fake = fakes()
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      // The same program: 150 ms, a function, then the budget runs out.
+      expect(yield* run(busy(150, 3))).toEqual({ output: BUDGET, failed: true })
+      expect(fake.seen.map((one) => one.name)).toEqual(["nothing"])
+      // A wait for a function is not compute time.
+      expect(yield* run("return await slow(400)")).toEqual({ output: "slept", failed: false })
+    }), { compute: 250, budget: 250 })
+})
+
+test("a budget alone stops a loop after an await, and the limit still speaks when it is the nearer one", async () => {
+  const file = newFile()
+  await withSandbox(file, fakes(), (run) =>
+    Effect.gen(function*() {
+      const started = performance.now()
+      expect(yield* run("await nothing(); for (;;) {}")).toEqual({ output: BUDGET, failed: true })
+      expect(performance.now() - started).toBeLessThan(3000)
+    }), { budget: 250 })
+  await withSandbox(newFile(), fakes(), (run) =>
+    Effect.gen(function*() {
+      const loop = yield* run("for (;;) {}")
+      expect(loop.failed).toBe(true)
+      expect(loop.output).toStartWith("The program was stopped: it computed for 0 s with no function at work.")
+    }), { compute: 250, budget: 5000 })
+})
+
+// The known limit of the budget (ec-x0cm): the clock is on the host, and it
+// does not run while a function is at work, so a program that computes
+// then is not stopped. A change of the engine that bounds it fails here.
+test("the known limit (ec-x0cm): the budget does not count what a program computes while a function is at work", async () => {
+  const file = newFile()
+  await withSandbox(file, fakes(), (run) =>
+    Effect.gen(function*() {
+      const out = yield* run("slow(2000); const end = Date.now() + 600; while (Date.now() < end) {}\nreturn 'done'")
+      expect(out.failed).toBe(false)
+      expect(out.output).toStartWith("done")
+    }), { budget: 250 })
 })
 
 test("a program that takes too much memory fails, and EverChat goes on", async () => {

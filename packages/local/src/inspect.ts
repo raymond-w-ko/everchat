@@ -40,9 +40,9 @@
 import { Context, Effect, Layer, Option } from "effect"
 import * as os from "node:os"
 import { BLOCK, bytes, cut, flat, grown, halves, HIGH, inBlocks, line, NODE, type Part, partOf, ref, roots, SEEN, show, span } from "@everchat/core/memory"
-import { body as openaiBody } from "./openai.ts"
+import { body as openaiBody } from "@everchat/openai"
 import type { Block, Call as Wanted, Head, Result } from "@everchat/core/request"
-import { ProcessAlive } from "./sqlite.ts"
+import { ProcessAlive } from "@everchat/sqlite/bun"
 import {
   type Call,
   type Chat,

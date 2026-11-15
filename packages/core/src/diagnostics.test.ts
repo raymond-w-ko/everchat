@@ -8,7 +8,7 @@ import { Cause, Effect, Layer, References, Schedule } from "effect"
 import { compactor, newFile, options, rows, write } from "@everchat/local/testing"
 import * as Diagnostics from "./diagnostics.ts"
 import { CompactionRetry, CompactorError, Memory } from "./memory.ts"
-import { storeLayer } from "@everchat/local/sqlite"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store, StoreError } from "./store.ts"
 
 interface Line {

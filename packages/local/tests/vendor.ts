@@ -7,7 +7,7 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { FILE } from "../src/database.ts"
+import { FILE } from "@everchat/sqlite/database"
 
 // The program: from its source, or the executable that EVERCHAT_BIN names
 // (`just build` makes one), to run these same tests on it.

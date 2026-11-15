@@ -36,13 +36,14 @@ import * as RealCompactor from "@everchat/core/compactor"
 import { limitLayer } from "@everchat/local/limitfile"
 import { DECLARATIONS, functionsLayer } from "@everchat/local/localfunctions"
 import { Compactor, Memory } from "@everchat/core/memory"
-import { threadLayer } from "@everchat/local/thread"
+import { threadLayer } from "@everchat/codemode/thread"
 import { Shell } from "@everchat/local/shell"
-import { storeLayer } from "@everchat/local/sqlite"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Turns } from "@everchat/core/turn"
-import { Gateway } from "@everchat/local/gateway"
+import { Gateway } from "@everchat/openai/gateway"
+import { gatewayLayer } from "@everchat/local/gateway"
 import { head as realHead } from "@everchat/core/head"
-import { Fetch, type Fetcher, OpenAI, openaiLayer } from "@everchat/local/openai"
+import { Fetch, type Fetcher, OpenAI, openaiLayer } from "@everchat/openai"
 import type { Block, Head, Item, Reply, Request } from "@everchat/core/request"
 
 const [mode, model = ""] = process.argv.slice(2)
@@ -85,7 +86,7 @@ const openrouter = Layer.sync(Gateway, () => {
   if (key === undefined || key === "") throw new Error("OPENROUTER_API_KEY is not set")
   return Gateway.of({ address: "https://openrouter.ai/api", key: Redacted.make(key) })
 })
-const layer = openaiLayer.pipe(Layer.provideMerge(process.env.PROBE === "openrouter" ? openrouter : Gateway.layer))
+const layer = openaiLayer.pipe(Layer.provideMerge(process.env.PROBE === "openrouter" ? openrouter : gatewayLayer))
 const run = <A>(effect: Effect.Effect<A, unknown, OpenAI | Gateway>) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provideService(Fetch, tee)))
 

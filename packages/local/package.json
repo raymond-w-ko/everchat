@@ -4,24 +4,21 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./database": "./src/database.ts",
     "./gateway": "./src/gateway.ts",
     "./limitfile": "./src/limitfile.ts",
     "./localfunctions": "./src/localfunctions.ts",
-    "./openai": "./src/openai.ts",
     "./shell": "./src/shell.ts",
-    "./sqlite": "./src/sqlite.ts",
-    "./testing": "./tests/help.ts",
-    "./thread": "./src/thread.ts"
+    "./testing": "./tests/help.ts"
   },
   "dependencies": {
     "@earendil-works/pi-codemode": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
     "@effect/platform-bun": "4.1.2",
-    "@effect/sql-sqlite-bun": "4.1.2",
+    "@everchat/codemode": "workspace:*",
     "@everchat/core": "workspace:*",
-    "effect": "4.1.2",
-    "quickjs-wasi": "3.6.2"
+    "@everchat/openai": "workspace:*",
+    "@everchat/sqlite": "workspace:*",
+    "effect": "4.1.2"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",

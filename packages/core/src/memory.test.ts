@@ -29,7 +29,7 @@ import {
   span,
   task
 } from "./memory.ts"
-import { storeLayer } from "@everchat/local/sqlite"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store, StoreError } from "./store.ts"
 
 // A text that makes a message of exactly `n` bytes as the model reads it

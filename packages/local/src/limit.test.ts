@@ -8,7 +8,7 @@ import * as path from "node:path"
 import { newFile, options } from "../tests/help.ts"
 import { capped, Limit, LIMIT, shorten } from "@everchat/core/limit"
 import { limitLayer } from "./limitfile.ts"
-import { storeLayer } from "./sqlite.ts"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 
 const withLimit = <A, E>(file: string, effect: Effect.Effect<A, E, Limit | Store>, over: { limit?: number; dir?: string } = {}) => {

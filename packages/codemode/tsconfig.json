@@ -1,0 +1,11 @@
+// The program of the package `codemode`: its sources and its tests, with
+// the Bun types for now (`thread.ts` uses the timers and `URL` of Bun and
+// Node). The files of the core and of `sqlite` that it imports are checked
+// here too, with those types.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src"]
+}

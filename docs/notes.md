@@ -10,7 +10,7 @@ gives the fact, what to do, and the file or command that shows it.
    `everchat inspect --port 0` on that home (both files are there).
 2. Effect version 4 has no `Layer.mapError` and no `Layer.fail`. Build the
    inner layer inside `Layer.effect` with `Layer.build`, and map its error
-   there. See `packages/local/src/sqlite.ts:795` and
+   there. See `packages/sqlite/src/sqlite.ts:795` and
    `node_modules/effect/src/Layer.ts`.
 3. Bun's types say that an import of an `.html` file is a bundle
    (`node_modules/bun-types/extensions.d.ts:41`). With `type: "text"` the

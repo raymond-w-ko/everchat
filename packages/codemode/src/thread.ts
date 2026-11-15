@@ -7,17 +7,21 @@
 // The two files of the engine
 //
 // The library looks for its worker thread's program and for the QuickJS
-// file in `node_modules`. The executable has no `node_modules`. So this
-// module names both itself, in a way that holds in a run from source and
-// in the executable:
+// file in `node_modules`. The executable has no `node_modules`. So both are
+// parameters of the engine, in a way that holds in a run from source and in
+// the executable:
 //
 // - QUICKJS: the QuickJS file, imported as a file. The build puts it into
-//   the executable, and the import gives its path in there.
-// - WORKER: our own worker.ts, next to this file. It is the build's second
-//   entrypoint, and worker.ts says why.
+//   the executable, and the import gives its path in there. It is the
+//   default.
+// - `worker`: the program of the worker thread, which the caller gives.
+//   The executable's is local's worker.ts, the build's second entrypoint
+//   (worker.ts says why, and main.ts gives it). With none, the library's
+//   own worker runs, from `node_modules`.
 //
-// Both are parameters of the engine, as are its limits of memory and
-// compute: these are their defaults.
+// The limits of memory and compute are parameters too, with defaults.
+
+/// <reference path="./assets.d.ts" />
 
 import { CodemodeSandbox, loadQuickJSWasm } from "@earendil-works/pi-codemode"
 import { Effect, FiberSet, Layer } from "effect"
@@ -29,19 +33,26 @@ import { Store } from "@everchat/core/store"
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "sandbox")
 
-// The program of the worker thread. In the executable, every module's
-// address is the executable's own, and Bun finds an entrypoint of the build
-// by its path from the first entrypoint's directory. So worker.ts must
-// stay next to main.ts. (The library's own default finds the same file in
-// the executable today, but only because of that file's name.)
-const WORKER = new URL("./worker.ts", import.meta.url)
-
 export interface Options {
   readonly memory?: number | undefined // bytes
   readonly compute?: number | undefined // milliseconds
+  // The compute budget, in milliseconds: the most time that a program may
+  // compute with no function at work, summed over the whole program (the
+  // compute limit bounds one such stretch). It does not bound what a
+  // program computes while a function is at work: a program that starts a
+  // function, does not wait for it, and computes, is not stopped by the
+  // budget. What bounds that case: each function's own limit, and the
+  // deadline of a program, which a hosted deployment will have
+  // (docs/design.md, "Limits for hosted programs": 10 minutes; not built
+  // yet). None when not given: the local use has none, and a hosted
+  // deployment sets it.
+  readonly budget?: number | undefined
   readonly worker?: URL | undefined // the program of the worker thread
   readonly quickjs?: string | undefined // the path of the QuickJS file
 }
+
+// A time for a person: seconds, with a tenth below 10 s.
+const seconds = (ms: number): string => (ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10)) + " s"
 
 // A function's result as the database keeps it.
 const text = (value: unknown): string => (typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value) ?? "")
@@ -54,7 +65,8 @@ export const threadLayer = (options: Options = {}) =>
       const store = yield* Store
       const memory = options.memory ?? MEMORY
       const compute = options.compute ?? COMPUTE
-      const worker = options.worker ?? WORKER
+      const budget = options.budget
+      const worker = options.worker
       const quickjs = options.quickjs ?? QUICKJS
 
       const broken = (op: string) => new FunctionError({ message: "EverChat's database failed (" + op + ")." })
@@ -91,20 +103,34 @@ export const threadLayer = (options: Options = {}) =>
             })
           )
 
-        // The compute limit: a clock that runs only while no function is
-        // at work.
+        // The compute limit and the compute budget: a clock that runs only
+        // while no function is at work. The limit starts again at each arm;
+        // the budget is what is left of it, and each disarm takes from it
+        // the time since the arm.
         const controller = new AbortController()
         let pending = 0
         let timer: ReturnType<typeof setTimeout> | undefined
+        let armed: number | null = null // when the clock was armed
+        let left = budget ?? Number.POSITIVE_INFINITY
         let over = false
         const arm = () => {
+          armed = performance.now()
+          const spent = left <= compute
           timer = setTimeout(() => {
-            controller.abort(new Error("The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\")."))
-          }, compute)
+            controller.abort(new Error(
+              spent
+                ? "The program was stopped: it used up its compute budget, " + seconds(budget ?? 0) + " of compute in all with no function at work. Do less in one program."
+                : "The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\")."
+            ))
+          }, Math.max(0, Math.min(compute, left)))
         }
         const disarm = () => {
           clearTimeout(timer)
           timer = undefined
+          if (armed !== null) {
+            left -= performance.now() - armed
+            armed = null
+          }
         }
 
         const vm = new CodemodeSandbox({
@@ -112,7 +138,7 @@ export const threadLayer = (options: Options = {}) =>
           memoryLimitBytes: memory,
           // Read and compiled once: the library keeps it by its path.
           wasm: loadQuickJSWasm(quickjs),
-          workerUrl: worker,
+          ...(worker === undefined ? {} : { workerUrl: worker }),
           globals: functions.names.map((name) => ({
             name,
             spread: true,

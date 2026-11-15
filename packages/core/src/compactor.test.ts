@@ -13,7 +13,7 @@ import { head, TOOL } from "./head.ts"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
 import { CompactionRetry, Memory } from "./memory.ts"
 import { Schedule } from "effect"
-import { storeLayer } from "@everchat/local/sqlite"
+import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "./store.ts"
 
 const PICK = { vendor: "openai", model: "small", effort: "high", speed: "slow" }
