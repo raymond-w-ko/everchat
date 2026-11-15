@@ -84,10 +84,10 @@ const PICK = " · gpt-test medium"
 const IDLE = "idle" + PICK
 const idle = (screen: Screen) => sees(screen, IDLE)
 
-const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from msg_read order by i")
+const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 
 
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from turn order by id")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
 
 const send = (screen: Screen, text: string) => {
   screen.type(text)
@@ -614,14 +614,14 @@ test("the next launch shows the last messages of the log, each text whole, and p
     yield* sees(first, "Hello to you.", IDLE)
     first.type("half a thought")
     yield* sees(first, "half a thought")
-    for (let k = 0; k < 400 && rows<{ draft: string | null }>(file, "select draft from chat")[0]!.draft !== "half a thought"; k++) {
+    for (let k = 0; k < 400 && rows<{ draft: string | null }>(file, "select draft from everchat_chat")[0]!.draft !== "half a thought"; k++) {
       yield* Effect.sleep("5 millis")
     }
     // One more key just before the end: the end writes the draft as it is then.
     first.type("!")
   }))
-  expect(rows(file, "select draft from chat")).toEqual([{ draft: "half a thought!" }])
-  expect(rows(file, "select count(*) as n from msg")).toEqual([{ n: SHOWN + 2 }])
+  expect(rows(file, "select draft from everchat_chat")).toEqual([{ draft: "half a thought!" }])
+  expect(rows(file, "select count(*) as n from everchat_msg")).toEqual([{ n: SHOWN + 2 }])
 
   const second = new Screen(60, 20)
   await launch(file, talker(), second, Effect.gen(function*() {
@@ -640,7 +640,7 @@ test("the next launch shows the last messages of the log, each text whole, and p
     send(second, "a new one")
     yield* until(second, "the new message, and the reply to it", (now) => now.includes("› a new one") && now.split("Hello to you.").length === 3 && now.includes(IDLE))
   }))
-  expect(rows(file, "select draft from chat")).toEqual([{ draft: null }])
+  expect(rows(file, "select draft from everchat_chat")).toEqual([{ draft: null }])
 })
 
 test("a text of many pages is one message on the screen", async () => {
@@ -653,7 +653,7 @@ test("a text of many pages is one message on the screen", async () => {
     expect(text.split("›").length).toBe(2)
     expect(text.split("word").length).toBe(13001)
   }))
-  expect(rows(file, "select count(*) as n from msg where kind = (select id from kind where name = 'user')")).toEqual([{ n: 3 }])
+  expect(rows(file, "select count(*) as n from everchat_msg where kind = (select id from everchat_kind where name = 'user')")).toEqual([{ n: 3 }])
 })
 
 test("a launch that finds a cut turn shows it at work, and then its reply", async () => {

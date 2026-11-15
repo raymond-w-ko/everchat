@@ -41,8 +41,8 @@
 // while it opens the database) has no logger at all: QUIET takes the place
 // of Effect's default logger, which writes to the console. So a line that
 // is logged there is dropped. `--log-level debug` showed why this is
-// needed: the database's migrator then logs a line, and it went to the
-// standard output.
+// needed: the migrator that the database had then logged a line, and it
+// went to the standard output.
 //
 // How the program ends
 //
@@ -79,6 +79,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { Cause, Config, Console, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
 import { CliConfig, CliError, Command, Flag, GlobalFlag } from "effect/cli"
+import * as fs from "node:fs"
 import * as os from "node:os"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
@@ -159,6 +160,28 @@ export const layer = (given: { readonly home: string; readonly file: string; rea
 // the turn's note, so nothing more is said: only the exit code tells it.
 export class TurnFailed extends Schema.TaggedError<TurnFailed>()("TurnFailed", {}) {}
 
+// The first of `<file>.old`, `<file>.old.2`, ..., `<file>.old.1000` that
+// names nothing in its directory now, or undefined when none of them is
+// free. A link that points nowhere is in use, and so is a name that cannot
+// be looked at (only "no such file" frees it). It gives only a name that it
+// looked at, so it stops after 1000, and a directory where every look fails
+// does not loop forever.
+const free = (file: string): string | undefined => {
+  const used = (name: string) => {
+    try {
+      fs.lstatSync(name)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ENOENT"
+    }
+  }
+  for (let n = 1; n <= 1000; n++) {
+    const name = file + ".old" + (n === 1 ? "" : "." + n)
+    if (!used(name)) return name
+  }
+  return undefined
+}
+
 // What a failure says to the person, in one row.
 const reason = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause)
@@ -168,10 +191,12 @@ const reason = (cause: Cause.Cause<unknown>): string => {
       return "another EverChat (process " + String(tagged.pid) + ") has this chat open. One chat is one process."
     }
     if (tagged._tag === "DatabaseVersion") {
-      const { have, want } = tagged as unknown as { readonly have: number; readonly want: number }
-      return have < want
-        ? "the database is from an older EverChat. Start EverChat once on this home: it brings the database up to date."
-        : "the database is from a newer EverChat than this program."
+      const { file } = tagged as unknown as { readonly file: string }
+      // Both paths as they are: the words give no command, so nothing is
+      // quoted. The program moves nothing. With no free name that it looked
+      // at, the sentence names none.
+      const aside = free(file)
+      return "the database " + file + " is from another version of EverChat. To start a new chat, move it aside, to a name that is not in use" + (aside === undefined ? "." : ": " + aside)
     }
     if (tagged._tag === "NoPort") {
       return String(tagged.message) + ". Give another port with --port."

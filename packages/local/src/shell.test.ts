@@ -164,7 +164,7 @@ test("a launch kills what a crashed launch left behind, and nothing else", async
   const [crashed, other] = ["crashed-" + crypto.randomUUID(), "other-" + crypto.randomUUID()]
   // A database with one launch that ended, as a crash leaves it.
   await withShell(file, Effect.void, { runTag: "first" })
-  write(file, "update launch set run_tag = ?", [crashed])
+  write(file, "update everchat_launch set run_tag = ?", [crashed])
   const spawn = (tag: string) => Bun.spawn(["sleep", "60"], { env: { ...process.env, [TAG]: tag }, stdout: "ignore", stderr: "ignore" })
   const [left, bystander] = [spawn(crashed), spawn(other)]
   try {

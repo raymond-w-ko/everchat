@@ -17,7 +17,7 @@ interface Line {
   readonly text: string
 }
 
-const lines = (file: string) => rows<Line>(file, "select level, source, text from log order by seq")
+const lines = (file: string) => rows<Line>(file, "select level, source, text from everchat_log order by seq")
 
 // One launch with the store and the logger.
 const withDiagnostics = <A, E>(file: string, effect: Effect.Effect<A, E, Store>) => {
@@ -58,7 +58,7 @@ test("each line goes to the table with its level and its source, in order, and n
   ])
   assert.deepStrictEqual(printed, [])
   // Each line names its launch, and its time is a time of now.
-  const [first] = rows<{ launch: number; created: number }>(file, "select launch, created from log order by seq")
+  const [first] = rows<{ launch: number; created: number }>(file, "select launch, created from everchat_log order by seq")
   assert.equal(first!.launch, 1)
   assert.ok(Math.abs(Date.now() - first!.created) < 60_000)
 })
@@ -105,7 +105,7 @@ test("a launch deletes the diagnostics that are older than 30 days", async () =>
   const file = newFile()
   await withDiagnostics(file, Effect.logInfo("of the first launch"))
   const day = 24 * 60 * 60 * 1000
-  write(file, "insert into log (level, source, text, launch, created) values ('info', 'old', 'of 31 days ago', 1, ?), ('info', 'old', 'of 29 days ago', 1, ?)", [
+  write(file, "insert into everchat_log (level, source, text, launch, created) values ('info', 'old', 'of 31 days ago', 1, ?), ('info', 'old', 'of 29 days ago', 1, ?)", [
     Date.now() - 31 * day,
     Date.now() - 29 * day
   ])

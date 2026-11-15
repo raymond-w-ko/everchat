@@ -67,9 +67,9 @@ const eventually = (check: () => boolean) =>
 
 const lastText = (item: Item | undefined) => (item?.kind === "user" ? item.blocks[item.blocks.length - 1] : undefined)
 
-const messages = (file: string) => rows<{ i: number; kind: string; text: string; turn: number | null; call: number | null }>(file, "select i, kind, text, turn, call from msg_read order by i")
-const turns = (file: string) => rows(file, "select id, status, why, first_msg from turn order by id")
-const items = (file: string, turn = 1) => rows<{ kind: string }>(file, `select kind from turn_item where turn = ${turn} order by n`).map((row) => row.kind)
+const messages = (file: string) => rows<{ i: number; kind: string; text: string; turn: number | null; call: number | null }>(file, "select i, kind, text, turn, call from everchat_msg_read order by i")
+const turns = (file: string) => rows(file, "select id, status, why, first_msg from everchat_turn order by id")
+const items = (file: string, turn = 1) => rows<{ kind: string }>(file, `select kind from everchat_turn_item where turn = ${turn} order by n`).map((row) => row.kind)
 
 // One turn
 // --------
@@ -102,8 +102,8 @@ test("a message starts a turn: one request with the view and the message, and th
   ])
   assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
   assert.deepStrictEqual(items(file), ["user", "turn"])
-  assert.deepStrictEqual(rows(file, "select taken, draft from chat"), [{ taken: 0, draft: null }])
-  assert.deepStrictEqual(rows(file, "select served, turn, request, input, expected from usage"), [{ served: "turn", turn: 1, request: "req_1", input: 100, expected: 0 }])
+  assert.deepStrictEqual(rows(file, "select taken, draft from everchat_chat"), [{ taken: 0, draft: null }])
+  assert.deepStrictEqual(rows(file, "select served, turn, request, input, expected from everchat_usage"), [{ served: "turn", turn: 1, request: "req_1", input: 100, expected: 0 }])
   assert.deepStrictEqual(seen.map((event) => event.type), ["accepted", "start", "text", "message", "end"])
 })
 
@@ -134,13 +134,13 @@ test("a program runs between two requests: its call is written, and the model's 
     ["echo", "boom", 2],
     ["asst", "It is 2.", null]
   ])
-  assert.deepStrictEqual(rows(file, "select id, turn, parent, vendor_id, fn, input, output, size, shown, status from call order by id"), [
+  assert.deepStrictEqual(rows(file, "select id, turn, parent, vendor_id, fn, input, output, size, shown, status from everchat_call order by id"), [
     { id: 1, turn: 1, parent: null, vendor_id: "call_1", fn: "run", input: "return 1 + 1", output: "2", size: 1, shown: 1, status: "done" },
     { id: 2, turn: 1, parent: null, vendor_id: "call_2", fn: "run", input: "throw new Error('boom')", output: "boom", size: 4, shown: 4, status: "failed" }
   ])
   assert.deepStrictEqual(items(file), ["user", "turn", "back", "turn", "back", "turn"])
   assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
-  assert.deepStrictEqual(rows(file, "select count(*) as n from usage where served = 'turn' and turn = 1"), [{ n: 3 }])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_usage where served = 'turn' and turn = 1"), [{ n: 3 }])
 })
 
 test("a listener that subscribes before a message misses no event, and a program's start is one of them", async () => {
@@ -169,7 +169,7 @@ test("a tool that is not the one tool gives the model an error, and no program r
     yield* turnsService.idle
   }))
   assert.deepStrictEqual(wire.sent[1]!.items[2], { kind: "back", results: [{ id: "call_1", output: "No tool \"shell\": the one tool is \"run\"." }] })
-  assert.deepStrictEqual(rows(file, "select fn, status from call"), [{ fn: "shell", status: "failed" }])
+  assert.deepStrictEqual(rows(file, "select fn, status from everchat_call"), [{ fn: "shell", status: "failed" }])
 })
 
 // More messages
@@ -187,7 +187,7 @@ test("a message that comes while a turn runs steers it, and starts no turn of it
     yield* eventually(() => started)
     const written = yield* turnsService.say("and also that") // logged at once, while the program runs
     assert.equal(written[0]!.i, 1)
-    assert.deepStrictEqual(rows(file, "select count(*) as n from turn"), [{ n: 1 }])
+    assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_turn"), [{ n: 1 }])
     yield* Deferred.succeed(gate, undefined)
     yield* turnsService.idle
   }))
@@ -195,7 +195,7 @@ test("a message that comes while a turn runs steers it, and starts no turn of it
   assert.deepStrictEqual(wire.sent[1]!.items.map((item) => item.kind), ["user", "turn", "back", "user"])
   assert.deepStrictEqual(wire.sent[1]!.items[3], { kind: "user", blocks: [{ text: "and also that", mark: false }] })
   assert.equal(turns(file).length, 1)
-  assert.deepStrictEqual(rows(file, "select taken from chat"), [{ taken: 1 }])
+  assert.deepStrictEqual(rows(file, "select taken from everchat_chat"), [{ taken: 1 }])
   assert.deepStrictEqual(messages(file).map((m) => m.kind), ["user", "user", "tool", "echo", "asst"])
 })
 
@@ -214,7 +214,7 @@ test("a message after a turn has ended starts the next turn, with the earlier on
   const text = second.kind === "user" ? second.blocks.map((block) => block.text).join("") : ""
   assert.ok(text.includes("0+1|user: first\n1+1|asst: Reply 1.\n"))
   assert.deepStrictEqual(lastText(second), { text: HEAD + "second", mark: true })
-  assert.deepStrictEqual(rows(file, "select taken from chat"), [{ taken: 2 }])
+  assert.deepStrictEqual(rows(file, "select taken from everchat_chat"), [{ taken: 2 }])
 })
 
 test("a long message goes in pages, and a turn waits until the messages before its own have their leaves", async () => {
@@ -242,7 +242,7 @@ test("a long message goes in pages, and a turn waits until the messages before i
   assert.deepStrictEqual(lastText(sent), { text: HEAD + paste, mark: true })
   const view = sent.kind === "user" ? sent.blocks.slice(0, -1).map((block) => block.text).join("") : ""
   assert.equal(view, "<chat>\n0+1|a summary\n</chat>\n")
-  assert.deepStrictEqual(rows(file, "select taken from chat"), [{ taken: 2 }])
+  assert.deepStrictEqual(rows(file, "select taken from everchat_chat"), [{ taken: 2 }])
 })
 
 // Ends that are not good
@@ -296,7 +296,7 @@ test("the person stops a turn: the program that runs is closed as cut, and the t
     // A stopped turn is over: a new message starts a new turn.
     assert.deepStrictEqual(turns(file), [{ id: 1, status: "stopped", why: "Stopped.", first_msg: 0 }])
   }))
-  assert.deepStrictEqual(rows(file, "select status, output from call"), [{ status: "cut", output: cutText(STOPPED, []) }])
+  assert.deepStrictEqual(rows(file, "select status, output from everchat_call"), [{ status: "cut", output: cutText(STOPPED, []) }])
   assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [
     ["user", "run for ever"],
     ["tool", "forever()"],
@@ -338,7 +338,7 @@ test("a program that ran when the program stopped is closed as cut at the next l
     yield* turnsService.say("do the slow thing")
     yield* eventually(() => started)
   }))
-  assert.deepStrictEqual(rows(file, "select status from call"), [{ status: "running" }])
+  assert.deepStrictEqual(rows(file, "select status from everchat_call"), [{ status: "running" }])
   assert.partialDeepStrictEqual({ ...turns(file)[0] }, { status: "running" })
   const wire = fakeWire((asked) => says(asked, "It was cut, I will check."))
   await withTurns(file, wire, noPrograms, Turns.use((turnsService) => turnsService.idle))
@@ -346,7 +346,7 @@ test("a program that ran when the program stopped is closed as cut at the next l
   assert.equal(wire.sent.length, 1)
   assert.deepStrictEqual(wire.sent[0]!.items.map((item) => item.kind), ["user", "turn", "back"])
   assert.deepStrictEqual(wire.sent[0]!.items[2], { kind: "back", results: [{ id: "call_1", output: cutText(CUT, []) }] })
-  assert.deepStrictEqual(rows(file, "select status, output from call"), [{ status: "cut", output: cutText(CUT, []) }])
+  assert.deepStrictEqual(rows(file, "select status, output from everchat_call"), [{ status: "cut", output: cutText(CUT, []) }])
   assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [
     ["user", "do the slow thing"],
     ["tool", "slow()"],

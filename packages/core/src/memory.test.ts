@@ -178,7 +178,7 @@ test("a message that fits in 512 bytes (its kind too) is its own line, with no r
     yield* memory.idle
   }))
   assert.deepStrictEqual(asked.map((ask) => ask.node), [{ l: 0, i: 1 }, { l: 1, i: 0 }])
-  assert.deepStrictEqual(rows(file, "select l, i, size from node order by l, i"), [
+  assert.deepStrictEqual(rows(file, "select l, i, size from everchat_node order by l, i"), [
     { l: 0, i: 0, size: 512 },
     { l: 0, i: 1, size: 9 },
     { l: 1, i: 0, size: 9 }
@@ -194,7 +194,7 @@ test("two short lines that fit together are joined by a newline, with no request
     yield* memory.idle
   }))
   assert.deepStrictEqual(asked, [])
-  assert.deepStrictEqual(rows(file, "select l, i, text from node order by l, i"), [
+  assert.deepStrictEqual(rows(file, "select l, i, text from everchat_node order by l, i"), [
     { l: 0, i: 0, text: "user: fix the build" },
     { l: 0, i: 1, text: "asst: on it" },
     { l: 1, i: 0, text: "user: fix the build\nasst: on it" }
@@ -210,8 +210,8 @@ test("a message logged with its own line has that line as its leaf", async () =>
     yield* memory.idle
   }))
   assert.deepStrictEqual(asked, [])
-  assert.deepStrictEqual(rows(file, "select text from node"), [{ text: "tool: ran the tests" }])
-  assert.deepStrictEqual(rows(file, "select line from msg"), [{ line: "tool: ran the tests" }])
+  assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "tool: ran the tests" }])
+  assert.deepStrictEqual(rows(file, "select line from everchat_msg"), [{ line: "tool: ran the tests" }])
 })
 
 test("a merge's source is its two halves, each on one line, after the compactions' view", async () => {
@@ -268,7 +268,7 @@ test("a line too long is asked again: the same request plus a note; the shortest
     assert.equal(ask.blocks.length, n === 0 ? first.length : first.length + 1)
   }
   assert.deepStrictEqual(asked[3]!.blocks[first.length], { text: over("z".repeat(700)), mark: false })
-  assert.deepStrictEqual(rows(file, "select size from node"), [{ size: 650 }])
+  assert.deepStrictEqual(rows(file, "select size from everchat_node"), [{ size: 650 }])
 })
 
 test("a line that fits ends the tries, and an answer with no line makes the node its source, cut", async () => {
@@ -284,7 +284,7 @@ test("a line that fits ends the tries, and an answer with no line makes the node
     yield* memory.idle
   }))
   assert.deepStrictEqual(asked.map((ask) => ask.node), [{ l: 0, i: 0 }, { l: 0, i: 0 }, { l: 0, i: 1 }, { l: 1, i: 0 }])
-  const nodes = rows<{ i: number; text: string }>(file, "select i, text from node where l = 0 order by i")
+  const nodes = rows<{ i: number; text: string }>(file, "select i, text from everchat_node where l = 0 order by i")
   assert.equal(nodes[0]!.text, "fits")
   assert.equal(nodes[1]!.text, cut("user: a b " + "é".repeat(400)))
   assert.ok(bytes(nodes[1]!.text) <= NODE)
@@ -344,7 +344,7 @@ test("a view covers the chat from message 0 to its end, in order, and never pass
   assert.ok(batches.view >= 1)
   assert.ok(batches.seen >= 8)
   // A view's size is the bytes of its lines, also after a restart.
-  const sizes = new Map(rows<{ l: number; i: number; size: number }>(file, "select l, i, size from node").map((node) => [`${node.l}/${node.i}`, node.size]))
+  const sizes = new Map(rows<{ l: number; i: number; size: number }>(file, "select l, i, size from everchat_node").map((node) => [`${node.l}/${node.i}`, node.size]))
   const state = await withMemory(file, layer, Memory.use((memory) => memory.state))
   const sum = state.view.parts.reduce((n, [l, i]) => n + sizes.get(`${l}/${i}`)!, 0)
   assert.equal(state.view.size, sum)
@@ -433,11 +433,11 @@ test("a message is written with its free nodes, and a compaction with its usage"
   await withMemory(file, paid, Effect.gen(function*() {
     const memory = yield* Memory
     yield* memory.push([{ kind: "user", text: "hi" }])
-    assert.deepStrictEqual(rows(file, "select l, i, text from node"), [{ l: 0, i: 0, text: "user: hi" }])
+    assert.deepStrictEqual(rows(file, "select l, i, text from everchat_node"), [{ l: 0, i: 0, text: "user: hi" }])
     yield* memory.push([{ kind: "user", text: sized(600) }])
     yield* memory.idle
   }))
-  assert.deepStrictEqual(rows(file, "select served, node_l, node_i, cache_read, request from usage order by id"), [
+  assert.deepStrictEqual(rows(file, "select served, node_l, node_i, cache_read, request from everchat_usage order by id"), [
     { served: "compaction", node_l: 0, node_i: 1, cache_read: 900, request: "req_1" }
   ])
 })
@@ -463,7 +463,7 @@ test("a restart loads the views as they were, never rebuilt, and asks again for 
     return yield* memory.state
   }))
   assert.equal(cut.busy, 1)
-  assert.deepStrictEqual(rows(file, "select count(*) as n from node where l = 0 and i = 300"), [{ n: 0 }])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_node where l = 0 and i = 300"), [{ n: 0 }])
   const again = recorder(() => "asked again")
   const after = await withMemory(file, again.layer, Effect.gen(function*() {
     const memory = yield* Memory
@@ -473,7 +473,7 @@ test("a restart loads the views as they were, never rebuilt, and asks again for 
   assert.deepStrictEqual(again.asked[0]!.node, { l: 0, i: 300 })
   assert.deepStrictEqual(after.view.parts, cut.view.parts)
   assert.deepStrictEqual(after.seen.parts.slice(0, cut.seen.parts.length), [...cut.seen.parts])
-  assert.deepStrictEqual(rows(file, "select text from node where l = 0 and i = 300"), [{ text: "asked again" }])
+  assert.deepStrictEqual(rows(file, "select text from everchat_node where l = 0 and i = 300"), [{ text: "asked again" }])
 })
 
 test("a compaction that fails is asked again until it answers", async () => {
@@ -491,7 +491,7 @@ test("a compaction that fails is asked again until it answers", async () => {
     )
   )
   assert.equal(tries, 3)
-  assert.deepStrictEqual(rows(file, "select text from node"), [{ text: "third time" }])
+  assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "third time" }])
 })
 
 test("a write that fails stops the memory for good, and the database keeps the last whole event", async () => {
@@ -520,7 +520,7 @@ test("a write that fails stops the memory for good, and the database keeps the l
       assert.equal(yield* Effect.flip(memory.settle(5)), error)
     }).pipe(Effect.provide(Memory.layer.pipe(Layer.provide(faulty), Layer.provide(recorder().layer))))
   )
-  assert.deepStrictEqual(rows(file, "select i, text from msg"), [{ i: 0, text: "kept" }])
+  assert.deepStrictEqual(rows(file, "select i, text from everchat_msg"), [{ i: 0, text: "kept" }])
   // A new launch reads the true state and goes on.
   const next = await withMemory(file, recorder().layer, Memory.use((memory) => memory.push([{ kind: "user", text: "after" }])))
   assert.equal(next[0]!.i, 1)

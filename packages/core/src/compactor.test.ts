@@ -73,10 +73,10 @@ test("a compaction is one patient request with the chat's id and head, and its u
   const blocks = sent.items[0]!.kind === "user" ? sent.items[0]!.blocks : []
   assert.deepStrictEqual(blocks[0], { text: "<chat>\n", mark: true })
   assert.ok((blocks[blocks.length - 1]!.text).startsWith("Compaction: compress message 0 into one line"))
-  assert.deepStrictEqual(rows(file, "select text from node"), [{ text: "the line" }])
+  assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "the line" }])
   assert.deepStrictEqual(rows(file, `
     select u.served, u.node_l, u.node_i, p.model, u.request, u.input, u.cache_read, u.cache_write, u.output, u.expected
-    from usage u join pick p on p.id = u.pick`), [
+    from everchat_usage u join everchat_pick p on p.id = u.pick`), [
     { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_7", input: 50, cache_read: 900, cache_write: 30, output: 12, expected: 0 }
   ])
 })
@@ -91,7 +91,7 @@ test("a compaction that the vendor refuses for its input, or stops with its filt
       yield* memory.idle
     }))
     assert.equal(wire.sent.length, 1)
-    assert.equal(rows<{ size: number }>(file, "select size from node")[0]!.size, 512)
+    assert.equal(rows<{ size: number }>(file, "select size from everchat_node")[0]!.size, 512)
   }
 })
 
@@ -105,6 +105,6 @@ test("a busy vendor only delays a node, and a used-up quota is asked again later
       yield* memory.idle
     }))
     assert.equal(wire.sent.length, 4)
-    assert.deepStrictEqual(rows(file, "select text from node"), [{ text: "at last" }])
+    assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "at last" }])
   }
 })

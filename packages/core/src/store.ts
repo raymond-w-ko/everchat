@@ -313,11 +313,13 @@ export class StoreError extends Schema.TaggedError<StoreError>()("StoreError", {
   cause: Schema.Defect()
 }) {}
 
-// The database was made by another version of the program: it has run
-// `have` migrations, and this program knows `want`.
+// The database in `file` was made by another version of the program: its
+// schema's mark is `have` (0: none), and this program's is `want`. There is
+// no migration: the person moves the file aside to start a new chat.
 export class DatabaseVersion extends Schema.TaggedError<DatabaseVersion>()("DatabaseVersion", {
   have: Schema.Int,
-  want: Schema.Int
+  want: Schema.Int,
+  file: Schema.String
 }) {}
 
 // Another process of this host owns the database.

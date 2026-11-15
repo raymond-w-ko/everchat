@@ -80,8 +80,10 @@ A package's entries are the keys of its `exports` (see "Be modular"):
 - `packages/sqlite/` (`@everchat/sqlite`): the store on SQLite, with Bun's
   driver. Its entries: `./bun` (`packages/sqlite/src/sqlite.ts`, the
   store), `./database` (`packages/sqlite/src/database.ts`, it opens the
-  file), `./migrations` (`packages/sqlite/src/migrations.ts`, the changes
-  of the tables), and `./testing` (`packages/sqlite/tests/help.ts`, what the
+  file, makes the schema on an empty one, and refuses a file of another
+  version), `./schema` (`packages/sqlite/src/schema.ts`, the schema whole:
+  the tables in one list of statements, and its mark; no changes of the
+  tables), and `./testing` (`packages/sqlite/tests/help.ts`, what the
   tests that need a real store share). It has no entry `.`.
 - `packages/codemode/` (`@everchat/codemode`): the engine of the sandbox,
   in a worker thread. Its entry: `./thread`

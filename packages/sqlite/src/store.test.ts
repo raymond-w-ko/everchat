@@ -8,20 +8,20 @@ import * as path from "node:path"
 import { newFile, options, PICK, rows, withStore, write } from "../tests/help.ts"
 import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
-import { migrations } from "./migrations.ts"
+import { VERSION } from "./schema.ts"
 import { ProcessAlive, readsLayer, storeLayer } from "./sqlite.ts"
 import { DatabaseVersion, LaunchLive, type Part, Reads, Store, StoreError } from "@everchat/core/store"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
     file,
-    "select id, pid, ended is not null as ended, why from launch order by id"
+    "select id, pid, ended is not null as ended, why from everchat_launch order by id"
   )
 
 // Leaves a launch open in the file, as a crash does.
 const crash = async (file: string, pid: number, host = "test-host") => {
   await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(file))))
-  write(file, "insert into launch (pid, host, cwd, version, run_tag, created) values (?, ?, '/work', '0', 'old', 1)", [
+  write(file, "insert into everchat_launch (pid, host, cwd, version, run_tag, created) values (?, ?, '/work', '0', 'old', 1)", [
     pid,
     host
   ])
@@ -65,7 +65,7 @@ test("a launch records its pick from the command line", async () => {
   const pick = { vendor: "openai", model: "big", effort: "high", speed: "fast" }
   const launch = await withStore(file, Store.useSync((store) => store.launch), options({ pick }))
   expect(launch.pick).toEqual(pick)
-  expect(rows(file, "select p.model from launch l join pick p on p.id = l.pick")).toEqual([{ model: "big" }])
+  expect(rows(file, "select p.model from everchat_launch l join everchat_pick p on p.id = l.pick")).toEqual([{ model: "big" }])
 })
 
 test("a launch that fails ends with why = error, and one that is interrupted with why = signal", async () => {
@@ -137,8 +137,8 @@ test("the chat's row keeps the pick, the goal, the draft, and the last message t
     yield* store.setGoal(null)
     yield* store.setDraft(null)
   }))
-  expect(rows(file, "select goal, draft from chat")).toEqual([{ goal: null, draft: null }])
-  expect(rows(file, "select count(*) as n from pick")).toEqual([{ n: 2 }])
+  expect(rows(file, "select goal, draft from everchat_chat")).toEqual([{ goal: null, draft: null }])
+  expect(rows(file, "select count(*) as n from everchat_pick")).toEqual([{ n: 2 }])
 })
 
 // The log
@@ -173,7 +173,7 @@ test("the text on disk is the text that append returns: well formed, with its si
   const lone = "a\ud83db" // a lone surrogate between two letters
   const written = await withStore(file, Store.use((store) => store.append([{ kind: "user", text: lone, line: lone }])))
   expect(written[0]).toMatchObject({ text: "a�b", size: 5, line: "a�b" })
-  expect(rows(file, "select text, size, length(cast(text as blob)) as bytes, line from msg")).toEqual([
+  expect(rows(file, "select text, size, length(cast(text as blob)) as bytes, line from everchat_msg")).toEqual([
     { text: "a�b", size: 5, bytes: 5, line: "a�b" }
   ])
 })
@@ -193,7 +193,7 @@ test("an append that fails writes none of its messages", async () => {
   expect(result.error.op).toBe("append")
   expect(result.count).toBe(1)
   expect(result.next[0]?.i).toBe(1)
-  expect(rows(file, "select i, text from msg order by i")).toEqual([{ i: 0, text: "kept" }, { i: 1, text: "after" }])
+  expect(rows(file, "select i, text from everchat_msg order by i")).toEqual([{ i: 0, text: "kept" }, { i: 1, text: "after" }])
 })
 
 // The tree and the views
@@ -227,7 +227,7 @@ test("a node is written once, and read back as written", async () => {
   // The failed write took its first node back too.
   expect(Option.isNone(result.none)).toBe(true)
   expect(result.some.map((n) => [n.l, n.i]).sort()).toEqual([[0, 0], [1, 0]])
-  expect(rows(file, "select count(*) as n from node")).toEqual([{ n: 3 }])
+  expect(rows(file, "select count(*) as n from everchat_node")).toEqual([{ n: 3 }])
 })
 
 test("nodes reads more parts than one statement can take", async () => {
@@ -256,7 +256,7 @@ test("a view comes back part for part, and a second write replaces it", async ()
     return [yield* store.view("chat"), yield* store.view("seen")].map(Option.getOrUndefined)
   }))
   expect(views).toEqual([{ name: "chat", parts, batch: true }, { name: "seen", parts: [], batch: false }])
-  expect(rows(file, "select name, parts from view order by name")).toEqual([
+  expect(rows(file, "select name, parts from everchat_view order by name")).toEqual([
     { name: "chat", parts: "[[3,0],[2,2],[0,12],[0,13]]" },
     { name: "seen", parts: "[]" }
   ])
@@ -290,8 +290,8 @@ test("a transaction that fails takes back every write, and gives the caller its 
   expect(result.done).toBe(1)
   expect(result.chat.taken).toBe(-1)
   expect(Option.isNone(result.view)).toBe(true)
-  expect(rows(file, "select i, text from msg order by i")).toEqual([{ i: 0, text: "before" }, { i: 1, text: "kept" }])
-  expect(rows(file, "select l, i, text from node")).toEqual([{ l: 0, i: 1, text: "user: kept" }])
+  expect(rows(file, "select i, text from everchat_msg order by i")).toEqual([{ i: 0, text: "before" }, { i: 1, text: "kept" }])
+  expect(rows(file, "select l, i, text from everchat_node")).toEqual([{ l: 0, i: 1, text: "user: kept" }])
 })
 
 test("a store error inside a transaction takes back the writes before it", async () => {
@@ -338,7 +338,7 @@ test("an image is stored once by name, with its original only when one is given"
   const image = Option.getOrThrow(result.image)
   expect([image.name, image.type, image.width, image.height, image.source]).toEqual(["aa.png", "image/png", 2, 1, "person"])
   expect([...image.bytes]).toEqual([1, 2, 3])
-  expect(rows(file, "select image, width, length(bytes) as n from image_original")).toEqual([
+  expect(rows(file, "select image, width, length(bytes) as n from everchat_image_original")).toEqual([
     { image: result.b, width: 4000, n: 100_000 }
   ])
 })
@@ -366,10 +366,10 @@ test("a usage row points to its pick, and equal picks are one row", async () => 
     yield* store.addUsage({ ...usage, node: [0, 0], request: "req_1" })
     yield* store.addUsage({ ...usage, node: [0, 1], micros: 1234, expected: 9100 })
   }))
-  expect(rows(file, "select count(*) as n from pick")).toEqual([{ n: 2 }])
+  expect(rows(file, "select count(*) as n from everchat_pick")).toEqual([{ n: 2 }])
   expect(rows(file, `
     select u.served, u.node_l, u.node_i, p.model, u.request, u.input, u.cache_read, u.cache_write, u.output, u.searches, u.micros, u.expected
-    from usage u join pick p on p.id = u.pick order by u.id`)).toEqual([
+    from everchat_usage u join everchat_pick p on p.id = u.pick order by u.id`)).toEqual([
     { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_1", input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: null, expected: null },
     { served: "compaction", node_l: 0, node_i: 1, model: "small", request: null, input: 100, cache_read: 9000, cache_write: 50, output: 40, searches: 0, micros: 1234, expected: 9100 }
   ])
@@ -454,15 +454,18 @@ test("the reads do not make a file that is not there", async () => {
 
 test("the reads refuse a database of another version of the program", async () => {
   const file = newFile()
-  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(file, { "0001_schema": migrations["0001_schema"] }))))
+  // A database with the mark of an older schema.
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(file))))
+  write(file, `pragma user_version = ${VERSION - 1}`)
   const older = await noReads(file)
   expect(older).toBeInstanceOf(DatabaseVersion)
-  expect(older._tag === "DatabaseVersion" ? [older.have, older.want] : null).toEqual([1, Object.keys(migrations).length])
-  // A database that ran a migration that this program does not know.
+  expect(older._tag === "DatabaseVersion" ? [older.have, older.want, older.file] : null).toEqual([VERSION - 1, VERSION, file])
+  // A database with the mark of a schema that this program does not know.
   const newer = newFile()
-  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(newer, { ...migrations, "0099_later": Effect.void }))))
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(newer))))
+  write(newer, `pragma user_version = ${VERSION + 1}`)
   const failed = await noReads(newer)
-  expect(failed._tag === "DatabaseVersion" ? failed.have : null).toBe(Object.keys(migrations).length + 1)
+  expect(failed._tag === "DatabaseVersion" ? failed.have : null).toBe(VERSION + 1)
 })
 
 test("the reads' connection cannot write", async () => {
@@ -471,11 +474,11 @@ test("the reads' connection cannot write", async () => {
   const failed = await Effect.runPromise(
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
-      return yield* Effect.flip(sql`insert into msg (i, kind, text, size, launch, created) values (1, 1, 'two', 3, 1, 1)`)
+      return yield* Effect.flip(sql`insert into everchat_msg (i, kind, text, size, launch, created) values (1, 1, 'two', 3, 1, 1)`)
     }).pipe(Effect.provide(Database.readonly(file)))
   )
   expect(String(failed.reason.cause)).toContain("readonly database")
-  expect(rows(file, "select count(*) as n from msg")).toEqual([{ n: 1 }])
+  expect(rows(file, "select count(*) as n from everchat_msg")).toEqual([{ n: 1 }])
 })
 
 test("a snapshot is one state of the database: a write of the launch shows only after it", async () => {

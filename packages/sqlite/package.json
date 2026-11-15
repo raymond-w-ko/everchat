@@ -6,7 +6,7 @@
   "exports": {
     "./bun": "./src/sqlite.ts",
     "./database": "./src/database.ts",
-    "./migrations": "./src/migrations.ts",
+    "./schema": "./src/schema.ts",
     "./testing": "./tests/help.ts"
   },
   "dependencies": {

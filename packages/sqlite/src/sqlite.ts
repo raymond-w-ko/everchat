@@ -3,7 +3,7 @@
 // The store over SQLite: the SQL of `Store` and `Reads` (store.ts) over
 // Effect's `SqlClient`, and the layers that build them. No other module uses
 // SQL. The rules that the store keeps are in `store.ts`; the tables are in
-// `migrations.ts`, and the file, its driver and its pragmas in `database.ts`.
+// `schema.ts`, and the file, its driver and its pragmas in `database.ts`.
 
 import { Clock, Context, Effect, Exit, Layer, Option, Schema } from "effect"
 import { SqlClient, SqlError } from "effect/sql"
@@ -211,11 +211,11 @@ const only = <A>(rows: ReadonlyArray<A>): Effect.Effect<A> => {
 
 // The id of the next message.
 const nextMessage = (sql: SqlClient.SqlClient) =>
-  Effect.map(Effect.flatMap(sql<{ next: number }>`select coalesce(max(i), -1) + 1 as next from msg`, only), (row) => row.next)
+  Effect.map(Effect.flatMap(sql<{ next: number }>`select coalesce(max(i), -1) + 1 as next from everchat_msg`, only), (row) => row.next)
 
 const TURN = `select t.id, t.agent, t.status, p.vendor, p.model, p.effort, p.speed, h.body as head,
                      t.first_msg as firstMsg, t.launch, t.created, t.ended, t.why
-              from turn t join pick p on p.id = t.pick join head h on h.id = t.head`
+              from everchat_turn t join everchat_pick p on p.id = t.pick join everchat_head h on h.id = t.head`
 
 const turnRows = (sql: SqlClient.SqlClient, rest: string, params: ReadonlyArray<number>) =>
   Effect.gen(function*() {
@@ -223,7 +223,7 @@ const turnRows = (sql: SqlClient.SqlClient, rest: string, params: ReadonlyArray<
     return (yield* decodeTurns(rows)).map(({ effort, model, speed, vendor, ...rest }): Turn => ({ ...rest, pick: { vendor, model, effort, speed } }))
   })
 
-const CALL = "select id, turn, parent, vendor_id as vendorId, fn, input, output, status, size, shown, created, ended from call"
+const CALL = "select id, turn, parent, vendor_id as vendorId, fn, input, output, status, size, shown, created, ended from everchat_call"
 
 // The reads
 // ---------
@@ -232,7 +232,7 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   const chat = Effect.gen(function*() {
     const rows = yield* sql`
       select c.uuid, p.vendor, p.model, p.effort, p.speed, c.goal, c.draft, c.taken, c.created, c.updated
-      from chat c join pick p on p.id = c.pick`
+      from everchat_chat c join everchat_pick p on p.id = c.pick`
     const row = yield* only(yield* decodeChats(rows))
     const { effort, model, speed, vendor, ...rest } = row
     return { ...rest, pick: { vendor, model, effort, speed } }
@@ -243,7 +243,7 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   const messages = Effect.fn("Store.messages")(function*(from: number, to: number) {
     const rows = yield* sql`
       select m.i, k.name as kind, m.text, m.size, m.more, m.line, m.turn, m.call, m.launch, m.created
-      from msg m join kind k on k.id = m.kind
+      from everchat_msg m join everchat_kind k on k.id = m.kind
       where m.i >= ${from} and m.i < ${to}
       order by m.i`
     return (yield* decodeMessages(rows)).map((row): Message => ({ ...row, more: row.more === 1 }))
@@ -252,19 +252,19 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   const messagesAfter = Effect.fn("Store.messagesAfter")(function*(after: number, kinds: ReadonlyArray<Kind>) {
     const rows = yield* sql`
       select m.i, k.name as kind, m.text, m.size, m.more, m.line, m.turn, m.call, m.launch, m.created
-      from msg m join kind k on k.id = m.kind
+      from everchat_msg m join everchat_kind k on k.id = m.kind
       where m.i > ${after} and ${sql.in("m.kind", kinds.map((kind) => KINDS[kind]))}
       order by m.i`
     return (yield* decodeMessages(rows)).map((row): Message => ({ ...row, more: row.more === 1 }))
   }, failed("messagesAfter"))
 
   const imagesOf = Effect.fn("Store.imagesOf")(function*(i: number) {
-    const rows = yield* sql<{ image: number }>`select image from msg_image where msg = ${i} order by n`
+    const rows = yield* sql<{ image: number }>`select image from everchat_msg_image where msg = ${i} order by n`
     return rows.map((row) => row.image)
   }, failed("imagesOf"))
 
   const node = Effect.fn("Store.node")(function*(l: number, i: number) {
-    const rows = yield* sql`select l, i, text, size, created from node where l = ${l} and i = ${i}`
+    const rows = yield* sql`select l, i, text, size, created from everchat_node where l = ${l} and i = ${i}`
     return Option.fromUndefinedOr((yield* decodeNodes(rows))[0])
   }, failed("node"))
 
@@ -273,7 +273,7 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
     for (let at = 0; at < parts.length; at += KEYS_PER_QUERY) {
       const some = parts.slice(at, at + KEYS_PER_QUERY)
       const rows = yield* sql.unsafe(
-        `select l, i, text, size, created from node
+        `select l, i, text, size, created from everchat_node
          where (l, i) in (values ${some.map(() => "(?, ?)").join(", ")})`,
         some.flat()
       )
@@ -283,18 +283,18 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   }, failed("nodes"))
 
   const view = Effect.fn("Store.view")(function*(name: ViewName) {
-    const rows = yield* decodeViews(yield* sql`select name, parts, batch from view where name = ${name}`)
+    const rows = yield* decodeViews(yield* sql`select name, parts, batch from everchat_view where name = ${name}`)
     return Option.map(Option.fromUndefinedOr(rows[0]), (row): View => ({ ...row, batch: row.batch === 1 }))
   }, failed("view"))
 
   const image = Effect.fn("Store.image")(function*(id: number) {
     const rows = yield* sql`
-      select id, name, type, width, height, source, created, bytes from image where id = ${id}`
+      select id, name, type, width, height, source, created, bytes from everchat_image where id = ${id}`
     return Option.fromUndefinedOr((yield* decodeImages(rows))[0])
   }, failed("image"))
 
   const head = Effect.fn("Store.head")(function*(id: number) {
-    const rows = yield* sql<{ body: string }>`select body from head where id = ${id}`
+    const rows = yield* sql<{ body: string }>`select body from everchat_head where id = ${id}`
     return Option.map(Option.fromUndefinedOr(rows[0]), (row) => row.body)
   }, failed("head"))
 
@@ -305,7 +305,7 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   }, failed("runningTurns"))
 
   const turnItems = Effect.fn("Store.turnItems")(function*(turn: number) {
-    return [...(yield* decodeTurnItems(yield* sql`select n, kind, body, created from turn_item where turn = ${turn} order by n`))]
+    return [...(yield* decodeTurnItems(yield* sql`select n, kind, body, created from everchat_turn_item where turn = ${turn} order by n`))]
   }, failed("turnItems"))
 
   const calls = Effect.fn("Store.calls")(function*(turn: number) {
@@ -322,30 +322,30 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
   }, failed("call"))
 
   const endedRunTags = Effect.gen(function*() {
-    const rows = yield* sql<{ tag: string }>`select distinct run_tag as tag from launch where ended is not null`
+    const rows = yield* sql<{ tag: string }>`select distinct run_tag as tag from everchat_launch where ended is not null`
     return rows.map((row) => row.tag)
   }).pipe(failed("endedRunTags"), Effect.withSpan("Store.endedRunTags"))
 
   const diagnostics = Effect.fn("Store.diagnostics")(function*(after = 0, limit = 1000) {
     return [...(yield* decodeDiagnostics(
-      yield* sql`select seq, level, source, text, launch, created from log where seq > ${after} order by seq limit ${limit}`
+      yield* sql`select seq, level, source, text, launch, created from everchat_log where seq > ${after} order by seq limit ${limit}`
     ))]
   }, failed("diagnostics"))
 
   const lastDiagnostics = Effect.fn("Store.lastDiagnostics")(function*(limit: number) {
     return [...(yield* decodeDiagnostics(
-      yield* sql`select seq, level, source, text, launch, created from log order by seq desc limit ${limit}`
+      yield* sql`select seq, level, source, text, launch, created from everchat_log order by seq desc limit ${limit}`
     ))].reverse()
   }, failed("lastDiagnostics"))
 
   const nodesIn = Effect.fn("Store.nodesIn")(function*(l: number, from: number, to: number) {
     return [...(yield* decodeNodes(
-      yield* sql`select l, i, text, size, created from node where l = ${l} and i >= ${from} and i < ${to} order by i`
+      yield* sql`select l, i, text, size, created from everchat_node where l = ${l} and i >= ${from} and i < ${to} order by i`
     ))]
   }, failed("nodesIn"))
 
   const levels = Effect.gen(function*() {
-    return [...(yield* decodeLevels(yield* sql`select l, count(*) as built from node group by l order by l`))]
+    return [...(yield* decodeLevels(yield* sql`select l, count(*) as built from everchat_node group by l order by l`))]
   }).pipe(failed("levels"), Effect.withSpan("Store.levels"))
 
   const turn = Effect.fn("Store.turn")(function*(id: number) {
@@ -377,7 +377,7 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
       `select u.id, u.served, u.turn, u.node_l as nodeL, u.node_i as nodeI, p.vendor, p.model, p.effort, p.speed,
               u.request, u.input, u.cache_read as cacheRead, u.cache_write as cacheWrite, u.output, u.searches,
               u.micros, u.expected, u.created
-       from usage u join pick p on p.id = u.pick
+       from everchat_usage u join everchat_pick p on p.id = u.pick
        ${where.length === 0 ? "" : "where " + where.join(" and ")}
        order by u.id desc limit ?`,
       [...params, filter.limit ?? 1000]
@@ -394,13 +394,13 @@ const reading = (sql: SqlClient.SqlClient): Reading => {
       yield* sql`
         select served, count(*) as requests, sum(input) as input, sum(cache_read) as cacheRead,
                sum(cache_write) as cacheWrite, sum(output) as output
-        from usage group by served order by served`
+        from everchat_usage group by served order by served`
     ))]
   }).pipe(failed("usageTotals"), Effect.withSpan("Store.usageTotals"))
 
   const launches = Effect.fn("Store.launches")(function*(limit: number) {
     return [...(yield* decodeLaunches(
-      yield* sql`select id, pid, host, cwd, version, created, ended, why from launch order by id desc limit ${limit}`
+      yield* sql`select id, pid, host, cwd, version, created, ended, why from everchat_launch order by id desc limit ${limit}`
     ))]
   }, failed("launches"))
 
@@ -457,10 +457,10 @@ const make = Effect.fnUntraced(function*(options: Options) {
   const pickId = Effect.fnUntraced(function*(pick: Pick) {
     const { effort, model, speed, vendor } = pick
     const created = yield* now
-    yield* sql`insert into pick ${sql.insert({ vendor, model, effort, speed, created })} on conflict do nothing`
+    yield* sql`insert into everchat_pick ${sql.insert({ vendor, model, effort, speed, created })} on conflict do nothing`
     const row = yield* only(
       yield* sql<{ id: number }>`
-        select id from pick
+        select id from everchat_pick
         where vendor = ${vendor} and model = ${model} and effort = ${effort} and speed = ${speed}`
     )
     return row.id
@@ -474,7 +474,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
       const input = options.launch
       const created = yield* now
       const open = yield* sql<{ id: number; pid: number; host: string; created: number }>`
-        select id, pid, host, created from launch where ended is null`
+        select id, pid, host, created from everchat_launch where ended is null`
       const last = open[0]
       if (last !== undefined) {
         // A launch with our own pid is not another process: the pid was used
@@ -483,18 +483,18 @@ const make = Effect.fnUntraced(function*(options: Options) {
         if (last.host === input.host && last.pid !== input.pid && alive(last.pid)) {
           return yield* new LaunchLive({ pid: last.pid, host: last.host, created: last.created })
         }
-        yield* sql`update launch set ended = ${created}, why = 'crash' where id = ${last.id}`
+        yield* sql`update everchat_launch set ended = ${created}, why = 'crash' where id = ${last.id}`
       }
-      const chats = yield* sql`select id from chat`
+      const chats = yield* sql`select id from everchat_chat`
       if (chats.length === 0) {
         const pick = yield* pickId(options.pick)
-        yield* sql`insert into chat ${
+        yield* sql`insert into everchat_chat ${
           sql.insert({ id: 1, uuid: crypto.randomUUID(), pick, created, updated: created })
         }`
       }
       const pick = input.pick === undefined ? null : yield* pickId(input.pick)
       const row = yield* only(
-        yield* sql<{ id: number }>`insert into launch ${
+        yield* sql<{ id: number }>`insert into everchat_launch ${
           sql.insert({
             pid: input.pid,
             host: input.host,
@@ -514,7 +514,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
     Effect.gen(function*() {
       const ended = yield* now
       const why = Exit.isSuccess(exit) ? "exit" : Exit.hasInterrupts(exit) ? "signal" : "error"
-      yield* sql`update launch set ended = ${ended}, why = ${why} where id = ${launch.id} and ended is null`
+      yield* sql`update everchat_launch set ended = ${ended}, why = ${why} where id = ${launch.id} and ended is null`
     }).pipe(Effect.ignore)
   )
 
@@ -524,20 +524,20 @@ const make = Effect.fnUntraced(function*(options: Options) {
   const setPick = Effect.fn("Store.setPick")(function*(pick: Pick) {
     yield* sql.withTransaction(Effect.gen(function*() {
       const id = yield* pickId(pick)
-      yield* sql`update chat set pick = ${id}, updated = ${yield* now}`
+      yield* sql`update everchat_chat set pick = ${id}, updated = ${yield* now}`
     }))
   }, failed("setPick"))
 
   const setGoal = Effect.fn("Store.setGoal")(function*(goal: string | null) {
-    yield* sql`update chat set goal = ${goal === null ? null : goal.toWellFormed()}, updated = ${yield* now}`
+    yield* sql`update everchat_chat set goal = ${goal === null ? null : goal.toWellFormed()}, updated = ${yield* now}`
   }, failed("setGoal"))
 
   const setDraft = Effect.fn("Store.setDraft")(function*(draft: string | null) {
-    yield* sql`update chat set draft = ${draft === null ? null : draft.toWellFormed()}, updated = ${yield* now}`
+    yield* sql`update everchat_chat set draft = ${draft === null ? null : draft.toWellFormed()}, updated = ${yield* now}`
   }, failed("setDraft"))
 
   const setTaken = Effect.fn("Store.setTaken")(function*(i: number) {
-    yield* sql`update chat set taken = ${i}, updated = ${yield* now}`
+    yield* sql`update everchat_chat set taken = ${i}, updated = ${yield* now}`
   }, failed("setTaken"))
 
   // The log
@@ -562,9 +562,9 @@ const make = Effect.fnUntraced(function*(options: Options) {
           launch: launch.id,
           created
         }
-        yield* sql`insert into msg ${sql.insert(row)}`
+        yield* sql`insert into everchat_msg ${sql.insert(row)}`
         for (const [k, image] of (message.images ?? []).entries()) {
-          yield* sql`insert into msg_image ${sql.insert({ msg: row.i, n: k, image })}`
+          yield* sql`insert into everchat_msg_image ${sql.insert({ msg: row.i, n: k, image })}`
         }
         written.push({ ...row, kind: message.kind, more: row.more === 1 })
       }
@@ -582,7 +582,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
       for (const node of nodes) {
         const text = node.text.toWellFormed()
         const row = { l: node.l, i: node.i, text, size: bytes(text), created }
-        yield* sql`insert into node ${sql.insert(row)}`
+        yield* sql`insert into everchat_node ${sql.insert(row)}`
         written.push(row)
       }
       return written
@@ -595,7 +595,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
   const putView = Effect.fn("Store.putView")(function*(view: View) {
     const at = yield* now
     yield* sql`
-      insert into view ${
+      insert into everchat_view ${
       sql.insert({
         name: view.name,
         parts: JSON.stringify(view.parts),
@@ -613,14 +613,14 @@ const make = Effect.fnUntraced(function*(options: Options) {
 
   const putImage = Effect.fn("Store.putImage")(function*(image: NewImage) {
     return yield* sql.withTransaction(Effect.gen(function*() {
-      const have = yield* sql<{ id: number }>`select id from image where name = ${image.name}`
+      const have = yield* sql<{ id: number }>`select id from everchat_image where name = ${image.name}`
       if (have[0] !== undefined) return have[0].id
       const { original, ...sent } = image
       const row = yield* only(
-        yield* sql<{ id: number }>`insert into image ${sql.insert({ ...sent, created: yield* now })} returning id`
+        yield* sql<{ id: number }>`insert into everchat_image ${sql.insert({ ...sent, created: yield* now })} returning id`
       )
       if (original !== undefined) {
-        yield* sql`insert into image_original ${sql.insert({ image: row.id, ...original })}`
+        yield* sql`insert into everchat_image_original ${sql.insert({ image: row.id, ...original })}`
       }
       return row.id
     }))
@@ -631,8 +631,8 @@ const make = Effect.fnUntraced(function*(options: Options) {
 
   const putHead = Effect.fn("Store.putHead")(function*(body: string) {
     const hash = new Bun.CryptoHasher("sha256").update(body).digest("hex")
-    yield* sql`insert into head ${sql.insert({ hash, body, created: yield* now })} on conflict do nothing`
-    const row = yield* only(yield* sql<{ id: number }>`select id from head where hash = ${hash}`)
+    yield* sql`insert into everchat_head ${sql.insert({ hash, body, created: yield* now })} on conflict do nothing`
+    const row = yield* only(yield* sql<{ id: number }>`select id from everchat_head where hash = ${hash}`)
     return row.id
   }, failed("putHead"))
 
@@ -642,7 +642,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
   const addUsage = Effect.fn("Store.addUsage")(function*(usage: NewUsage) {
     yield* sql.withTransaction(Effect.gen(function*() {
       const pick = yield* pickId(usage.pick)
-      yield* sql`insert into usage ${
+      yield* sql`insert into everchat_usage ${
         sql.insert({
           served: usage.served,
           turn: usage.turn ?? null,
@@ -671,7 +671,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
       const pick = yield* pickId(turn.pick)
       const head = yield* putHead(turn.head)
       const row = yield* only(
-        yield* sql<{ id: number }>`insert into turn ${
+        yield* sql<{ id: number }>`insert into everchat_turn ${
           sql.insert({ agent: turn.agent ?? null, status: "running", pick, head, first_msg: turn.firstMsg, launch: launch.id, created: yield* now })
         } returning id`
       )
@@ -681,14 +681,14 @@ const make = Effect.fnUntraced(function*(options: Options) {
 
   const endTurn = Effect.fn("Store.endTurn")(function*(id: number, status: "done" | "stopped" | "failed", why: string | null = null) {
     yield* sql`
-      update turn set status = ${status}, ended = ${yield* now}, why = ${why === null ? null : why.toWellFormed()}
+      update everchat_turn set status = ${status}, ended = ${yield* now}, why = ${why === null ? null : why.toWellFormed()}
       where id = ${id} and status = 'running'`
   }, failed("endTurn"))
 
   const addTurnItem = Effect.fn("Store.addTurnItem")(function*(turn: number, kind: "user" | "turn" | "back", body: string) {
     return yield* sql.withTransaction(Effect.gen(function*() {
-      const row = yield* only(yield* sql<{ n: number }>`select coalesce(max(n), -1) + 1 as n from turn_item where turn = ${turn}`)
-      yield* sql`insert into turn_item ${sql.insert({ turn, n: row.n, kind, body: body.toWellFormed(), created: yield* now })}`
+      const row = yield* only(yield* sql<{ n: number }>`select coalesce(max(n), -1) + 1 as n from everchat_turn_item where turn = ${turn}`)
+      yield* sql`insert into everchat_turn_item ${sql.insert({ turn, n: row.n, kind, body: body.toWellFormed(), created: yield* now })}`
       return row.n
     }))
   }, failed("addTurnItem"))
@@ -698,7 +698,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
 
   const startCall = Effect.fn("Store.startCall")(function*(call: NewCall) {
     const row = yield* only(
-      yield* sql<{ id: number }>`insert into call ${
+      yield* sql<{ id: number }>`insert into everchat_call ${
         sql.insert({
           turn: call.turn,
           parent: call.parent ?? null,
@@ -718,12 +718,12 @@ const make = Effect.fnUntraced(function*(options: Options) {
     const output = end.output.toWellFormed()
     const size = bytes(output)
     yield* sql`
-      update call set status = ${end.status}, output = ${output}, size = ${size}, shown = ${end.shown ?? size}, pgid = null, ended = ${yield* now}
+      update everchat_call set status = ${end.status}, output = ${output}, size = ${size}, shown = ${end.shown ?? size}, pgid = null, ended = ${yield* now}
       where id = ${id} and status = 'running'`
   }, failed("endCall"))
 
   const setCallPgid = Effect.fn("Store.setCallPgid")(function*(id: number, pgid: number) {
-    yield* sql`update call set pgid = ${pgid} where id = ${id} and status = 'running'`
+    yield* sql`update everchat_call set pgid = ${pgid} where id = ${id} and status = 'running'`
   }, failed("setCallPgid"))
 
   // Diagnostics
@@ -735,7 +735,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
     }
     yield* sql.withTransaction(Effect.gen(function*() {
       for (const row of rows) {
-        yield* sql`insert into log ${
+        yield* sql`insert into everchat_log ${
           sql.insert({ level: row.level, source: row.source, text: row.text.toWellFormed(), launch: launch.id, created: Math.trunc(row.created) })
         }`
       }
@@ -743,7 +743,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
   }, failed("addDiagnostics"))
 
   const dropDiagnostics = Effect.fn("Store.dropDiagnostics")(function*(before: number) {
-    const rows = yield* sql<{ seq: number }>`delete from log where created < ${before} returning seq`
+    const rows = yield* sql<{ seq: number }>`delete from everchat_log where created < ${before} returning seq`
     return rows.length
   }, failed("dropDiagnostics"))
 
@@ -786,7 +786,7 @@ const make = Effect.fnUntraced(function*(options: Options) {
 export const readsLayerNoDatabase = Layer.effect(Reads, Effect.map(SqlClient.SqlClient, (sql) => Reads.of(reading(sql))))
 
 // The reads over the database in the file `filename`, which must be there.
-// It fails when another version of the program made the file: a read of
+// It fails when the file's mark is not this program's (schema.ts): a read of
 // tables that this program does not know gives wrong answers.
 export const readsLayer = (filename: string) =>
   Layer.effect(
@@ -795,7 +795,7 @@ export const readsLayer = (filename: string) =>
       const database = yield* Layer.build(Database.readonly(filename)).pipe(failed("open"))
       const have = yield* Database.version.pipe(Effect.provide(database), failed("open"))
       if (have !== Database.VERSION) {
-        return yield* new DatabaseVersion({ have, want: Database.VERSION })
+        return yield* new DatabaseVersion({ have, want: Database.VERSION, file: filename })
       }
       return Reads.of(reading(Context.get(database, SqlClient.SqlClient)))
     })

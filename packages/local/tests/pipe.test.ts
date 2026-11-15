@@ -30,9 +30,9 @@ const run = async (at: ReturnType<typeof place>, address: string | undefined, in
   return { out, err, code }
 }
 
-const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from msg_read order by i")
-const launches = (file: string) => rows<{ ended: number | null; why: string | null }>(file, "select ended, why from launch order by id")
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from turn order by id")
+const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
+const launches = (file: string) => rows<{ ended: number | null; why: string | null }>(file, "select ended, why from everchat_launch order by id")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
 
 test("a line of the standard input is a message, and each message goes to the standard output as text", async () => {
   const at = place()
@@ -149,7 +149,7 @@ test("a signal while a turn runs ends the process, and the next launch goes on w
   expect(turns(at.file)).toEqual([{ id: 1, status: "done" }, { id: 2, status: "done" }])
   expect(JSON.stringify(server.bodies[1])).not.toContain("and now?")
   // What the program says about its own work is in the table, and not in the output.
-  expect(rows(at.file, "select level, source, text from log")).toContainEqual({ level: "info", source: "turn", text: "turn 1 was cut, and continues" })
+  expect(rows(at.file, "select level, source, text from everchat_log")).toContainEqual({ level: "info", source: "turn", text: "turn 1 was cut, and continues" })
 })
 
 test("the reader of the standard output goes away: the program ends at once with the reason, and the log holds what was not written", async () => {
@@ -192,7 +192,7 @@ test("--log-level sets the lowest level of the diagnostics, and no level puts a 
     await first.exited
     hold = false
     expect(await run(at, server.address, "", ["--model", "gpt-test", ...level])).toEqual({ out: "Here I am again.\n", err: "", code: 0 })
-    return rows<{ level: string }>(at.file, "select level from log").map((one) => one.level)
+    return rows<{ level: string }>(at.file, "select level from everchat_log").map((one) => one.level)
   }
   expect(await diagnostics()).toEqual(["info"])
   expect(await diagnostics("--log-level", "error")).toEqual([])

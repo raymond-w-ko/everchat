@@ -75,7 +75,7 @@ test("a fixed chat ends in the state that the old code gave it", async () => {
   }
 
   const { blocks, state, zoom } = last as { state: any; blocks: string; zoom: string }
-  const tree = rows<{ l: number; i: number; text: string }>(file, "select l, i, text from node order by l, i")
+  const tree = rows<{ l: number; i: number; text: string }>(file, "select l, i, text from everchat_node order by l, i")
   expect(marks).toEqual(GOLD.marks)
   expect(state.count).toBe(GOLD.count)
   expect([state.view.size, state.seen.size]).toEqual(GOLD.size)
@@ -86,5 +86,5 @@ test("a fixed chat ends in the state that the old code gave it", async () => {
   expect(hash(tree.map((node) => node.l + "/" + node.i + ":" + node.text).join("\n"))).toBe(GOLD.tree)
   expect(blocks).toBe(GOLD.blocks)
   expect(zoom).toBe(GOLD.zoom)
-  expect(rows(file, "select count(*) as n from msg")).toEqual([{ n: GOLD.count }])
+  expect(rows(file, "select count(*) as n from everchat_msg")).toEqual([{ n: GOLD.count }])
 }, 120_000)

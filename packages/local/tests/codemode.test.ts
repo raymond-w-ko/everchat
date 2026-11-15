@@ -60,10 +60,10 @@ const back = (asked: Request | undefined): string => {
 const calls = (file: string) =>
   rows<{ id: number; parent: number | null; fn: string; status: string; output: string | null; size: number | null; shown: number | null; pgid: number | null }>(
     file,
-    "select id, parent, fn, status, output, size, shown, pgid from call order by id"
+    "select id, parent, fn, status, output, size, shown, pgid from everchat_call order by id"
   )
-const diagnostics = (file: string) => rows<{ level: string; source: string; text: string }>(file, "select level, source, text from log order by seq")
-const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from msg_read order by i")
+const diagnostics = (file: string) => rows<{ level: string; source: string; text: string }>(file, "select level, source, text from everchat_log order by seq")
+const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 
 const eventually = (check: () => boolean) =>
   Effect.gen(function*() {
@@ -123,7 +123,7 @@ test("a program changes files and runs commands, and only the program and its re
   expect(calls(file)[4]).toMatchObject({ output: "goodbye\n", size: 8, shown: 8, pgid: null })
   // A turn with no trouble writes no diagnostic.
   expect(diagnostics(file)).toEqual([])
-  expect(rows(file, "select status from turn")).toEqual([{ status: "done" }])
+  expect(rows(file, "select status from everchat_turn")).toEqual([{ status: "done" }])
 })
 
 test("a program that fails gives the model its error, and the turn goes on", async () => {
@@ -186,7 +186,7 @@ test("the person's stop kills a running command, and the model reads later what 
       "- call 3, shell(\"echo $$ > pid; exec sleep 60\") was cut: it may or may not have finished."
   )
   expect(messages(file).map((message) => message.kind)).toEqual(["user", "tool", "echo", "note"])
-  expect(rows(file, "select status from turn")).toEqual([{ status: "stopped" }])
+  expect(rows(file, "select status from everchat_turn")).toEqual([{ status: "stopped" }])
 })
 
 test("a restart: the cut program is not run again, and the model is told which of its functions ended and which was cut", async () => {
@@ -201,10 +201,10 @@ test("a restart: the cut program is not run again, and the model is told which o
   }))
   // The launch ended with the program at work. No command of it is left.
   expect(alive(pid)).toBe(false)
-  expect(rows(file, "select status from turn")).toEqual([{ status: "running" }])
+  expect(rows(file, "select status from everchat_turn")).toEqual([{ status: "running" }])
   expect(calls(file)[0]).toMatchObject({ fn: "run", status: "running" })
   // A crash closes nothing: put the command's row back as a crash leaves it.
-  write(file, "update call set status = 'running', output = null, size = null, shown = null, ended = null, pgid = ? where fn = 'shell'", [pid])
+  write(file, "update everchat_call set status = 'running', output = null, size = null, shown = null, ended = null, pgid = ? where fn = 'shell'", [pid])
   const wire = model()
   await launch(file, wire, Turns.use((turns) => turns.idle))
   expect(fs.existsSync(path.join(cwd, "b.txt"))).toBe(false)
@@ -227,7 +227,7 @@ test("a restart: the cut program is not run again, and the model is told which o
   // The restart says so in the diagnostics. The line is written while the
   // turn loop's layer is built.
   expect(diagnostics(file)).toEqual([{ level: "info", source: "turn", text: "turn 1 was cut, and continues" }])
-  expect(rows(file, "select status from turn")).toEqual([{ status: "done" }])
+  expect(rows(file, "select status from everchat_turn")).toEqual([{ status: "done" }])
 })
 
 test("a program that ended before a restart is shown again as it was, shortened in the same way", async () => {
@@ -242,7 +242,7 @@ test("a program that ended before a restart is shown again as it was, shortened 
     yield* Turns.use((turns) => turns.say("print"))
     yield* eventually(() => stuck.sent.length === 2)
   }))
-  write(file, "delete from turn_item where kind = 'back'")
+  write(file, "delete from everchat_turn_item where kind = 'back'")
   const wire = model()
   await launch(file, wire, Turns.use((turns) => turns.idle))
   expect(wire.sent.length).toBe(1)

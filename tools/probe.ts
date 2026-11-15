@@ -298,8 +298,8 @@ if (mode === "models") {
     yield* memory.idle
   }).pipe(Effect.provide(Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor))), Effect.provideService(Fetch, tee)))
   const db = new Sqlite(file, { readonly: true })
-  const usage = db.query("select node_l as l, node_i as i, input, cache_read as read, expected, created from usage order by id").all() as Array<any>
-  const nodes = db.query("select count(*) as n, max(size) as big from node").get() as any
+  const usage = db.query("select node_l as l, node_i as i, input, cache_read as read, expected, created from everchat_usage order by id").all() as Array<any>
+  const nodes = db.query("select count(*) as n, max(size) as big from everchat_node").get() as any
   db.close()
   const by = (rows: Array<any>) => ({ requests: rows.length, read: rows.filter((row) => row.read > 0).length, missed: rows.filter((row) => row.expected >= 1024 && row.read === 0).length, input: rows.reduce((n, row) => n + row.input, 0), cached: rows.reduce((n, row) => n + row.read, 0) })
   console.log(JSON.stringify({ seconds: Math.round((Date.now() - pushed) / 1000), setup: Math.round((pushed - started) / 1000), nodes: nodes.n, longest: nodes.big, leaves: by(usage.filter((row) => row.l === 0)), merges: by(usage.filter((row) => row.l > 0)) }))
@@ -332,10 +332,10 @@ if (mode === "models") {
   }).pipe(Effect.provide(turns), Effect.provideService(Fetch, tee)))
   const db = new Sqlite(file, { readonly: true })
   const short = (value: unknown) => (typeof value === "string" && value.length > 600 ? value.slice(0, 600) + "... (" + value.length + " characters)" : value)
-  for (const row of db.query("select kind, text from msg_read order by i").all() as Array<any>) console.log(JSON.stringify({ message: row.kind, text: short(row.text) }))
-  for (const row of db.query("select id, parent, fn, status, input, output, size, shown from call order by id").all() as Array<any>) console.log(JSON.stringify({ ...row, input: short(row.input), output: short(row.output) }))
-  for (const row of db.query("select input, cache_read as read, output, expected from usage order by id").all() as Array<any>) console.log(JSON.stringify({ usage: row }))
-  console.log(JSON.stringify({ turn: db.query("select status, why from turn").all(), requests, seconds: Math.round((Date.now() - started) / 1000), files: fs.readdirSync(home).filter((name) => !name.startsWith("everchat.db")) }))
+  for (const row of db.query("select kind, text from everchat_msg_read order by i").all() as Array<any>) console.log(JSON.stringify({ message: row.kind, text: short(row.text) }))
+  for (const row of db.query("select id, parent, fn, status, input, output, size, shown from everchat_call order by id").all() as Array<any>) console.log(JSON.stringify({ ...row, input: short(row.input), output: short(row.output) }))
+  for (const row of db.query("select input, cache_read as read, output, expected from everchat_usage order by id").all() as Array<any>) console.log(JSON.stringify({ usage: row }))
+  console.log(JSON.stringify({ turn: db.query("select status, why from everchat_turn").all(), requests, seconds: Math.round((Date.now() - started) / 1000), files: fs.readdirSync(home).filter((name) => !name.startsWith("everchat.db")) }))
   db.close()
 } else if (mode === "burst" && model !== "") {
   // One request goes first, and `b` more with the same long prefix follow

@@ -41,10 +41,10 @@ const IDLE = "idle · gpt-test medium"
 // and a paste is no longer bracketed.
 const RESTORED = ["\x1b[?25h", "\x1b[?2004l"]
 
-const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from msg_read order by i")
+const messages = (file: string) => rows<{ kind: string; text: string }>(file, "select kind, text from everchat_msg_read order by i")
 // Why a launch ended: "exit" (a quit), "signal", "error", or "crash" (the next launch found it open).
-const launches = (file: string) => rows<{ id: number; ended: number | null; why: string | null }>(file, "select id, ended, why from launch order by id")
-const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from turn order by id")
+const launches = (file: string) => rows<{ id: number; ended: number | null; why: string | null }>(file, "select id, ended, why from everchat_launch order by id")
+const turns = (file: string) => rows<{ id: number; status: string }>(file, "select id, status from everchat_turn order by id")
 
 test("a launch in a terminal: a message, the reply as it streams, and a clean quit", async () => {
   const at = place()
@@ -95,7 +95,7 @@ test("a quit while a program computes ends the process at once", async () => {
   expect(pty.code).toBe(0)
   // The turn is cut, and so is its program: the next launch goes on with them.
   expect(turns(at.file)).toEqual([{ id: 1, status: "running" }])
-  expect(rows(at.file, "select fn, status from call")).toEqual([{ fn: "run", status: "running" }])
+  expect(rows(at.file, "select fn, status from everchat_call")).toEqual([{ fn: "run", status: "running" }])
 })
 
 for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
@@ -124,7 +124,7 @@ for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
     expect(turns(at.file)).toEqual([{ id: 1, status: "done" }])
     expect(messages(at.file)).toEqual([{ kind: "user", text: "are you there?" }, { kind: "asst", text: "Here I am again." }])
     // What the program says about its own work is in the table, and not on the screen.
-    expect(rows(at.file, "select level, source, text from log")).toContainEqual({ level: "info", source: "turn", text: "turn 1 was cut, and continues" })
+    expect(rows(at.file, "select level, source, text from everchat_log")).toContainEqual({ level: "info", source: "turn", text: "turn 1 was cut, and continues" })
     expect(second.raw).not.toContain("was cut, and continues")
   })
 }

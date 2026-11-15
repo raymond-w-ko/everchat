@@ -82,7 +82,7 @@ const withSandbox = <A, E>(
 const functionRows = (file: string) =>
   rows<{ parent: number; fn: string; input: string; output: string | null; status: string }>(
     file,
-    "select parent, fn, input, output, status from call where parent is not null order by id"
+    "select parent, fn, input, output, status from everchat_call where parent is not null order by id"
   )
 
 // A program's result
@@ -149,7 +149,7 @@ test("a function gets the program's arguments, and each call is a row under the 
     { parent: 3, fn: "echo", input: "[\"a\",{\"b\":[1]},null]", output: "[\"a\",{\"b\":[1]},null]", status: "done" },
     { parent: 5, fn: "nothing", input: "[]", output: "", status: "done" }
   ])
-  expect(rows(file, "select count(*) as n from call where parent is not null and (ended is null or size is null)")).toEqual([{ n: 0 }])
+  expect(rows(file, "select count(*) as n from everchat_call where parent is not null and (ended is null or size is null)")).toEqual([{ n: 0 }])
 })
 
 test("functions run at the same time", async () => {

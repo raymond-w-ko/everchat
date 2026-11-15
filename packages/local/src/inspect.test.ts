@@ -87,12 +87,12 @@ test("a launch that did not end is live only while its process runs on this host
   const file = newFile()
   await chat(file)
   // A launch that ended is not live, also when a process has its number again.
-  write(file, "update launch set host = ?", [os.hostname()])
+  write(file, "update everchat_launch set host = ?", [os.hostname()])
   expect((await inspect(file, (ask) => ask.overview, true)).live).toBe(false)
-  write(file, "update launch set ended = null, why = null")
+  write(file, "update everchat_launch set ended = null, why = null")
   expect((await inspect(file, (ask) => ask.overview, true)).live).toBe(true)
   expect((await inspect(file, (ask) => ask.overview, false)).live).toBe(false)
-  write(file, "update launch set host = 'another-host'")
+  write(file, "update everchat_launch set host = 'another-host'")
   expect((await inspect(file, (ask) => ask.overview, true)).live).toBe(false)
 })
 
@@ -193,7 +193,7 @@ test("a window gives the nodes over a range of messages, and the parts of the vi
     yield* memory.idle
   }))
   // A view with merged parts, as a batch leaves it: 32 messages in one node, then 4, then leaves.
-  write(file, "update view set parts = ? where name = 'chat'", [JSON.stringify([[5, 0], [2, 8], [0, 36], [0, 37], [0, 38], [0, 39]])])
+  write(file, "update everchat_view set parts = ? where name = 'chat'", [JSON.stringify([[5, 0], [2, 8], [0, 36], [0, 37], [0, 38], [0, 39]])])
   const all = await inspect(file, (ask) => ask.window(0, 40))
   expect([all.count, all.from, all.to, all.floor, all.top]).toEqual([40, 0, 40, 0, 5])
   const at = (l: number) => all.nodes.filter((node) => node.l === l).map((node) => node.i)
@@ -308,7 +308,7 @@ test("a turn's request: the head, the view's lines with their nodes, the steps, 
   expect((await inspect(file, (ask) => ask.body(2, 1)))!.body).toEqual(await Effect.runPromise(body(sent[2]!)))
   expect(await inspect(file, (ask) => ask.body(9, null))).toBe(null)
   // A body that the wire cannot build says why.
-  write(file, "update pick set vendor = 'anthropic'")
+  write(file, "update everchat_pick set vendor = 'anthropic'")
   expect(await inspect(file, (ask) => ask.body(1, 1))).toEqual({ upto: 1, vendor: "anthropic", body: null, error: 'no wire for the vendor "anthropic"' })
 })
 
@@ -331,7 +331,7 @@ test("while a turn runs, another process reads its request, and what is asked no
       yield* turns.say("run it")
       yield* Deferred.await(started)
       // The launch of a test names another host: give it this one.
-      write(file, "update launch set host = ?", [os.hostname()])
+      write(file, "update everchat_launch set host = ?", [os.hostname()])
       const before = yield* store.version
       const running = (yield* Effect.promise(() => inspect(file, (ask) => ask.turn(1), true)))!
       expect(running.turn.status).toBe("running")
