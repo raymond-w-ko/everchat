@@ -29,10 +29,11 @@
 //   none; a hosted deployment sets it. The time that a program waits for a
 //   function counts for neither. Neither bounds what a program computes
 //   while a function is at work: a program that starts a function, does
-//   not wait for it, and computes, is not stopped by the budget. What
-//   bounds that case: each function's own limit, and the deadline of a
-//   program, which a hosted deployment will have (docs/design.md, "Limits
-//   for hosted programs": 10 minutes; not built yet).
+//   not wait for it, and computes, is not stopped by the budget.
+//   Today nothing bounds what a program computes while a function is at
+//   work; the deadline of a program, which a hosted deployment will have,
+//   will bound it (docs/design.md, "Limits for hosted programs": 10
+//   minutes; not built yet).
 // - No function is left at work. When a program ends, the functions that
 //   it did not wait for are stopped, and the result says so. When a
 //   program is stopped, its functions are stopped too. A function that was

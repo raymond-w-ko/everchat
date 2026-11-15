@@ -13,7 +13,7 @@
 // program, a row for each call of a function under the program's call,
 // functions at the same time, a function that fails, a function that the
 // program did not wait for, a stop. The code of the call rows and of the
-// result is this file's, and thread.ts uses it too.
+// result is calls.ts's, which both engines use.
 //
 // Its limits differ from the thread engine's:
 //
@@ -41,91 +41,38 @@
 // (which reads the file of `quickjs-wasi` from `node_modules`); on
 // Cloudflare, the module that Wrangler compiles.
 
-import { type CodemodeResult, type CodemodeWasmModule, DEFAULT_INTERRUPT_BUDGET, InlineCodemodeSandbox } from "@earendil-works/pi-codemode/portable"
-import { Effect, FiberSet, Layer } from "effect"
-import { FunctionError, Functions } from "@everchat/core/functions"
-import { MEMORY, type Ran, render, Sandbox, STOPPED } from "@everchat/core/sandbox"
+import { type CodemodeWasmModule, DEFAULT_INTERRUPT_BUDGET, InlineCodemodeSandbox } from "@earendil-works/pi-codemode/portable"
+import { Effect, Layer } from "effect"
+import { Functions } from "@everchat/core/functions"
+import { MEMORY, Sandbox } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
+import { type Fields, functionCalls, numbers, ran } from "./calls.ts"
 
-// This module's diagnostics name it as their source (diagnostics.ts).
-const diagnostic = Effect.annotateLogs("source", "sandbox")
-
+// Each number, when given, is an integer from 1 to 2**31 - 1: `inlineLayer`
+// throws a RangeError for any other value (calls.ts, `numbers`).
 export interface Options {
   readonly memory?: number | undefined // bytes
   readonly polls?: number | undefined // interrupt polls over the whole program
   readonly wasm: CodemodeWasmModule | Promise<CodemodeWasmModule> // the compiled QuickJS file
 }
 
+// The numeric fields of `Options`: the type check holds this list to them.
+const NUMBERS: Fields<Options> = { memory: true, polls: true }
+
 // The default count of polls: the library's. A count of the engine's
 // interrupt checks, not a time (the header says why).
 export const POLLS = DEFAULT_INTERRUPT_BUDGET
 
-// A function's result as the database keeps it.
-const text = (value: unknown): string => (typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value) ?? "")
-
-// The calls of a program's functions, for both engines (this one and
-// thread.ts; not an entry of the package). `call` runs one: its row under
-// the program's call, its work, its row again. `working` holds the
-// functions at work, by their row. The scope's end stops each one that is
-// left, and waits until its row is closed.
-export const functionCalls = (at: { readonly turn: number; readonly call: number }) =>
-  Effect.gen(function*() {
-    const functions = yield* Functions
-    const store = yield* Store
-    const fibers = yield* FiberSet.make<unknown, FunctionError>()
-    const promise = yield* FiberSet.runtimePromise(fibers)<never>()
-    const working = new Map<number, string>()
-    const broken = (op: string) => new FunctionError({ message: "EverChat's database failed (" + op + ")." })
-
-    const invoke = (name: string, given: unknown) =>
-      Effect.uninterruptibleMask((restore) =>
-        Effect.gen(function*() {
-          const args: ReadonlyArray<unknown> = Array.isArray(given) ? given : []
-          const id = yield* Effect.mapError(
-            store.startCall({ turn: at.turn, parent: at.call, fn: name, input: JSON.stringify(args) }),
-            () => broken("startCall")
-          )
-          working.set(id, name)
-          const work = restore(functions.call(name, args, { turn: at.turn, program: at.call, call: id })).pipe(
-            Effect.catchDefect((defect) => Effect.fail(new FunctionError({ message: "EverChat failed in this function: " + String(defect) }))),
-            Effect.onInterrupt(() => Effect.ignore(store.endCall(id, { status: "cut", output: STOPPED })))
-          )
-          const got = yield* Effect.result(work)
-          working.delete(id)
-          if (got._tag === "Failure") {
-            yield* Effect.mapError(store.endCall(id, { status: "failed", output: got.failure.message }), () => broken("endCall"))
-            return yield* Effect.fail(got.failure)
-          }
-          yield* Effect.mapError(store.endCall(id, { status: "done", output: text(got.success) }), () => broken("endCall"))
-          return got.success
-        })
-      )
-
-    return {
-      names: functions.names,
-      call: (name: string, given: unknown): Promise<unknown> => promise(invoke(name, given)),
-      working
-    }
-  })
-
-// The program's result as the caller gets it, for both engines: a failure
-// of the sandbox itself is also a diagnostic.
-export const ran = (result: CodemodeResult, working: ReadonlyMap<number, string>): Effect.Effect<Ran> =>
-  Effect.gen(function*() {
-    if (!result.ok && result.error.kind === "sandbox") {
-      yield* diagnostic(Effect.logError(`the sandbox failed: ${result.error.message}`))
-    }
-    return render(result, [...working.values()])
-  })
-
-export const inlineLayer = (options: Options) =>
-  Layer.effect(
+export const inlineLayer = (options: Options) => {
+  // Read once, here: the engine uses only these.
+  const given = numbers("inline", options, NUMBERS)
+  return Layer.effect(
     Sandbox,
     Effect.gen(function*() {
       const functions = yield* Functions
       const store = yield* Store
-      const memory = options.memory ?? MEMORY
-      const polls = options.polls ?? POLLS
+      const memory = given.memory ?? MEMORY
+      const polls = given.polls ?? POLLS
       const wasm = options.wasm
 
       // The library's message for the polls names its option; the model
@@ -159,3 +106,4 @@ export const inlineLayer = (options: Options) =>
       return Sandbox.of({ run })
     })
   )
+}

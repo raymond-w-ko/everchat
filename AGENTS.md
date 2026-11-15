@@ -85,9 +85,16 @@ A package's entries are the keys of its `exports` (see "Be modular"):
   the tables in one list of statements, and its mark; no changes of the
   tables), and `./testing` (`packages/sqlite/tests/help.ts`, what the
   tests that need a real store share). It has no entry `.`.
-- `packages/codemode/` (`@everchat/codemode`): the engine of the sandbox,
-  in a worker thread. Its entry: `./thread`
-  (`packages/codemode/src/thread.ts`).
+- `packages/codemode/` (`@everchat/codemode`): the engines of the sandbox.
+  Its entries: `./thread` (`packages/codemode/src/thread.ts`, the engine
+  in a worker thread, which a local chat runs) and `./inline`
+  (`packages/codemode/src/inline.ts`, the engine in the caller's own
+  thread). `packages/codemode/src/calls.ts` is no entry: the code that both
+  engines share. `packages/codemode/tests/` holds `cases.ts`, the run cases
+  that every engine must pass. A case of every engine goes into
+  `tests/cases.ts`; a case of one engine goes into that engine's test file:
+  `src/thread.test.ts` (the thread engine; its first cases are in
+  `src/sandbox.test.ts`) or `src/inline.test.ts`.
 - `packages/local/` (`@everchat/local`): the rest, the local build. Its
   modules, flat, are in `packages/local/src/`: the terminal, pipe mode, the
   shell and the file functions, the inspector, the reading of the address

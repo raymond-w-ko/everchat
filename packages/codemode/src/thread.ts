@@ -21,7 +21,7 @@
 //
 // The limits of memory and compute are parameters too, with defaults.
 //
-// The call rows of the functions and the result are inline.ts's code, which
+// The call rows of the functions and the result are calls.ts's code, which
 // both engines use.
 
 /// <reference path="./assets.d.ts" />
@@ -32,8 +32,10 @@ import QUICKJS from "quickjs-wasi/quickjs.wasm" with { type: "file" }
 import { Functions } from "@everchat/core/functions"
 import { COMPUTE, MEMORY, Sandbox } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
-import { functionCalls, ran } from "./inline.ts"
+import { type Fields, functionCalls, numbers, ran } from "./calls.ts"
 
+// Each number, when given, is an integer from 1 to 2**31 - 1: `threadLayer`
+// throws a RangeError for any other value (calls.ts, `numbers`).
 export interface Options {
   readonly memory?: number | undefined // bytes
   readonly compute?: number | undefined // milliseconds
@@ -42,34 +44,39 @@ export interface Options {
   // compute limit bounds one such stretch). It does not bound what a
   // program computes while a function is at work: a program that starts a
   // function, does not wait for it, and computes, is not stopped by the
-  // budget. What bounds that case: each function's own limit, and the
-  // deadline of a program, which a hosted deployment will have
-  // (docs/design.md, "Limits for hosted programs": 10 minutes; not built
-  // yet). None when not given: the local use has none, and a hosted
-  // deployment sets it.
+  // budget. Today nothing bounds what a program computes while a function
+  // is at work; the deadline of a program, which a hosted deployment will
+  // have, will bound it (docs/design.md, "Limits for hosted programs": 10
+  // minutes; not built yet). None when not given: the local use has none,
+  // and a hosted deployment sets it.
   readonly budget?: number | undefined
   readonly worker?: URL | undefined // the program of the worker thread
   readonly quickjs?: string | undefined // the path of the QuickJS file
 }
 
+// The numeric fields of `Options`: the type check holds this list to them.
+const NUMBERS: Fields<Options> = { memory: true, compute: true, budget: true }
+
 // A time for a person: seconds, with a tenth below 10 s.
 const seconds = (ms: number): string => (ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10)) + " s"
 
-export const threadLayer = (options: Options = {}) =>
-  Layer.effect(
+export const threadLayer = (options: Options = {}) => {
+  // Read once, here: the engine uses only these.
+  const given = numbers("thread", options, NUMBERS)
+  return Layer.effect(
     Sandbox,
     Effect.gen(function*() {
       const functions = yield* Functions
       const store = yield* Store
-      const memory = options.memory ?? MEMORY
-      const compute = options.compute ?? COMPUTE
-      const budget = options.budget
+      const memory = given.memory ?? MEMORY
+      const compute = given.compute ?? COMPUTE
+      const budget = given.budget
       const worker = options.worker
       const quickjs = options.quickjs ?? QUICKJS
 
       const run = Effect.fn("Sandbox.run")(function*(program: string, at: { readonly turn: number; readonly call: number }) {
         // The functions at work, and one call of a function: its row, its
-        // work, its row again (inline.ts).
+        // work, its row again (calls.ts).
         const calls = yield* functionCalls(at).pipe(
           Effect.provideService(Functions, functions),
           Effect.provideService(Store, store)
@@ -147,3 +154,4 @@ export const threadLayer = (options: Options = {}) =>
       return Sandbox.of({ run })
     })
   )
+}
