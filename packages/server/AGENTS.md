@@ -35,7 +35,11 @@ program `packages/server/tsconfig.json`: its files are checked with no Bun
 and no Node types. The program lists two files of declarations: the core's,
 `packages/core/tsconfig.core.d.ts`, and its own,
 `packages/server/tsconfig.server.d.ts`; a new global goes into the server's
-file, never into a source file. Its tests may import any of them, with the Bun types
+file, never into a source file. The type program passes what those
+declarations name, the core's `node:crypto` too, and refuses only a module
+that none names: the list of built-ins of `tools/graph.ts`, which gives the
+server's files none, is what refuses each module of Bun or of Node there.
+Its tests may import any of them, with the Bun types
 (`packages/server/tsconfig.test.json`).
 
 ## Its design

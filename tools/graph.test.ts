@@ -755,6 +755,43 @@ test("manifest: a file that is not a test imports no test's file, relative or by
   expect(run(workspace({ ...testing, [t]: `import { w } from "./help.ts"\nimport { help } from "@everchat/core/testing"\nexport const t = [w, help]\n` }))).toEqual([])
 })
 
+// The real tables, row by row, as the documents give them, so that a row
+// deleted or widened in graph.ts fails here until this case changes with
+// it. The sources:
+// - core: `docs/design.md`, "Packages" (no runtime API but `createHash` of
+//   `node:crypto`; the tests use `node:test`), and `packages/core/AGENTS.md`,
+//   "The boundaries of the core" (`node:test`, `node:assert/strict`; the
+//   tests run on Bun and on Node, so no `bun:` module). The tests' other two,
+//   `node:crypto` and `node:path`, are graph.ts's own. It must not reach the
+//   other packages: the root `AGENTS.md`, "Be modular" (it may import
+//   `effect` only).
+// - server: `packages/server/AGENTS.md`, "Its imports": its files import no
+//   built-in module, and must not reach local, openai, sqlite or codemode;
+//   its tests may import any.
+// - openai, sqlite, codemode: the root `AGENTS.md`, "Be modular" (openai
+//   may import the core's requests; sqlite and codemode the core, so none
+//   reaches the others). Their lists of built-ins are graph.ts's own: the
+//   documents name none.
+// - local: the root `AGENTS.md`, "Be modular": it may import every other
+//   package, and runs on Bun, so it has no row of BUDGETS and any built-in.
+test("the real tables are the documents' rows: each package's built-ins, for its files and its tests, and each budget", () => {
+  expect(BUILTINS).toEqual({
+    "@everchat/core": { src: ["node:crypto"], tests: ["node:assert/strict", "node:crypto", "node:path", "node:test"] },
+    "@everchat/local": { src: "any", tests: "any" },
+    "@everchat/openai": { src: [], tests: "any" },
+    "@everchat/sqlite": { src: [], tests: "any" },
+    "@everchat/server": { src: [], tests: "any" },
+    "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
+  })
+  expect(BUDGETS).toEqual([
+    { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
+    { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
+    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/"] },
+    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/"] },
+    { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] }
+  ])
+})
+
 test("check takes the real tables when it is given none", () => {
   const root = workspace({ [B]: `import "typescript"\nexport const b = 1\n` })
   expect(check(root)).toEqual(check(root, { builtins: BUILTINS, budgets: BUDGETS }))

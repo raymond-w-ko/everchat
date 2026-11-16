@@ -1,11 +1,14 @@
 // The server's own program, its guard: every file of the package but the
 // tests, with no Bun and no Node types, and a `lib` of `ESNext` only. `tsc`
-// follows imports, so a file passes only if all that it imports passes too:
-// the host imports no module of Bun and no module of Node. It lists two
-// files of declarations: the core's, `../core/tsconfig.core.d.ts` (what the
-// core may use, so that a file that imports the core passes), and the
-// server's own, `tsconfig.server.d.ts` (what a file of the server uses
-// beyond that). The tests are checked with the Bun types, by
+// follows imports, so a file passes only if all that it imports passes too.
+// It lists two files of declarations: the core's, `../core/tsconfig.core.d.ts`
+// (what the core may use, so that a file that imports the core passes), and
+// the server's own, `tsconfig.server.d.ts` (what a file of the server uses
+// beyond that). So the guard refuses a module of Bun or of Node that no
+// declaration names, and passes what those declarations name, the core's
+// `node:crypto` too. What refuses each module of Bun or of Node in the
+// server's files is the list of built-ins of `tools/graph.ts` (`BUILTINS`),
+// which gives them none. The tests are checked with the Bun types, by
 // `tsconfig.test.json`.
 {
   "extends": "../../tsconfig.json",

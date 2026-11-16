@@ -230,6 +230,20 @@ test("check 7: nbf one second after now fails with 7; nbf at now passes", async 
   expect(await checkOf(await sign({ ...GOOD, nbf: null }), S * 1000)).toBe(7)
 })
 
+// The raw JSON of the claims of GOOD with `"nbf":<text>` added, as it is
+// written: `JSON.stringify` writes no number past the range of a double
+// (it gives `null` for -Infinity), so the text is put by hand.
+const withRawNbf = (text: string) => JSON.stringify(GOOD).slice(0, -1) + `,"nbf":${text}}`
+
+test("check 7: an nbf that is no whole number of seconds fails with 7 in each of its forms: -1e400 and 1e400 (raw JSON, out of a double's range), a fraction before now", async () => {
+  expect(JSON.parse(withRawNbf("-1e400")).nbf).toBe(Number.NEGATIVE_INFINITY)
+  expect(await checkOf(await sign(withRawNbf("-1e400")))).toBe(7)
+  expect(await checkOf(await sign(withRawNbf("1e400")))).toBe(7)
+  expect(await checkOf(await sign(withRawNbf(String(S - 1.5))))).toBe(7)
+  // The same raw form with a whole number before now passes.
+  expect(await verify(await sign(withRawNbf(String(S - 1))))).toEqual({ ok: GOOD })
+})
+
 // An nbf is whole seconds (lead, ec-cvi82): a fraction fails at any time.
 // NOW is half a second into the second S.
 

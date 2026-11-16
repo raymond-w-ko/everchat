@@ -518,6 +518,118 @@ test("a slow end gives the host's place back too, and the reasons are the closed
   expect([...REASONS]).toEqual(["slow", "token", "busy", "stop", "internal"])
 })
 
+// The rules that hold the counts and the order
+// --------------------------------------------
+
+const CHAT_2 = "22222222-2222-4222-8222-222222222222"
+
+test("letGo of one chat of a tenant leaves the tenant's other held chats in the registry", async () => {
+  const registry = makeRegistry(LIMITS)
+  const got = await run(Effect.gen(function*() {
+    const one = yield* registry.hold(TENANT_A, CHAT)
+    const two = yield* registry.hold(TENANT_A, CHAT_2)
+    yield* registry.letGo(one)
+    const found = registry.find(TENANT_A, CHAT_2)
+    // A hold of the other chat finds its channel, not a new one.
+    const again = yield* registry.hold(TENANT_A, CHAT_2)
+    return { gone: registry.find(TENANT_A, CHAT), found: found === two, again: again === two, holders: two.holders, channels: registry.size().channels }
+  }))
+  expect(got).toEqual({ gone: undefined, found: true, again: true, holders: 2, channels: 1 })
+})
+
+test("last never goes down by a give: a give of a number below last leaves last as it is, and one above it raises it", async () => {
+  const registry = makeRegistry(LIMITS)
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    yield* channel.give(event(5))
+    const atFive = channel.last
+    yield* channel.give(event(3))
+    const afterThree = channel.last
+    yield* channel.give(event(7))
+    return [atFive, afterThree, channel.last]
+  }))
+  expect(got).toEqual([5, 5, 7])
+})
+
+test("a second removeClient of one client takes the host's count down one time only, and keeps the first reason; so does a removeClient after a slow end", async () => {
+  const registry = makeRegistry({ ...LIMITS, buffer: 1 })
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const one = yield* channel.addClient(0)
+    yield* channel.addClient(0)
+    const slow = yield* joined(channel, 0)
+    const start = registry.size().clients
+    yield* channel.removeClient(one, "stop")
+    yield* channel.removeClient(one, "token")
+    const afterTwo = registry.size().clients
+    // The joined client ends as slow at its second entry; a removeClient after it counts nothing.
+    yield* channel.give(event(1))
+    yield* channel.give(event(2))
+    const afterSlow = registry.size().clients
+    yield* channel.removeClient(slow, "stop")
+    return { start, afterTwo, afterSlow, afterAll: registry.size().clients, members: channel.clients.length, one: one.ended, slow: slow.ended }
+  }))
+  expect(got).toEqual({ start: 3, afterTwo: 2, afterSlow: 1, afterAll: 1, members: 1, one: { reason: "stop" }, slow: { reason: "slow" } })
+})
+
+test("tell, giveTo and join on a client that ended: each says so, puts nothing into its buffer, and joins nothing, for a client that had joined and one that had not", async () => {
+  const registry = makeRegistry(LIMITS)
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const was = yield* joined(channel, 0)
+    const never = yield* channel.addClient(0)
+    yield* channel.removeClient(was, "stop")
+    yield* channel.removeClient(never, "stop")
+    const each = []
+    for (const client of [was, never]) {
+      each.push({
+        tell: yield* channel.tell(client, "{\"type\":\"ping\"}"),
+        giveTo: yield* channel.giveTo(client, [event(1), event(2)]),
+        join: yield* channel.join(client),
+        joined: client.joined,
+        size: client.size,
+        given: client.given,
+        taken: yield* client.take
+      })
+    }
+    return { each, clients: registry.size().clients }
+  }))
+  const end: Taken = { _tag: "End", reason: "stop" }
+  expect(got).toEqual({
+    each: [
+      { tell: "ended", giveTo: "ended", join: false, joined: true, size: { entries: 0, bytes: 0 }, given: 0, taken: end },
+      { tell: "ended", giveTo: "ended", join: false, joined: false, size: { entries: 0, bytes: 0 }, given: 0, taken: end }
+    ],
+    clients: 0
+  })
+})
+
+test("a reader that takes more than 1,024 entries from one buffer gets each, in order, with none twice: the buffer's compaction keeps each entry", async () => {
+  const registry = makeRegistry(LIMITS)
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const client = yield* joined(channel, 0)
+    const texts: Array<string> = []
+    const take = (count: number) =>
+      Effect.gen(function*() {
+        for (let k = 0; k < count; k++) {
+          const taken = yield* client.take
+          if (taken._tag === "Text") texts.push(taken.text)
+        }
+      })
+    // 3,000 entries, then 1,500 taken (the compaction runs past 1,024), then
+    // 2,000 more while 1,500 wait, then the rest.
+    for (let n = 1; n <= 3_000; n++) yield* channel.give(event(n))
+    yield* take(1_500)
+    for (let n = 3_001; n <= 5_000; n++) yield* channel.give(event(n))
+    yield* take(3_500)
+    return { numbers: numbers(texts), left: client.size, ended: client.ended }
+  }))
+  expect(got.numbers).toEqual(range(1, 5_000))
+  expect(got.left).toEqual({ entries: 0, bytes: 0 })
+  expect(got.ended).toBeNull()
+})
+
 // A reader's wait and the wake that it waits for
 // ----------------------------------------------
 //
