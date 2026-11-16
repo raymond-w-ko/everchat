@@ -3,7 +3,7 @@
 
 import { expect, test } from "bun:test"
 import { Database as Sqlite } from "bun:sqlite"
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, PICK, rows, withChats, withStore, write } from "../tests/help.ts"
@@ -1115,4 +1115,143 @@ test("addEvent: one interrupted at any point, with no transaction of the caller'
   expect(interrupted.filter((round) => round.seq === round.before + 1).length).toBeGreaterThan(0)
   expect(rounds.at(-1)).toMatchObject({ ended: true })
   expect(rounds.at(-1)!.seq).toBe(rounds.at(-1)!.before + 1)
+})
+
+// The events, read again
+// ----------------------
+
+// Writes `rounds` rounds of the five types of event through the store's own
+// members, each in the transaction of what it reports, as the turn loop
+// writes them: a turn starts, two messages of the person are accepted, a
+// program starts, a reply is in the log, and the turn ends. Five events
+// each round.
+const story = (store: typeof Store.Service, rounds: number) =>
+  Effect.gen(function*() {
+    for (let r = 1; r <= rounds; r++) {
+      const turn = yield* store.transaction(Effect.gen(function*() {
+        const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: yield* store.count })
+        yield* store.addEvent({ type: "start", turn: turn.id })
+        return turn.id
+      }))
+      yield* store.transaction(Effect.gen(function*() {
+        const said = yield* store.append([{ kind: "user", text: `one ${r}`, turn }, { kind: "user", text: `two ${r}`, turn }])
+        yield* store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[1]!.i })
+      }))
+      yield* store.transaction(Effect.gen(function*() {
+        const call = yield* store.startCall({ turn, vendorId: `v${r}`, fn: "run", input: `program ${r}` })
+        yield* store.addEvent({ type: "call", turn, call })
+      }))
+      yield* store.transaction(Effect.gen(function*() {
+        const [reply] = yield* store.append([{ kind: "asst", text: `reply ${r}`, turn }])
+        yield* store.addEvent({ type: "message", msg: reply!.i, msgLast: reply!.i })
+      }))
+      yield* store.transaction(Effect.andThen(store.endTurn(turn, r % 2 === 0 ? "failed" : "done", r % 2 === 0 ? `why ${r}` : null), store.addEvent({ type: "end", turn })))
+    }
+  })
+
+test("eventsAfter: the five types come back with what each reports, in the order of their numbers", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 2)
+    return { events: yield* store.eventsAfter(0, 1000), messages: yield* store.messages(0, 100) }
+  }))
+  const [m0, m1, m2, m3, m4, m5] = got.messages
+  expect(got.events).toEqual([
+    { type: "start", n: 1, turn: 1 },
+    { type: "accepted", n: 2, messages: [m0!, m1!] },
+    { type: "call", n: 3, turn: 1, call: 1, program: "program 1" },
+    { type: "message", n: 4, message: m2! },
+    { type: "end", n: 5, turn: 1, status: "done", why: null },
+    { type: "start", n: 6, turn: 2 },
+    { type: "accepted", n: 7, messages: [m3!, m4!] },
+    { type: "call", n: 8, turn: 2, call: 2, program: "program 2" },
+    { type: "message", n: 9, message: m5! },
+    { type: "end", n: 10, turn: 2, status: "failed", why: "why 2" }
+  ])
+  expect(got.messages.map((message) => message.text)).toEqual(["one 1", "two 1", "reply 1", "one 2", "two 2", "reply 2"])
+})
+
+test("eventsAfter: after the last event number gives none, and so does a number past it", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 1)
+    return { last: yield* store.eventsAfter(4, 1000), at: yield* store.eventsAfter(5, 1000), past: yield* store.eventsAfter(6, 1000) }
+  }))
+  expect(got.last.map((event) => event.n)).toEqual([5])
+  expect(got.at).toEqual([])
+  expect(got.past).toEqual([])
+})
+
+test("eventsAfter: limit cuts at exactly that count, and the next read from the last number continues with no gap and no repeat", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 3)
+    const whole = yield* store.eventsAfter(0, 1000)
+    const parts: Array<Array<number>> = []
+    const read: Array<unknown> = []
+    let after = 0
+    for (;;) {
+      const part = yield* store.eventsAfter(after, 4)
+      if (part.length === 0) break
+      parts.push(part.map((event) => event.n))
+      read.push(...part)
+      after = part.at(-1)!.n
+    }
+    return { whole, parts, read, one: yield* store.eventsAfter(7, 1) }
+  }))
+  expect(got.whole.map((event) => event.n)).toEqual(Array.from({ length: 15 }, (_, k) => k + 1))
+  expect(got.parts).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15]])
+  expect(got.read).toEqual(got.whole)
+  expect(got.one).toEqual([got.whole[7]!])
+})
+
+test("eventsAfter: an after or a limit out of its range is a defect that names the field, and the edges of each range pass", async () => {
+  const file = newFile()
+  const BAD = [0.5, -1, Number.NaN, 2 ** 53, Number.POSITIVE_INFINITY]
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 1)
+    const defect = (after: number, limit: number) =>
+      Effect.map(Effect.exit(store.eventsAfter(after, limit)), (exit) =>
+        Exit.isFailure(exit) && Cause.hasDies(exit.cause) && !Cause.hasFails(exit.cause) ? String(Cause.squash(exit.cause)) : "no defect")
+    return {
+      after: yield* Effect.forEach(BAD, (after) => defect(after, 10)),
+      limit: yield* Effect.forEach([...BAD, 0, 1001], (limit) => defect(0, limit)),
+      edges: [
+        (yield* store.eventsAfter(0, 1)).length,
+        (yield* store.eventsAfter(0, 1000)).length,
+        (yield* store.eventsAfter(Number.MAX_SAFE_INTEGER, 1000)).length
+      ]
+    }
+  }))
+  expect(got.after).toHaveLength(5)
+  expect(got.after.filter((text) => !/^Error: eventsAfter: after must be an integer from 0, and it is /.test(text))).toEqual([])
+  expect(got.limit).toHaveLength(7)
+  expect(got.limit.filter((text) => !/^Error: eventsAfter: limit must be an integer from 1 to 1000, and it is /.test(text))).toEqual([])
+  expect(got.edges).toEqual([1, 5, 0])
+})
+
+test("the chat's seq is 0 for a new chat, with no event to read, and then the count of its events, on the store and on the reads", async () => {
+  const file = newFile()
+  const fresh = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    return { seq: (yield* store.chat).seq, events: yield* store.eventsAfter(0, 1000) }
+  }))
+  expect(fresh).toEqual({ seq: 0, events: [] })
+  const written = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 2)
+    return { seq: (yield* store.chat).seq, last: (yield* store.eventsAfter(0, 1000)).at(-1)!.n }
+  }))
+  const reads = await withReads(file, Effect.gen(function*() {
+    const reads = yield* Reads
+    return (yield* reads.chat).seq
+  }))
+  const [count] = rows<{ n: number }>(file, "select count(*) as n from everchat_event")
+  expect(count!.n).toBe(10)
+  expect(written).toEqual({ seq: 10, last: 10 })
+  expect(reads).toBe(10)
 })

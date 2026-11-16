@@ -123,6 +123,7 @@ export interface Chat {
   readonly goal: string | null
   readonly draft: string | null
   readonly taken: number // the last message that a request has taken in
+  readonly seq: number // the chat's last event number; 0 with no event
   readonly created: number
   readonly updated: number
 }
@@ -190,6 +191,16 @@ export type NewEvent =
   | { readonly type: "accepted" | "message"; readonly msg: number; readonly msgLast: number } // the first and the last message
   | { readonly type: "start" | "end"; readonly turn: number }
   | { readonly type: "call"; readonly turn: number; readonly call: number } // a program starts
+
+// An event of the chat as a client reads it: its event number, and what it
+// reports. The turn loop publishes the same events (turn.ts, `TurnEvent`,
+// with the pieces), and `eventsAfter` reads them again from their rows.
+export type Event =
+  | { readonly type: "accepted"; readonly n: number; readonly messages: ReadonlyArray<Message> } // a message of the person is in the log
+  | { readonly type: "start"; readonly n: number; readonly turn: number }
+  | { readonly type: "call"; readonly n: number; readonly turn: number; readonly call: number; readonly program: string } // a program starts to run
+  | { readonly type: "message"; readonly n: number; readonly message: Message } // a reply, a program, a result, or a note is in the log
+  | { readonly type: "end"; readonly n: number; readonly turn: number; readonly status: "done" | "stopped" | "failed"; readonly why: string | null }
 
 // One turn, with its pick and its head as text.
 export interface Turn {
@@ -366,6 +377,14 @@ export interface Reading {
 
   // The chat's row.
   readonly chat: Effect.Effect<Chat, StoreError>
+
+  // The events, read again: those with an event number above `after`, in
+  // the order of their numbers, at most `limit`, each with what it reports
+  // as the turn loop published it. They and their messages are read on one
+  // state of the database. `after` is an integer from 0, and `limit` one
+  // from 1 to 1000; another value is a defect (the caller checks what comes
+  // from outside).
+  eventsAfter(after: number, limit: number): Effect.Effect<Array<Event>, StoreError>
 
   // The log. `messages` returns the ids from `from` up to, and not with,
   // `to`. `messagesAfter`: the messages of the given kinds after message

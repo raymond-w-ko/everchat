@@ -86,7 +86,7 @@ import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
 import { Sandbox } from "./sandbox.ts"
-import { type Call as CallRow, type Message, Store, StoreError, type Turn } from "./store.ts"
+import { type Call as CallRow, type Event, type Message, Store, StoreError, type Turn } from "./store.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "turn")
@@ -124,15 +124,12 @@ export const cutText = (why: string, functions: ReadonlyArray<CallRow>): string 
   return why + "\nThe functions that it called (result(id) gives a whole result):\n" + lines.join("\n")
 }
 
-// What the terminal shows as it happens. `n` is the event's number in its
-// chat, the `n` of its row; a piece has none.
+// What the terminal shows as it happens: the events (store.ts, `Event`),
+// each with its event number in its chat, the `n` of its row, and the
+// pieces, which have none.
 export type TurnEvent =
-  | { readonly type: "accepted"; readonly n: number; readonly messages: ReadonlyArray<Message> } // a message of the person is in the log
-  | { readonly type: "start"; readonly n: number; readonly turn: number }
+  | Event
   | { readonly type: "text" | "thought" | "program"; readonly turn: number; readonly delta: string }
-  | { readonly type: "call"; readonly n: number; readonly turn: number; readonly call: number; readonly program: string } // a program starts to run
-  | { readonly type: "message"; readonly n: number; readonly message: Message } // a reply, a program, a result, or a note is in the log
-  | { readonly type: "end"; readonly n: number; readonly turn: number; readonly status: "done" | "stopped" | "failed"; readonly why: string | null }
 
 // A turn's items as they are kept. A `turn` item also keeps the calls that
 // the wire read from the vendor's output, so that a restart does not have

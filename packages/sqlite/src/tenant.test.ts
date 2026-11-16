@@ -280,10 +280,17 @@ const tried = <A>(what: string, effect: Effect.Effect<A, unknown>, otherwise: A)
 // items in such a chat), a program and a function it calls, three messages (the first with images),
 // two rows of usage and a diagnostic, and three events, each in the
 // transaction of what it reports: the turn's start, its program's call,
-// and its messages accepted. Then the tree, the views and the chat's row.
-// The turns and calls of every side stay running. Each write
-// is tried: a failure gives the number that the write would have given.
+// and its messages accepted. Then one more turn: its start, a reply and
+// its `message` event, and, in a chat with no more turns than A (A's and
+// B's second), its end and its `end` event, so that A's chat has each type
+// of event. Then the tree, the views and the chat's row. The other turns,
+// and every call, stay running: so does each turn of B's chat and of A's
+// other chats with the number of A's ended turn, and the highest turn of
+// each, which A has not. Each write is tried: a failure gives the number
+// that the write would have given.
 const EVENTS_PER_TURN = 3
+const ends = (side: Side) => side.k <= A.k
+const eventsOf = (side: Side) => EVENTS_PER_TURN * side.k + 2 + (ends(side) ? 1 : 0)
 const fill = (store: StoreService, side: Side) =>
   Effect.gen(function*() {
     const { k, pick, tag } = side
@@ -343,6 +350,32 @@ const fill = (store: StoreService, side: Side) =>
         undefined
       )
       yield* tried(at("addDiagnostics", t), store.addDiagnostics([{ level: "info", source: tag, text: `${tag} diagnostic ${t}`, created: t }]), undefined)
+    }
+    const last = k + 1
+    const firstMsg = yield* tried(at("count", last), store.count, 3 * k)
+    const turn = yield* tried(
+      at("startTurn", last),
+      store.transaction(Effect.gen(function*() {
+        const turn = yield* store.startTurn({ pick, head: `{"${tag}":${last}}`, firstMsg })
+        yield* store.addEvent({ type: "start", turn: turn.id })
+        return turn.id
+      })),
+      last
+    )
+    yield* tried(
+      at("append", last),
+      store.transaction(Effect.gen(function*() {
+        const [said] = yield* store.append([{ kind: "asst", text: `${tag} answers ${last}`, turn }])
+        yield* store.addEvent({ type: "message", msg: said!.i, msgLast: said!.i })
+      })),
+      undefined
+    )
+    if (ends(side)) {
+      yield* tried(
+        at("endTurn", last),
+        store.transaction(Effect.andThen(store.endTurn(turn, "done", `${tag} why ${last}`), store.addEvent({ type: "end", turn }))),
+        0
+      )
     }
     yield* tried(`${tag} putNodes`, store.putNodes([
       ...Array.from({ length: 2 * k }, (_, i) => ({ l: 0, i, text: `${tag} node 0.${i}` })),
@@ -440,6 +473,15 @@ const READS: { readonly [K in keyof Reading]: (reads: Reading) => Calls } = {
   snapshot: (r) => [r.snapshot(Effect.all([r.count, r.messages(0, 100), r.turns(null, 100), r.launches(100)]))],
   version: (r) => [r.version],
   chat: (r) => [r.chat],
+  eventsAfter: (r) => [
+    r.eventsAfter(0, 1000),
+    r.eventsAfter(0, 1),
+    r.eventsAfter(2, 3),
+    r.eventsAfter(5, 1000),
+    r.eventsAfter(eventsOf(A), 10),
+    r.eventsAfter(1000, 1000),
+    r.snapshot(Effect.all([r.chat, r.eventsAfter(0, 1000)]))
+  ],
   count: (r) => [r.count],
   messages: (r) => [r.messages(0, 100), r.messages(2, 5), r.messages(5, 9)],
   messagesAfter: (r) => [r.messagesAfter(-1, KINDS), r.messagesAfter(2, ["user", "echo"]), r.messagesAfter(5, KINDS)],
@@ -522,6 +564,7 @@ const onlyOf = (file: string, other: string) => {
     head: top("everchat_head", "n"),
     usage: top("everchat_usage", "n"),
     log: top("everchat_log", "n"),
+    event: top("everchat_event", "n"),
     node: top("everchat_node", "i", "and l = 0"),
     node1: top("everchat_node", "i", "and l = 1")
   }
@@ -549,6 +592,7 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
   "usage of a turn": { member: "usage", want: "nothing", run: (s, b) => s.usage({ turn: b.turn }) },
   "usage of a node": { member: "usage", want: "nothing", run: (s, b) => s.usage({ node: [0, b.node] }) },
   "diagnostics after": { member: "diagnostics", want: "nothing", run: (s, b) => s.diagnostics(b.log - 1) },
+  "eventsAfter": { member: "eventsAfter", want: "nothing", run: (s, b) => s.eventsAfter(b.event - 1, 1000) },
   "endTurn": { member: "endTurn", want: "nothing", run: (s, b) => s.endTurn(b.turn, "done", "by A") },
   "endCall": { member: "endCall", want: "nothing", run: (s, b) => s.endCall(b.call, { status: "done", output: "by A" }) },
   "setCallPgid": { member: "setCallPgid", want: "nothing", run: (s, b) => s.setCallPgid(b.call, 4242) },
@@ -806,7 +850,7 @@ test("the file: each chat's events, written through the store, run from 1 to the
   ]
   for (const [file, chat, side] of sides) {
     const id = chatId(file, chat)
-    const count = EVENTS_PER_TURN * side.k
+    const count = eventsOf(side)
     const events = rows<{ n: number }>(file, `select n from everchat_event where chat = ${id} order by n`).map((row) => row.n)
     const [seq] = rows<{ seq: number }>(file, `select seq from everchat_chat where id = ${id}`)
     expect({ chat: side.tag, events, seq: seq?.seq }).toEqual({ chat: side.tag, events: range(1, count), seq: count })
@@ -979,7 +1023,7 @@ test("the tag: tenant A with the UUID of its second chat gets that chat and not 
   }))
   for (const side of [got.store, got.reads]) {
     expect(side.chat).toMatchObject({ uuid: both.a2, goal: "c goal", draft: "c draft", pick: A2.pick })
-    expect(side.messages).toHaveLength(3 * A2.k)
+    expect(side.messages).toHaveLength(3 * A2.k + 1)
     expect(side.messages.every((text) => text.startsWith("c "))).toBe(true)
   }
   expect(got.store.launch).toBe(A2.launches + 1)

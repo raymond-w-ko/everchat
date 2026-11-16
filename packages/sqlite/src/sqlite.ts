@@ -33,6 +33,7 @@ import {
   type CallEnd,
   Chats,
   DatabaseVersion,
+  type Event,
   Kind,
   KINDS,
   type Launch,
@@ -104,6 +105,7 @@ const ChatRow = Schema.Struct({
   goal: Schema.NullOr(Schema.String),
   draft: Schema.NullOr(Schema.String),
   taken: Schema.Int,
+  seq: Schema.Int,
   created: Schema.Int,
   updated: Schema.Int
 })
@@ -196,6 +198,19 @@ const LaunchRow = Schema.Struct({
 
 const LevelRow = Schema.Struct({ l: Schema.Int, built: Schema.Int })
 
+// An event's row, with the program of a `call` and the end of an `end`.
+const EventRow = Schema.Struct({
+  n: Schema.Int,
+  type: Schema.Literals(["accepted", "start", "call", "message", "end"]),
+  turn: Schema.NullOr(Schema.Int),
+  call: Schema.NullOr(Schema.Int),
+  msg: Schema.NullOr(Schema.Int),
+  msgLast: Schema.NullOr(Schema.Int),
+  program: Schema.NullOr(Schema.String),
+  status: Schema.NullOr(Schema.Literals(["running", "done", "stopped", "failed"])),
+  why: Schema.NullOr(Schema.String)
+})
+
 const DiagnosticRow = Schema.Struct({
   seq: Schema.Int,
   level: Schema.Literals(["debug", "info", "warn", "error"]),
@@ -210,6 +225,7 @@ const decodeUsage = Schema.decodeUnknownEffect(Schema.Array(UsageRow))
 const decodeUsageTotals = Schema.decodeUnknownEffect(Schema.Array(UsageTotalRow))
 const decodeLaunches = Schema.decodeUnknownEffect(Schema.Array(LaunchRow))
 const decodeLevels = Schema.decodeUnknownEffect(Schema.Array(LevelRow))
+const decodeEvents = Schema.decodeUnknownEffect(Schema.Array(EventRow))
 const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow))
 const decodeTurnItems = Schema.decodeUnknownEffect(Schema.Array(TurnItemRow))
 const decodeCalls = Schema.decodeUnknownEffect(Schema.Array(CallRow))
@@ -345,7 +361,7 @@ const CALL = "select n as id, turn, parent, vendor_id as vendorId, fn, input, ou
 const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading => {
   const chat = Effect.gen(function*() {
     const rows = yield* sql`
-      select c.uuid, p.vendor, p.model, p.effort, p.speed, c.goal, c.draft, c.taken, c.created, c.updated
+      select c.uuid, p.vendor, p.model, p.effort, p.speed, c.goal, c.draft, c.taken, c.seq, c.created, c.updated
       from everchat_chat c join everchat_pick p on p.id = c.pick
       where c.tenant = ${tenant} and c.id = ${id}`
     const row = yield* only(yield* decodeChats(rows))
@@ -354,6 +370,69 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
   }).pipe(failed("chat"), Effect.withSpan("Store.chat"))
 
   const count = nextMessage(sql, id).pipe(failed("count"), Effect.withSpan("Store.count"))
+
+  // The events after `after`, then the messages that they name, in one
+  // transaction: one state of the database, so that no event names a
+  // message that the answer lacks. A `call` takes its program from its
+  // call's row, an `end` its status and why from its turn's row (an ended
+  // turn's row does not change). Each join names the chat on both sides.
+  // A number given twice, or a row that lacks what its event reports, is a
+  // defect: a read that lost its chat's `=` could still give the right rows
+  // first, by the order of the file, and pass.
+  const eventsAfter = Effect.fn("Store.eventsAfter")(function*(after: number, limit: number) {
+    if (!Number.isSafeInteger(after) || after < 0) {
+      return yield* Effect.die(new Error(`eventsAfter: after must be an integer from 0, and it is ${after}`))
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      return yield* Effect.die(new Error(`eventsAfter: limit must be an integer from 1 to 1000, and it is ${limit}`))
+    }
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* decodeEvents(yield* sql`
+        select e.n, e.type, e.turn, e.call, e.msg, e.msg_last as msgLast, c.input as program, t.status, t.why
+        from everchat_event e
+        left join everchat_call c on c.chat = e.chat and c.n = e.call and e.type = 'call'
+        left join everchat_turn t on t.chat = e.chat and t.n = e.turn and e.type = 'end'
+        where e.chat = ${id} and e.n > ${after}
+        order by e.n
+        limit ${limit}`)
+      const named = rows.flatMap((row) => (row.msg === null || row.msgLast === null ? [] : [row.msg, row.msgLast]))
+      const low = Math.min(...named)
+      const high = Math.max(...named)
+      const found = named.length === 0 ? [] : (yield* decodeMessages(yield* sql`
+        select m.i, k.name as kind, m.text, m.size, m.more, m.line, m.turn, m.call, m.launch, m.created
+        from everchat_msg m join everchat_kind k on k.id = m.kind
+        where m.chat = ${id} and m.i >= ${low} and m.i <= ${high}
+        order by m.i`)).map((row): Message => ({ ...row, more: row.more === 1 }))
+      if (found.length !== (named.length === 0 ? 0 : high - low + 1) || found.some((message, k) => message.i !== low + k)) {
+        return yield* Effect.die(new Error(`the store expected the messages ${low} to ${high} once each, and got ${found.length}`))
+      }
+      const events: Array<Event> = []
+      for (const row of rows) {
+        const { msg, msgLast, n, turn } = row
+        const last = events.at(-1)?.n ?? after
+        const event: Event | null = n <= last
+          ? null
+          : (row.type === "accepted" || row.type === "message") && msg !== null && msgLast !== null
+          ? row.type === "accepted"
+            ? { type: "accepted", n, messages: found.slice(msg - low, msgLast - low + 1) }
+            : msg === msgLast
+            ? { type: "message", n, message: found[msg - low]! }
+            : null
+          : row.type === "start" && turn !== null
+          ? { type: "start", n, turn }
+          : row.type === "call" && turn !== null && row.call !== null && row.program !== null
+          ? { type: "call", n, turn, call: row.call, program: row.program }
+          : row.type === "end" && turn !== null && row.status !== null && row.status !== "running"
+          ? { type: "end", n, turn, status: row.status, why: row.why }
+          : null
+        if (event === null) {
+          return yield* Effect.die(new Error(`the store could not read the event ${n} (${row.type}) after ${last}`))
+        }
+        events.push(event)
+      }
+      return events
+    }))
+  }, failed("eventsAfter"))
 
   const messages = Effect.fn("Store.messages")(function*(from: number, to: number) {
     const rows = yield* sql`
@@ -534,6 +613,7 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     snapshot,
     version,
     chat,
+    eventsAfter,
     count,
     messages,
     messagesAfter,

@@ -280,6 +280,36 @@ test("each event but a piece has its row and its number, 1, 2, 3 with no gap: th
   assert.deepStrictEqual(reported(again), events(cut).slice(6))
 })
 
+test("the store reads the events again as a listener got them: the five types, number for number and field for field, also in two parts", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "return 1 + 1") : says(asked, "Two.")))
+  const got = await withTurns(
+    file,
+    wire,
+    () => Effect.succeed({ output: "2", failed: false }),
+    Effect.scoped(Effect.gen(function*() {
+      const turnsService = yield* Turns
+      const subscription = yield* turnsService.subscribe
+      yield* turnsService.say("add one and one")
+      yield* eventually(() => wire.sent.length === 2)
+      yield* turnsService.idle
+      const seen = yield* PubSub.takeAll(subscription)
+      const store = yield* Store
+      const read = yield* store.eventsAfter(0, 1000)
+      const first = yield* store.eventsAfter(0, 3)
+      const rest = yield* store.eventsAfter(first.at(-1)!.n, 1000)
+      return { seen, read, first, rest }
+    }))
+  )
+  // The events that the listener got, without the pieces.
+  const numbered = got.seen.filter((event) => event.type !== "text" && event.type !== "thought" && event.type !== "program")
+  assert.deepStrictEqual([...new Set(numbered.map((event) => event.type))].sort(), ["accepted", "call", "end", "message", "start"])
+  assert.deepStrictEqual(got.read, numbered)
+  assert.deepStrictEqual(got.read.map((event) => event.n), Array.from({ length: numbered.length }, (_, k) => k + 1))
+  assert.equal(got.first.length, 3)
+  assert.deepStrictEqual([...got.first, ...got.rest], numbered)
+})
+
 test("a listener gets the events in the order of their numbers: a message of the person that comes while a step writes its messages", async () => {
   const file = newFile()
   const wire = fakeWire((asked, n) => says(asked, "Reply " + n + "."))
