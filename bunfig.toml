@@ -2,3 +2,4 @@
 # run of the new code. To run them: `cd ref && just test`.
 [test]
 pathIgnorePatterns = ["ref/**"]
+preload = ["./tools/tmproot.ts"]
