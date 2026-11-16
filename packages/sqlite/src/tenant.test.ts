@@ -1,17 +1,24 @@
 // The test of two tenants (docs/schema.html, section 1, "The tenant
 // boundary"): on the code's own file, no member of the store reaches a row
 // of another chat. One database holds tenant A and tenant B, a chat of
-// B, two chats of A (the chat under test, and a second one), a second chat
-// of B made after the chat under test, and rows of each chat in every
-// table of a chat, its events too, written through the store; B has more
-// rows than A in each, so B has row numbers that A does not have. A launch of B and a launch of A's
-// second chat are live while every case runs, on the host of A's launch,
-// with the number that A's launch takes.
+// B, three chats of A (a second one made before the chat under test, the
+// chat under test, and a third one made after it), a second chat of B made
+// after the chat under test, and rows of each chat in every table of a
+// chat, its events too, written through the store; B has more rows than A
+// in each, so B has row numbers that A does not have, and so has A's third
+// chat. A launch of B, one of A's second chat and one of A's third chat are
+// live while every case runs, on the host of A's launch, with the number
+// that A's launch takes.
 //
-// "Another chat" is B's chat and A's second chat alike: the test catches a
+// "Another chat" is B's chat and A's other chats alike: the test catches a
 // statement that has no condition on its chat (B shows it), one that
-// reaches every chat of its tenant (A's second chat shows it), and one that
-// takes the chats from A's on (`chat >=`: B's second chat shows it).
+// reaches every chat of its tenant (A's second chat shows it), one that
+// takes the chats from A's on (`chat >=`: B's second chat and A's third
+// show it), and one that takes the chats up to A's (`chat <=`: B's and A's
+// second show it). A's third chat shows a statement on the chat's table
+// that keeps its tenant and takes its tenant's chats from A's on (`id >=`
+// in place of `id =`): it would give A's third chat A's `seq` and
+// `updated`, or give A's read two rows, which `only` refuses.
 //
 // - Reads: each member of `Reading`, on A's store and on A's reads, gives
 //   the same answer with B's rows there as on a file that has only A's.
@@ -92,6 +99,18 @@ const A2: Side = {
   launches: 3
 }
 
+// The third chat of tenant A: made after the chat under test, with its own
+// tag, pick, launch and count of turns, the most of any side, so that its
+// rows go past A's in every table, and its `seq` is no other chat's.
+const A3: Side = {
+  tenant: TENANT_A,
+  tag: "e",
+  pick: { vendor: "openai", model: "model-e", effort: "high", speed: "slow" },
+  launch: { ...options().launch, host: "host-e", cwd: "/e", runTag: "tag-e" },
+  k: 5,
+  launches: 3
+}
+
 // The second chat of tenant B: made after the chat under test, so that A's
 // chat is not the last of the file.
 const B2: Side = {
@@ -103,13 +122,14 @@ const B2: Side = {
   launches: 1
 }
 
-// The processes of the live launches of B and of A's second chat, which run
-// (`ALIVE`), and the process of a launch of A that a crash left, which does
-// not run.
+// The processes of the live launches of B, of A's second chat and of A's
+// third, which run (`ALIVE`), and the process of a launch of A that a crash
+// left, which does not run.
 const LIVE_PID = process.pid + 100_000
 const DEAD_PID = process.pid + 100_001
 const LIVE_PID_A2 = process.pid + 100_002
-const ALIVE = (pid: number) => pid === LIVE_PID || pid === LIVE_PID_A2
+const LIVE_PID_A3 = process.pid + 100_003
+const ALIVE = (pid: number) => pid === LIVE_PID || pid === LIVE_PID_A2 || pid === LIVE_PID_A3
 
 const KINDS: ReadonlyArray<Kind> = ["user", "asst", "tool", "echo", "work", "note"]
 
@@ -181,8 +201,9 @@ const chatId = (file: string, uuid: string) => {
 }
 
 // Every row of the file that is not of A's chat (the UUID `a`): the rows of
-// B's chats and of A's second chat in each table of a chat, their rows of
-// `everchat_chat` (their `seq` too), and B's tenant.
+// B's chats and of A's second and third chats in each table of a chat,
+// their rows of `everchat_chat` (their `seq` and `updated` too), and B's
+// tenant.
 const notA = (file: string, a: string) => {
   const id = chatId(file, a)
   const db = new Sqlite(file, { readonly: true })
@@ -254,12 +275,13 @@ const tried = <A>(what: string, effect: Effect.Effect<A, unknown>, otherwise: A)
     return otherwise
   })
 
-// The rows of one side. Each turn: an image, a turn with two items, a
-// program and a function it calls, three messages (the first with images),
+// The rows of one side. Each turn: an image, a turn with two items (three
+// for a side with more turns than A, so that a turn of A's number has more
+// items in such a chat), a program and a function it calls, three messages (the first with images),
 // two rows of usage and a diagnostic, and three events, each in the
 // transaction of what it reports: the turn's start, its program's call,
 // and its messages accepted. Then the tree, the views and the chat's row.
-// The turns and calls of B and of A's second chat stay running. Each write
+// The turns and calls of every side stay running. Each write
 // is tried: a failure gives the number that the write would have given.
 const EVENTS_PER_TURN = 3
 const fill = (store: StoreService, side: Side) =>
@@ -287,6 +309,7 @@ const fill = (store: StoreService, side: Side) =>
       )
       yield* tried(at("addTurnItem", t), store.addTurnItem(turn, "user", `${tag} item ${t}.0`), 0)
       yield* tried(at("addTurnItem", t), store.addTurnItem(turn, "turn", `${tag} item ${t}.1`), 1)
+      if (k > A.k) yield* tried(at("addTurnItem", t), store.addTurnItem(turn, "back", `${tag} item ${t}.2`), 2)
       const program = yield* tried(
         at("startCall", t),
         store.transaction(Effect.gen(function*() {
@@ -349,16 +372,18 @@ const build = async (file: string, side: Side) => {
 
 // The two files: `alone` has only A's rows; `both` has B's, made first (so
 // B's chat, B's picks and B's rows come first in each key), then those of
-// A's second chat, then A's, and then those of B's second chat.
+// A's second chat, then A's, then those of A's third chat, and then those
+// of B's second chat.
 let alone: { readonly file: string; readonly a: string }
-let both: { readonly file: string; readonly a: string; readonly a2: string; readonly b: string; readonly b2: string }
+let both: { readonly file: string; readonly a: string; readonly a2: string; readonly a3: string; readonly b: string; readonly b2: string }
 
-// The launches of B and of A's second chat that stay live: the last of
-// each, open again, straight in the file, on the host of A's launch and in
-// a process that runs (`ALIVE`). Their number is the one that A's launch
-// takes in a case (A's launches and one).
+// The launches of B, of A's second chat and of A's third that stay live:
+// the last of each, open again, straight in the file, on the host of A's
+// launch and in a process that runs (`ALIVE`). Their number is the one that
+// A's launch takes in a case (A's launches and one).
 const B_LIVE = B.launches
 const A2_LIVE = A2.launches
+const A3_LIVE = A3.launches
 const liven = (file: string, chat: string, pid: number, n: number) => {
   const db = new Sqlite(file)
   try {
@@ -368,16 +393,17 @@ const liven = (file: string, chat: string, pid: number, n: number) => {
   }
 }
 
-// The two live launches of `file`, as they must stay.
+// The three live launches of `file`, as they must stay.
 const LIVE = () => [
   { chat: both.b, n: B_LIVE, pid: LIVE_PID, host: A.launch.host, ended: null, why: null },
-  { chat: both.a2, n: A2_LIVE, pid: LIVE_PID_A2, host: A.launch.host, ended: null, why: null }
+  { chat: both.a2, n: A2_LIVE, pid: LIVE_PID_A2, host: A.launch.host, ended: null, why: null },
+  { chat: both.a3, n: A3_LIVE, pid: LIVE_PID_A3, host: A.launch.host, ended: null, why: null }
 ]
 const live = (file: string) =>
-  [both.b, both.a2].flatMap((chat) =>
+  ([[both.b, B_LIVE], [both.a2, A2_LIVE], [both.a3, A3_LIVE]] as const).flatMap(([chat, n]) =>
     rows<{ n: number; pid: number; host: string; ended: number | null; why: string | null }>(
       file,
-      `select n, pid, host, ended, why from everchat_launch where chat = ${chatId(file, chat)} and n = ${chat === both.b ? B_LIVE : A2_LIVE}`
+      `select n, pid, host, ended, why from everchat_launch where chat = ${chatId(file, chat)} and n = ${n}`
     ).map((row) => ({ chat, ...row }))
   )
 
@@ -390,9 +416,11 @@ beforeAll(async () => {
     const b = await build(two, B)
     const a2 = await build(two, A2)
     const a = await build(two, A)
-    both = { file: two, b, a2, a, b2: await build(two, B2) }
+    const a3 = await build(two, A3)
+    both = { file: two, b, a2, a, a3, b2: await build(two, B2) }
     liven(two, b, LIVE_PID, B_LIVE)
     liven(two, a2, LIVE_PID_A2, A2_LIVE)
+    liven(two, a3, LIVE_PID_A3, A3_LIVE)
   } catch (error) {
     failures.push(`the building: ${String(error)}`)
   }
@@ -464,8 +492,9 @@ for (const member of Object.keys(READS) as Array<keyof Reading>) {
     // None of the text of the other chats, nor their UUIDs, is in it.
     expect(two).not.toContain(both.b)
     expect(two).not.toContain(both.a2)
+    expect(two).not.toContain(both.a3)
     expect(two).not.toContain(both.b2)
-    expect(two).not.toMatch(/"[bcd] [a-z]|\{\\"[bcd]\\"|model-[bcd]|host-[bcd]|tag-[bcd]|"\/[bcd]"|[bcd] goal|[bcd] draft/)
+    expect(two).not.toMatch(/"[bcde] [a-z]|\{\\"[bcde]\\"|model-[bcde]|host-[bcde]|tag-[bcde]|"\/[bcde]"|[bcde] goal|[bcde] draft/)
   })
 }
 
@@ -552,8 +581,9 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
 const nothing = (value: unknown) =>
   value === undefined || (Array.isArray(value) && value.length === 0) || (Option.isOption(value) && Option.isNone(value))
 
-// The other chats: B's (of another tenant), and A's second (of A's tenant).
-const OTHERS = { "B": () => both.b, "A's second chat": () => both.a2 } as const
+// The other chats: B's (of another tenant), and A's second and third (of
+// A's tenant, made before A's chat and after it).
+const OTHERS = { "B": () => both.b, "A's second chat": () => both.a2, "A's third chat": () => both.a3 } as const
 
 for (const [other, uuid] of Object.entries(OTHERS)) {
   for (const [name, { run: call, want }] of Object.entries(ROWS)) {
@@ -582,9 +612,10 @@ for (const [other, uuid] of Object.entries(OTHERS)) {
 
 type Write = Exclude<keyof StoreService, keyof Reading>
 
-// The calls of each write member, with A's numbers, which B and A's second
-// chat have too, and with the names and the texts of the rows of B and of
-// A's second chat.
+// The calls of each write member, with A's numbers, which the other chats
+// have too, and with the names and the texts of the rows of the other
+// chats: of those made before A's (B's, A's second) and after it (A's
+// third, B's second).
 const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
   launch: (s) => [Effect.sync(() => s.launch)],
   transaction: (s) => [
@@ -607,9 +638,18 @@ const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
     s.putImage({ name: "b image 3", type: "image/png", width: 9, height: 9, source: "tool", bytes: new Uint8Array([9]) }),
     s.putImage({ name: "b image 1", type: "image/png", width: 9, height: 9, source: "tool", bytes: new Uint8Array([9]) }),
     s.putImage({ name: "c image 4", type: "image/png", width: 8, height: 8, source: "person", bytes: new Uint8Array([8]) }),
-    s.putImage({ name: "c image 1", type: "image/png", width: 8, height: 8, source: "person", bytes: new Uint8Array([8]) })
+    s.putImage({ name: "c image 1", type: "image/png", width: 8, height: 8, source: "person", bytes: new Uint8Array([8]) }),
+    s.putImage({ name: "e image 5", type: "image/png", width: 7, height: 7, source: "tool", bytes: new Uint8Array([7]) }),
+    s.putImage({ name: "d image 2", type: "image/png", width: 6, height: 6, source: "person", bytes: new Uint8Array([6]) })
   ],
-  putHead: (s) => [s.putHead("{\"b\":3}"), s.putHead("{\"b\":1}"), s.putHead("{\"c\":4}"), s.putHead("{\"c\":1}")],
+  putHead: (s) => [
+    s.putHead("{\"b\":3}"),
+    s.putHead("{\"b\":1}"),
+    s.putHead("{\"c\":4}"),
+    s.putHead("{\"c\":1}"),
+    s.putHead("{\"e\":5}"),
+    s.putHead("{\"d\":2}")
+  ],
   addUsage: (s) => [
     s.addUsage({ served: "turn", turn: 1, pick: A.pick, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 }),
     s.addUsage({ served: "compaction", node: [0, 2], pick: B.pick, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 })
@@ -656,7 +696,7 @@ for (const member of Object.keys(WRITES) as Array<Write>) {
     const before = notA(file, both.a)
     const two = await written(file, both.a, member)
     expect(notA(file, both.a)).toEqual(before)
-    // The live launches of B and of A's second chat are still live.
+    // The live launches of B and of A's other chats are still live.
     expect(live(file)).toEqual(LIVE())
     const one = await written(copy(alone.file), alone.a, member)
     expect(two).toEqual(one)
@@ -666,7 +706,7 @@ for (const member of Object.keys(WRITES) as Array<Write>) {
 // Launches
 // --------
 
-test("launches: A's store opens while a launch of B and one of A's second chat, with the same number, are live on A's host, and leaves them live", async () => {
+test("launches: A's store opens while a launch of B, one of A's second chat and one of its third, with the same number, are live on A's host, and leaves them live", async () => {
   const file = copy(both.file)
   const before = notA(file, both.a)
   expect(live(file)).toEqual(LIVE())
@@ -675,7 +715,7 @@ test("launches: A's store opens while a launch of B and one of A's second chat, 
     return store.launch.id
   }))
   // The same number as the live launches.
-  expect([launch, launch]).toEqual([B_LIVE, A2_LIVE])
+  expect([launch, launch, launch]).toEqual([B_LIVE, A2_LIVE, A3_LIVE])
   expect(live(file)).toEqual(LIVE())
   expect(notA(file, both.a)).toEqual(before)
   // A's launch ended with its scope.
@@ -704,11 +744,11 @@ const recovered = async (file: string, a: string) => {
   return { answers, rows: ofA(file, a) }
 }
 
-test("launches: a launch of A that a crash left is closed as a crash, and only it; the launches of B and of A's second chat with its number stay as they were", async () => {
+test("launches: a launch of A that a crash left is closed as a crash, and only it; the launches of B and of A's other chats with its number stay as they were", async () => {
   const file = copy(both.file)
-  // B and A's second chat each have a launch with the number of A's
-  // abandoned one.
-  for (const other of [both.b, both.a2]) {
+  // B and A's second and third chats each have a launch with the number of
+  // A's abandoned one.
+  for (const other of [both.b, both.a2, both.a3]) {
     expect(rows(file, `select n from everchat_launch where chat = ${chatId(file, other)} and n = ${A.launches}`)).toHaveLength(1)
   }
   abandon(file, both.a)
@@ -761,6 +801,7 @@ test("the file: each chat's events, written through the store, run from 1 to the
     [both.file, both.b, B],
     [both.file, both.a2, A2],
     [both.file, both.a, A],
+    [both.file, both.a3, A3],
     [both.file, both.b2, B2]
   ]
   for (const [file, chat, side] of sides) {
@@ -772,22 +813,27 @@ test("the file: each chat's events, written through the store, run from 1 to the
   }
 })
 
-test("the file: B has more rows than A in every table of a chat; A's second chat and B's second have rows in each; the launches of B and of A's second chat are live", () => {
+test("the file: B and A's third chat have more rows than A in every table of a chat; A's second chat and B's second have rows in each; each chat's seq is its own; the launches of B and of A's other chats are live", () => {
   const a = chatId(both.file, both.a)
   const b = chatId(both.file, both.b)
   const a2 = chatId(both.file, both.a2)
+  const a3 = chatId(both.file, both.a3)
   const b2 = chatId(both.file, both.b2)
-  // Four chats, two of each tenant: A's second made after B's and before
-  // A's, B's second after A's.
+  // Five chats: A's second made after B's and before A's, A's third after
+  // A's, B's second after A's third.
   expect(rows(both.file, "select id, lower(hex(tenant)) as tenant from everchat_chat order by id")).toEqual([
     { id: b, tenant: TENANT_B.replaceAll("-", "") },
     { id: a2, tenant: TENANT_A.replaceAll("-", "") },
     { id: a, tenant: TENANT_A.replaceAll("-", "") },
+    { id: a3, tenant: TENANT_A.replaceAll("-", "") },
     { id: b2, tenant: TENANT_B.replaceAll("-", "") }
   ])
-  expect(b < a2 && a2 < a && a < b2).toBe(true)
+  expect(b < a2 && a2 < a && a < a3 && a3 < b2).toBe(true)
+  // A's third chat's seq is no other chat's: a write of A's seq to it shows.
+  const seqs = rows<{ id: number; seq: number }>(both.file, "select id, seq from everchat_chat")
+  expect(seqs.filter((row) => row.id !== a3 && row.seq === seqs.find((other) => other.id === a3)!.seq)).toEqual([])
   for (const table of shape.ofChat) {
-    for (const [tag, id] of [["c", a2], ["d", b2]] as const) {
+    for (const [tag, id] of [["c", a2], ["e", a3], ["d", b2]] as const) {
       expect({ table, tag, some: rows<{ n: number }>(both.file, `select count(*) as n from ${table} where chat = ${id}`)[0]!.n > 0 }).toEqual({ table, tag, some: true })
     }
   }
@@ -797,14 +843,17 @@ test("the file: B has more rows than A in every table of a chat; A's second chat
   expect(rows(both.file, `select n, pid, host, ended from everchat_launch where chat = ${a2} and ended is null`)).toEqual([
     { n: A2_LIVE, pid: LIVE_PID_A2, host: A.launch.host, ended: null }
   ])
+  expect(rows(both.file, `select n, pid, host, ended from everchat_launch where chat = ${a3} and ended is null`)).toEqual([
+    { n: A3_LIVE, pid: LIVE_PID_A3, host: A.launch.host, ended: null }
+  ])
   expect(live(both.file)).toEqual(LIVE())
   expect(shape.ofChat.length).toBeGreaterThan(10)
   for (const table of shape.ofChat) {
-    const [counts] = rows<{ a: number; b: number }>(
+    const [counts] = rows<{ a: number; b: number; a3: number }>(
       both.file,
-      `select sum(chat = ${a}) as a, sum(chat = ${b}) as b from ${table}`
+      `select sum(chat = ${a}) as a, sum(chat = ${b}) as b, sum(chat = ${a3}) as a3 from ${table}`
     )
-    expect({ table, more: counts!.b > counts!.a, some: counts!.a > 0 }).toEqual({ table, more: true, some: true })
+    expect({ table, more: counts!.b > counts!.a, past: counts!.a3 > counts!.a, some: counts!.a > 0 }).toEqual({ table, more: true, past: true, some: true })
   }
   // The file of A alone has A's rows and no other chat.
   expect(rows(alone.file, "select count(*) as n from everchat_chat")).toEqual([{ n: 1 }])

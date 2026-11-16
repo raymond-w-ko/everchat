@@ -228,10 +228,16 @@ const KEYS_PER_QUERY = 10_000
 const failed = (op: string) => <A, E, R>(self: Effect.Effect<A, E, R>) =>
   Effect.mapError(self, (cause) => new StoreError({ op, cause }))
 
-// The one row of a query that must give one row.
+// The one row of a query that must give one row. None, or more than one, is
+// a defect: a read that lost its chat's `=` could still give the right row
+// first, by the order of the file, and pass.
 const only = <A>(rows: ReadonlyArray<A>): Effect.Effect<A> => {
   const row = rows[0]
-  return row === undefined ? Effect.die(new Error("the store expected one row and got none")) : Effect.succeed(row)
+  return row === undefined
+    ? Effect.die(new Error("the store expected one row and got none"))
+    : rows.length > 1
+    ? Effect.die(new Error(`the store expected one row and got ${rows.length}`))
+    : Effect.succeed(row)
 }
 
 // The chat

@@ -1059,3 +1059,60 @@ test("addEvent: a transaction that fails after addEvent leaves no row, and seq a
   expect(failed.status).toEqual(Option.some("running"))
   expect(eventRows(file).map((row) => row.n)).toEqual([1])
 })
+
+test("addEvent: one interrupted at any point, with no transaction of the caller's, leaves no row or its whole event; the chat's rows of everchat_event are its seq, and the next event takes seq + 1", async () => {
+  // addEvent is a transaction of its own: its row and the chat's new `seq`
+  // go together. Each round forks a new addEvent in a fiber that yields
+  // after every three operations (`MaxOpsBeforeYield` 3, the least that
+  // lets it run one), and interrupts it after `k` yields of this fiber, from
+  // 0 on: the rounds reach each of its yields (before its transaction,
+  // between its select, its insert and its update, at the commit and after
+  // it), until a round in which it ends before the interruption. The
+  // statements of bun:sqlite run in one operation, so the points are the
+  // same in each run. After each round a second connection reads the chat's
+  // events and its `seq`, and the next addEvent of this fiber takes
+  // `seq + 1`. Without its transaction, a round stops it between its
+  // insert and its update, and leaves the row `n` with `seq` at `n - 1`.
+  const file = newFile()
+  const rounds = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.append([{ kind: "user", text: "one" }])
+    const event = store.addEvent({ type: "message", msg: 0, msgLast: 0 })
+    const observer = new Sqlite(file, { readonly: true })
+    const state = () => ({
+      events: (observer.query("select n from everchat_event order by n").all() as Array<{ n: number }>).map((row) => row.n),
+      seq: (observer.query("select seq from everchat_chat").get() as { seq: number }).seq
+    })
+    const rounds: Array<{ k: number; ended: boolean; before: number; events: Array<number>; seq: number; next: number }> = []
+    try {
+      for (let k = 0; k < 1000; k++) {
+        const before = state().seq
+        const worker = yield* Effect.forkChild(event.pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, 3)))
+        for (let y = 0; y < k; y++) yield* Effect.yieldNow
+        yield* Fiber.interrupt(worker)
+        const exit = yield* Fiber.await(worker)
+        const after = state()
+        const next = yield* event
+        rounds.push({ k, ended: Exit.isSuccess(exit), before, ...after, next })
+        if (Exit.isSuccess(exit)) break
+      }
+    } finally {
+      observer.close()
+    }
+    return rounds
+  }))
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, k) => from + k)
+  // Each round: the events run from 1 to seq with no gap, the interrupted
+  // addEvent wrote its whole event or nothing, and the next one is seq + 1.
+  expect(rounds.filter((round) => round.events.join() !== range(1, round.seq).join() || round.seq - round.before > 1 || round.next !== round.seq + 1))
+    .toEqual([])
+  // The rounds reach both sides of the commit: the first stops it before
+  // its transaction, many stop it inside, which writes nothing, some stop
+  // it after its commit, and the last lets it end.
+  const interrupted = rounds.filter((round) => !round.ended)
+  expect(rounds[0]).toMatchObject({ ended: false, before: 0, seq: 0 })
+  expect(interrupted.filter((round) => round.seq === round.before).length).toBeGreaterThan(20)
+  expect(interrupted.filter((round) => round.seq === round.before + 1).length).toBeGreaterThan(0)
+  expect(rounds.at(-1)).toMatchObject({ ended: true })
+  expect(rounds.at(-1)!.seq).toBe(rounds.at(-1)!.before + 1)
+})
