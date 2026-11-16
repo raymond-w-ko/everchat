@@ -107,8 +107,9 @@ The rest:
 
 ## Checks
 
-- Full check: `just full`, about 70 s (68 s after the move into packages:
-  the same as before).
+- Full check: `just full`, about 150 s (near 60 s of it are the adopted
+  tests under `packages/codemode/tests/pi`; 228 s was measured once, on a
+  loaded machine).
 - Scoped check: `just scoped <test files>`, for the files of one change,
   with their paths from the root (for example
   `just scoped packages/core/src/memory.test.ts` or
@@ -166,12 +167,17 @@ How the factory runs a harness, and what it needs from one: `docs/factory.md`.
 Use a library instead of handwritten code where it does the job and does not
 take control that the memory needs:
 
-- `pi-codemode` (from the [pi libraries](https://github.com/earendil-works/pi),
-  `@earendil-works/pi-*` on npm) for code mode. It does not depend on `pi-ai`.
+- Code mode is EverChat's own code: the code of `pi-codemode` 1.5.2 (from the
+  [pi libraries](https://github.com/earendil-works/pi),
+  `@earendil-works/pi-*` on npm; MIT), adopted. The engine's part is in
+  `packages/codemode/src/pi`, the core's part in `packages/core/src/codemode`,
+  each with its notice `LICENSE.md`. Each change of it is listed in the notice
+  and gets one review from each vendor. A correction of upstream is merged by
+  hand: the notice says how to see them.
 - `pi-tui` for the terminal's screen and keys (see "The terminal and pipe
   mode" in `packages/local/AGENTS.md`).
 - `pi-schema` for JSON Schema that comes from outside (a provider's
-  definitions): `pi-codemode` does not check it [Q45].
+  definitions): the engine does not check it [Q45].
 - For MCP, the official SDK, not `pi-mcp` for now: `pi-mcp` speaks only an
   old version of the protocol [Q45].
 - Other pi packages where they fit. Check each one against our needs before
@@ -189,11 +195,11 @@ may import:
 
 | Package | Holds | May import |
 | --- | --- | --- |
-| `@everchat/core` | the memory, the turn loop, requests, the cache, the head, the tags of the seams | `effect`, `pi-codemode/declarations` |
+| `@everchat/core` | the memory, the turn loop, requests, the cache, the head, the tags of the seams | `effect` |
 | `@everchat/openai` | the wire for OpenAI; Anthropic's comes next to it | `core` (its requests) |
 | `@everchat/sqlite` | the store on SQLite: an entry each for Bun, Node and a Durable Object | `core` |
 | `@everchat/mariadb` | the store on MariaDB | `core`, `@effect/sql-mysql2` |
-| `@everchat/codemode` | the engine: in a worker thread, or in a separate Worker | `core`, `pi-codemode` |
+| `@everchat/codemode` | the engine: in a worker thread, or in a separate Worker | `core`, `quickjs-wasi` |
 | `@everchat/local` | the terminal, the shell, the files, the inspector, the executable | `core`, `openai`, `sqlite`, `codemode`, `pi-tui`, `@effect/platform-bun` |
 | `@everchat/server` | HTTP and WebSocket, the lease, the provider | `core`, `openai`, `mariadb`, `codemode` |
 | `@everchat/cloudflare` | the Durable Object of a chat | `core`, `openai`, `sqlite`, `codemode` |

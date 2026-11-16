@@ -1015,7 +1015,7 @@ from everchat_msg m join everchat_kind k on k.id = m.kind;</code></pre>
 <ul>
   <li>The hook before a tool runs <strong>for each shell command</strong>, not for the program around it. It runs in the <code>shell</code> function on the host side, before the command starts. The hook sees the command text.</li>
   <li>The hook after a tool runs <strong>after each program</strong>.</li>
-  <li>The sandbox must have no other way to start a process, and no way to type into a command that already runs. Without both, a command could pass the hook unseen. This is a condition on the code-mode design (how <code>pi-codemode</code> runs a program), not on the schema.</li>
+  <li>The sandbox must have no other way to start a process, and no way to type into a command that already runs. Without both, a command could pass the hook unseen. This is a condition on the code-mode design (how the engine (<code>packages/codemode</code>) runs a program), not on the schema.</li>
   <li>Each command's shell must be a direct child of the EverChat process, wherever the sandbox runs.</li>
 </ul>
 

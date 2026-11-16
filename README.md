@@ -43,3 +43,6 @@ License
 -------
 
 Apache-2.0 (LICENSE). Copyright 2026 Higher Order Company.
+
+`packages/codemode/src/pi` and `packages/core/src/codemode` hold code of
+`pi-codemode` (MIT; see the `LICENSE.md` there).
