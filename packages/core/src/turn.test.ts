@@ -310,6 +310,43 @@ test("the store reads the events again as a listener got them: the five types, n
   assert.deepStrictEqual([...got.first, ...got.rest], numbered)
 })
 
+test("a program and a turn's end with a lone surrogate: the listener gets the text that the store reads again, well-formed", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) =>
+    n === 1 ? runs(asked, "call_1", "p\ud800q") : n === 2 ? says(asked, "Done.") : wireError("input", { message: "bad \ud800 input" })
+  )
+  const ran: Array<string> = []
+  const got = await withTurns(
+    file,
+    wire,
+    (program) => Effect.sync(() => (ran.push(program), { output: "ok", failed: false })),
+    Effect.scoped(Effect.gen(function*() {
+      const turnsService = yield* Turns
+      const subscription = yield* turnsService.subscribe
+      yield* turnsService.say("run it")
+      yield* eventually(() => wire.sent.length === 2)
+      yield* turnsService.idle
+      yield* turnsService.say("again")
+      yield* turnsService.idle
+      const seen = yield* PubSub.takeAll(subscription)
+      const store = yield* Store
+      return { seen, read: yield* store.eventsAfter(0, 1000) }
+    }))
+  )
+  const numbered = got.seen.filter((event) => event.type !== "text" && event.type !== "thought" && event.type !== "program")
+  assert.deepStrictEqual(got.read, numbered)
+  const call = numbered.find((event) => event.type === "call")
+  const ends = numbered.filter((event) => event.type === "end")
+  assert.equal(call?.type === "call" && call.program, "p�q")
+  assert.deepStrictEqual(ends.map((event) => event.type === "end" && [event.status, event.why]), [["done", null], ["failed", "bad � input"]])
+  for (const event of [...numbered, ...got.read]) {
+    if (event.type === "call") assert.equal(event.program.isWellFormed(), true)
+    if (event.type === "end" && event.why !== null) assert.equal(event.why.isWellFormed(), true)
+  }
+  // The sandbox runs the program as the model gave it.
+  assert.deepStrictEqual(ran, ["p\ud800q"])
+})
+
 test("a listener gets the events in the order of their numbers: a message of the person that comes while a step writes its messages", async () => {
   const file = newFile()
   const wire = fakeWire((asked, n) => says(asked, "Reply " + n + "."))

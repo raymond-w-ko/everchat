@@ -279,7 +279,10 @@ export class Turns extends Context.Service<Turns, {
         })
 
         // A turn ends. One that did not end well leaves a note in the log.
-        const end = Effect.fnUntraced(function*(turn: Turn, status: "done" | "stopped" | "failed", why: string | null) {
+        // `why` is made well-formed once, so that the event holds the text
+        // that the row holds (the store makes it well-formed too).
+        const end = Effect.fnUntraced(function*(turn: Turn, status: "done" | "stopped" | "failed", given: string | null) {
+          const why = given === null ? null : given.toWellFormed()
           const note = status === "failed"
             ? "No reply: " + (why ?? "it failed").replace(/\.$/, "") + ". Send a message to try again."
             : status === "stopped"
@@ -296,12 +299,15 @@ export class Turns extends Context.Service<Turns, {
         const functionsOf = (turn: number, id: number) => Effect.map(store.calls(turn), (rows) => rows.filter((row) => row.parent === id))
 
         // One program of the model: its call is written when it starts, and
-        // its `tool` and `echo` when it ends.
+        // its `tool` and `echo` when it ends. The row and the event hold the
+        // program made well-formed once, the same text; the sandbox runs it as
+        // the model gave it.
         const program = Effect.fnUntraced(function*(turn: Turn, call: Call) {
+          const shown = call.input.toWellFormed()
           const id = yield* record(store.transaction(Effect.gen(function*() {
-            const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: call.input })
+            const id = yield* store.startCall({ turn: turn.id, vendorId: call.id, fn: call.name, input: shown })
             const n = yield* store.addEvent({ type: "call", turn: turn.id, call: id })
-            return [id, [{ type: "call", n, turn: turn.id, call: id, program: call.input }]] as const
+            return [id, [{ type: "call", n, turn: turn.id, call: id, program: shown }]] as const
           })))
           const close = (status: "done" | "failed" | "cut", output: string, text: string, bytes?: number) =>
             log(
