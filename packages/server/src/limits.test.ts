@@ -47,6 +47,7 @@ test("the defaults pass, and each is the page's number, times in milliseconds", 
     pageBytes: 2_097_152,
     room: 30_000,
     reads: 16,
+    readsWait: 30_000,
     request: 30_000,
     lock: 20_000,
     store: 5_000,
@@ -206,7 +207,7 @@ test("each field is a whole number from 1 to 2**31 - 1: 0, a fraction, NaN, 2**3
   expect(refused({ said: 1.5 })).toEqual({ limits: ["said"], rule })
   expect(refused({ reads: Number.NaN })).toEqual({ limits: ["reads"], rule })
   expect(refused({ history: 2 ** 31 })).toEqual({ limits: ["history"], rule })
-  expect(refused({ key: "128" })).toEqual({ limits: ["key"], rule })
+  expect(refused({ token: "4096" })).toEqual({ limits: ["token"], rule })
   expect(refused({ auth: -5_000 })).toEqual({ limits: ["auth"], rule })
   expect(refused({ events: Number.POSITIVE_INFINITY })).toEqual({ limits: ["events"], rule })
   expect(refused({ chats: undefined })).toEqual({ limits: ["chats"], rule })
@@ -215,10 +216,33 @@ test("each field is a whole number from 1 to 2**31 - 1: 0, a fraction, NaN, 2**3
   expect(used({ loaded: 1, hostClients: 2 ** 31 - 1 })).toEqual({ ...DEFAULTS, loaded: 1, hostClients: 2 ** 31 - 1 })
 })
 
+test("readsWait: 30,000 ms by default (the row `reads`: the next waits at most 30 s); a given wait is used, and is held to the range of the other waits", () => {
+  expect(DEFAULTS.readsWait).toBe(30_000)
+  expect(used({ readsWait: 1 })).toEqual({ ...DEFAULTS, readsWait: 1 })
+  expect(used({ readsWait: 2 ** 31 - 1 })).toEqual({ ...DEFAULTS, readsWait: 2 ** 31 - 1 })
+  const rule = "a whole number from 1 to 2147483647"
+  for (const value of [0, 2.5, 2 ** 31, "30000"]) {
+    expect(refused({ readsWait: value })).toEqual({ limits: ["readsWait"], rule })
+    expect(refused({ lockWait: value })).toEqual({ limits: ["lockWait"], rule })
+  }
+})
+
 test("hub: 65,536 passes, 65,537 is refused", () => {
   expect(used({ hub: 65_536 })).toEqual({ ...DEFAULTS, hub: 65_536 })
   expect(refused({ hub: 65_537 })).toEqual({ limits: ["hub"], rule: "a whole number from 1 to 65536" })
   expect(refused({ hub: 2 ** 31 - 1 })).toEqual({ limits: ["hub"], rule: "a whole number from 1 to 65536" })
+})
+
+test("key: a whole number from 1 to 128, the core's bound of a sender's key: 128 and 1 pass; 129, 0, 1.5, 2**31 - 1 and a text are refused by the field's own range; the relations keep their eight rows", () => {
+  expect(used({ key: 128 })).toEqual({ ...DEFAULTS, key: 128 })
+  expect(used({ key: 1 })).toEqual({ ...DEFAULTS, key: 1 })
+  const rule = "a whole number from 1 to 128"
+  for (const value of [129, 0, 1.5, 2 ** 31 - 1, "128"]) {
+    expect(refused({ key: value })).toEqual({ limits: ["key"], rule })
+  }
+  // The field's own check, not a ninth row of the relations.
+  expect(RELATIONS.length).toBe(8)
+  expect(RELATIONS.some((row) => row.limits.includes("key"))).toBe(false)
 })
 
 test("a name that is no limit is refused, also in an object that the type check did not see", () => {

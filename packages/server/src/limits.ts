@@ -9,7 +9,9 @@
 // One field for each row of the page's limits table. A row with a name in
 // `code` keeps it; a row with two numbers is two fields (`buffer` and
 // `bufferBytes`, `page` and `pageBytes`), so that the relations' errors say
-// `buffer` and `page`, as the page does. Each time is in milliseconds.
+// `buffer` and `page`, as the page does. The row `reads` is two fields too:
+// `reads`, the places, and `readsWait`, the longest wait for one (lead,
+// ec-jyjxm); no relation uses it. Each time is in milliseconds.
 //
 // | Field | Default | Unit | The page's row |
 // | --- | --- | --- | --- |
@@ -38,6 +40,7 @@
 // | `pageBytes` | 2,097,152 | bytes | `page`: a page of a read, in bytes of JSON |
 // | `room` | 30,000 | ms | room for a page in a first read's client's buffer |
 // | `reads` | 16 | reads | `reads`: first reads and reads of R5 at one time |
+// | `readsWait` | 30,000 | ms | `reads`: the longest wait for a place |
 // | `request` | 30,000 | ms | `request`: the whole life of a request that holds a place |
 // | `lock` | 20,000 | ms | `lock`: the work under a channel's lock |
 // | `store` | 5,000 | ms | `store`: one call of the store |
@@ -59,7 +62,11 @@
 //
 // Each field that the caller gives is read one time and never clamped: a
 // whole number from 1 to 2**31 - 1 (`hub`: to 65,536, since the turn loop's
-// hub allocates its whole capacity when it is made), else `LimitsRefused`.
+// hub allocates its whole capacity when it is made; `key`: to 128, the
+// core's bound of a sender's key, `SENDER_KEY` in packages/core/src/store.ts,
+// since a longer key would pass the host's check and the core would refuse
+// it in the store, which unloads the chat and stops a turn that runs), else
+// `LimitsRefused`.
 // So is a name that is no limit, also in an object that the type check did
 // not see. Then the relations of P3, in the page's order; the first that
 // fails is the error.
@@ -92,6 +99,7 @@ export interface Limits {
   readonly pageBytes: number
   readonly room: number
   readonly reads: number
+  readonly readsWait: number
   readonly request: number
   readonly lock: number
   readonly store: number
@@ -134,6 +142,7 @@ export const DEFAULTS: Limits = {
   pageBytes: 2 * 1024 * 1024,
   room: 30_000,
   reads: 16,
+  readsWait: 30_000,
   request: 30_000,
   lock: 20_000,
   store: 5_000,
@@ -155,9 +164,10 @@ export class LimitsRefused extends Schema.TaggedError<LimitsRefused>()("LimitsRe
   rule: Schema.String // the relation, as the page writes it
 }) {}
 
-// The range of each field, and the hub's own.
+// The range of each field, and the hub's and the key's own.
 const LARGEST = 2 ** 31 - 1
 const HUB = 65_536
+const KEY = 128
 
 // The sums (P1)
 // -------------
@@ -230,7 +240,7 @@ export const limits = (given?: Partial<Limits>): Effect.Effect<Limits, LimitsRef
       if (!Object.hasOwn(DEFAULTS, name)) {
         return Effect.fail(new LimitsRefused({ limits: [name], rule: "no such limit" }))
       }
-      const most = name === "hub" ? HUB : LARGEST
+      const most = name === "hub" ? HUB : name === "key" ? KEY : LARGEST
       if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > most) {
         return Effect.fail(new LimitsRefused({ limits: [name], rule: "a whole number from 1 to " + most }))
       }

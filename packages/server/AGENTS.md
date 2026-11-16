@@ -10,8 +10,16 @@ The root `AGENTS.md` holds the rules for every file.
   and `serve`, the layer of its routes), `./token`
   (`packages/server/src/token.ts`: `makeToken` and `verifyToken`), and
   `./backend` (`packages/server/src/backend.ts`: `makeTenant`, `makeChat`,
-  and `makeToken` again). The entries are empty for now: the beads of the
-  host fill them.
+  and `makeToken` again). The `.` entry gives `Host` and `Host.layer`, with
+  the message in under a channel's lock; `serve`, the layer of the routes,
+  is not there yet.
+- The modules of the host's loaded chats and messages in, one line each:
+  - `packages/server/src/reads.ts`: the places of `reads`, and a client's
+    own first read with its join.
+  - `packages/server/src/loaded.ts`: the loader of a chat: its load, its
+    listener, its timer and its unload, and the bound of loaded chats.
+  - `packages/server/src/host.ts`: `Host` and its layer, the rate of
+    messages in, and a message in under the channel's lock.
 - The tests of one module sit next to it, in `packages/server/src/`.
 
 ## Its imports

@@ -391,6 +391,88 @@ test("waitForPage waits until the buffer has room for a page, and ends with fals
   expect(got).toEqual({ before: true, room: true, ended: false })
 })
 
+// The steps of the load and the unload
+// ------------------------------------
+
+test("listen sets last to the lowest given of the clients that joined, a client that has not joined does not count, with none it is the store's seq, and it may set last lower", async () => {
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(LIMITS).hold(TENANT_A, CHAT)
+    // With no `last`, a client with room joins at once, at its `given`.
+    const five = yield* joined(channel, 5)
+    const three = yield* joined(channel, 3)
+    const waiting = yield* channel.addClient(1)
+    const two = { value: yield* channel.listen(10), last: channel.last }
+    yield* channel.removeClient(five)
+    yield* channel.removeClient(three)
+    const none = { value: yield* channel.listen(10), last: channel.last }
+    yield* channel.give(event(12))
+    const raised = channel.last
+    const lower = { value: yield* channel.listen(7), last: channel.last }
+    return { two, none, raised, lower, waiting: waiting.joined }
+  }))
+  expect(got).toEqual({ two: { value: 3, last: 3 }, none: { value: 10, last: 10 }, raised: 12, lower: { value: 7, last: 7 }, waiting: false })
+})
+
+test("lowestGiven is the lowest given of the clients that joined, or null; a client that has not joined does not count", async () => {
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(LIMITS).hold(TENANT_A, CHAT)
+    const empty = yield* channel.lowestGiven
+    yield* channel.addClient(0)
+    const onlyWaiting = yield* channel.lowestGiven
+    yield* joined(channel, 7)
+    yield* joined(channel, 4)
+    return { empty, onlyWaiting, two: yield* channel.lowestGiven }
+  }))
+  expect(got).toEqual({ empty: null, onlyWaiting: null, two: 4 })
+})
+
+test("listen never sets last above the store's seq: one joined client above seq gives seq; one below and one above give the lower given", async () => {
+  const got = await run(Effect.gen(function*() {
+    const registry = makeRegistry(LIMITS)
+    const one = yield* registry.hold(TENANT_A, CHAT)
+    yield* joined(one, 1_000_000_000)
+    const alone = { value: yield* one.listen(10), last: one.last }
+    // Both join on a channel with no `last` yet.
+    const channel = yield* registry.hold(TENANT_B, CHAT)
+    const above = yield* joined(channel, 1_000_000_000)
+    const below = yield* joined(channel, 4)
+    const two = { value: yield* channel.listen(10), last: channel.last }
+    // The give skips the client above: it stays joined, with its `given`.
+    yield* channel.give(event(5))
+    return { alone, two, above: { given: above.given, joined: above.joined, ended: above.ended, buffered: above.size.entries }, below: below.given }
+  }))
+  expect(got).toEqual({
+    alone: { value: 10, last: 10 },
+    two: { value: 4, last: 4 },
+    above: { given: 1_000_000_000, joined: true, ended: null, buffered: 0 },
+    below: 5
+  })
+})
+
+test("cannotGive ends with internal each client that joined and whose given is below the number, sets last when higher, and leaves the others as they are", async () => {
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(LIMITS).hold(TENANT_A, CHAT)
+    const below = yield* joined(channel, 2)
+    const at = yield* joined(channel, 5)
+    const above = yield* joined(channel, 9)
+    const waiting = yield* channel.addClient(0)
+    yield* channel.cannotGive(5)
+    const first = { last: channel.last, ended: [below.ended, at.ended, above.ended, waiting.ended], clients: channel.clients.length }
+    yield* channel.cannotGive(3)
+    const second = { last: channel.last, clients: channel.clients.length }
+    // The next give reaches those left, after the number.
+    yield* channel.give(event(6))
+    return { first, second, at: (yield* drain(at)).texts.length, above: (yield* drain(above)).texts.length, waiting: waiting.size.entries }
+  }))
+  expect(got).toEqual({
+    first: { last: 5, ended: [{ reason: "internal" }, null, null, null], clients: 3 },
+    second: { last: 5, clients: 3 },
+    at: 1,
+    above: 0,
+    waiting: 0
+  })
+})
+
 // The bounds of clients
 // ---------------------
 

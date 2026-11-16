@@ -47,6 +47,13 @@
 // - `join(client)`: the client joins when its `given` is `last` or more (or
 //   the channel has no `last`), and its buffer has room for one entry of
 //   `entry` bytes and for one entry in count. Else it does not join.
+// - `listen(seq)`: the listener's start at a load; it sets `last` to the
+//   lower of `seq` and the lowest `given` of the clients that joined, or to
+//   `seq` with none. A client's `given` never raises `last` above `seq`.
+// - `lowestGiven`: that lowest `given`, or none: where an unload reads.
+// - `cannotGive(n)`: an event that cannot be given; each client that
+//   joined and whose `given` is below `n` ends with `internal`, and `last`
+//   becomes `n` when that is higher.
 //
 // A give, a piece and a frame never wait: a client with no room for its
 // entry ends as `slow` in the same step. Its buffer is freed, it leaves the
@@ -359,6 +366,52 @@ export class Channel<L = unknown> {
       }
       return "given"
     }))
+  }
+
+  // The listener's start (Load, step 3): with the chat's `seq` from the
+  // store, it sets `last` to the lower of `seq` and the lowest `given` of the
+  // clients that joined, or, with no client that joined, to `seq`, and gives
+  // it. It may set `last` lower than it was. A client's `given` begins at
+  // its `after`, which comes from outside the host with no upper bound, so
+  // it never raises `last` above `seq` (lead, ec-mhmpr, C): a client whose
+  // `given` is above `seq` stays a client and stays joined, gets no event at
+  // or below its `given` (the give skips it), and gets the events above it
+  // as the others do. A client that has not joined does not count: it reads
+  // on by itself, and the join's check covers it. One step, so no join falls
+  // between the choice and the set.
+  listen(seq: number): Effect.Effect<number> {
+    return this.step(Effect.sync(() => {
+      const lowest = this.lowestJoined()
+      this.latest = lowest === null ? seq : Math.min(lowest, seq)
+      return this.latest
+    }))
+  }
+
+  // The lowest `given` of the clients that joined, or `null` with none: the
+  // unload's read starts there (Unload, step 2).
+  get lowestGiven(): Effect.Effect<number | null> {
+    return this.step(Effect.sync(() => this.lowestJoined()))
+  }
+
+  // An event that cannot be given, by its number `n` (section 8, S2): each
+  // client that joined and whose `given` is below `n` ends with `internal`,
+  // and `last` is set to `n` when that is higher. Every other client that
+  // joined needs nothing up to `n`, so a read goes on after it.
+  cannotGive(n: number): Effect.Effect<void> {
+    return this.step(Effect.sync(() => {
+      for (const client of this.members) {
+        if (client.joined && client.given < n) this.end(client, "internal")
+      }
+      if (this.latest === null || n > this.latest) this.latest = n
+    }))
+  }
+
+  private lowestJoined(): number | null {
+    let lowest: number | null = null
+    for (const client of this.members) {
+      if (client.joined && (lowest === null || client.given < lowest)) lowest = client.given
+    }
+    return lowest
   }
 
   // The join's check (above): `true` when the client joined.
