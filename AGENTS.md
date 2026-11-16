@@ -234,7 +234,7 @@ config file by hand, and the program only reads it. Do not keep state in
 other files, in other directories, or only in memory, unless you write down
 why.
 
-The schema (the rest of its rules: `packages/sqlite/AGENTS.md`):
+The schema (the rest of its rules: `docs/schema.html`; the SQLite file: `packages/sqlite/AGENTS.md`):
 
 - Design the schema before the code that uses it. Each table has a written
   purpose, and each schema change is designed and tested.
