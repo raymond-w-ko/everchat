@@ -498,9 +498,9 @@ const READS: { readonly [K in keyof Reading]: (reads: Reading) => Calls } = {
     r.snapshot(Effect.all([r.chat, r.eventsAfter(0, 1000)]))
   ],
   count: (r) => [r.count],
-  messages: (r) => [r.messages(0, 100), r.messages(2, 5), r.messages(5, 9)],
+  messages: (r) => [r.messages(0, 100), r.messages(2, 5), r.messages(5, 9), r.messages(9, 13)],
   messagesAfter: (r) => [r.messagesAfter(-1, KINDS), r.messagesAfter(2, ["user", "echo"]), r.messagesAfter(5, KINDS)],
-  imagesOf: (r) => range(0, 9).map((i) => r.imagesOf(i)),
+  imagesOf: (r) => range(0, 12).map((i) => r.imagesOf(i)),
   keyed: (r) => ["key-1", "key-2", "key-3", "key-5", "KEY-1", "key-none"].map((key) => r.keyed(key)),
   node: (r) => [...range(0, 6).map((i) => r.node(0, i)), ...range(0, 3).map((i) => r.node(1, i))],
   nodes: (r) => [r.nodes([...range(0, 6).map((i): [number, number] => [0, i]), ...range(0, 3).map((i): [number, number] => [1, i])]), r.nodes([])],

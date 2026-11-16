@@ -1380,6 +1380,68 @@ test("keyed: an update of a message's key is refused by the table", async () => 
   expect(rows(file, "select sender_key from everchat_msg")).toEqual([{ sender_key: "key-fixed" }])
 })
 
+test("keyed: a keyed append after an append that ended with more 1 fails with StoreError and writes nothing; the same append with no key passes, and a key after the message's last page passes", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.append([{ kind: "user", text: "page one", more: true }])
+    const before = counts(file)
+    const keyed = yield* Effect.flip(keyedSay(store, ["not a start"], "key-continued"))
+    const alone = yield* Effect.flip(store.append([{ kind: "user", text: "not a start" }], "key-continued"))
+    const after = counts(file)
+    const plain = yield* store.append([{ kind: "user", text: "page two" }])
+    const later = yield* keyedSay(store, ["a start"], "key-continued")
+    return { before, keyed, alone, after, plain, later, found: yield* store.keyed("key-continued") }
+  }))
+  for (const error of [got.keyed, got.alone]) {
+    expect(error).toBeInstanceOf(StoreError)
+    expect([(error as StoreError).op, String((error as StoreError).cause)]).toEqual(["append", "Error: the sender's key is not at a message's start"])
+  }
+  expect(got.before).toEqual({ messages: 1, events: 0, seq: 0 })
+  expect(got.after).toEqual(got.before)
+  expect(got.plain.map((message) => [message.i, message.text, message.more])).toEqual([[1, "page two", false]])
+  expect(got.later).toBe(1)
+  expect(Option.map(got.found, (one) => [one.messages.map((page) => [page.i, page.text]), one.accepted])).toEqual(Option.some([[[2, "a start"]], 1]))
+  expect(rows(file, "select i, more, sender_key from everchat_msg order by i")).toEqual([
+    { i: 0, more: 1, sender_key: null },
+    { i: 1, more: 0, sender_key: null },
+    { i: 2, more: 0, sender_key: "key-continued" }
+  ])
+})
+
+test("keyed: an event of another type whose msg is the keyed message's first page is not its accepted: keyed gives the accepted number", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const accepted = yield* keyedSay(store, ["the message", "its second page"], "key-typed")
+    const other = yield* store.addEvent({ type: "message", msg: 0, msgLast: 1 })
+    return { accepted, other, keyed: yield* store.keyed("key-typed") }
+  }))
+  expect([got.accepted, got.other]).toEqual([1, 2])
+  expect(rows(file, "select n, type, msg from everchat_event order by n")).toEqual([{ n: 1, type: "accepted", msg: 0 }, { n: 2, type: "message", msg: 0 }])
+  expect(Option.map(got.keyed, (one) => one.accepted)).toEqual(Option.some(1))
+})
+
+// `only` (sqlite.ts): a statement that must give one row and gives two is a
+// defect, whose message holds the count. The file's guards give no such
+// rows, so the test drops one in its own file: the unique index of the
+// key (chat, sender_key). A second keyed append then writes the key again,
+// and the first statement of `keyed` gives two rows.
+test("keyed: a statement that must give one row and gives two is a defect with the count: with the key's unique index dropped in the test's file, a second message with the key makes keyed die", async () => {
+  const file = newFile()
+  await withStore(file, Store.use((store) => keyedSay(store, ["first"], "key-two-rows")))
+  write(file, "drop index everchat_msg_sender_key")
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* keyedSay(store, ["second"], "key-two-rows")
+    return yield* Effect.exit(store.keyed("key-two-rows"))
+  }))
+  expect(rows(file, "select i from everchat_msg where sender_key = 'key-two-rows' order by i")).toEqual([{ i: 0 }, { i: 1 }])
+  expect(Exit.isFailure(got) && Cause.hasDies(got.cause) && !Cause.hasFails(got.cause) ? String(Cause.squash(got.cause)) : "no defect").toBe(
+    "Error: the store expected one row and got 2"
+  )
+})
+
 // The limit store
 // ---------------
 // Each call of the store ends, done or with `StoreError`, within the limit

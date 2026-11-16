@@ -17,7 +17,12 @@
 //   `accepted` number, and nothing else (`Sent`, `repeat`). Its text is not
 //   compared. The key is read under the loop's `lock`, so two messages of
 //   one key in one process log one; the store's index is the wall between
-//   two processes (store.ts, `append`).
+//   two processes (store.ts, `append`). A key of another form (store.ts,
+//   `SENDER_KEY`) is refused before any read or write, with the store's
+//   own `StoreError`: that `say` alone fails, and the next one is logged.
+//   A write that the store refuses still stops the chat's memory for good
+//   (a key that a second process wrote first); its owner makes it again,
+//   as a host does with an unload and a load (docs/host.md, section 2).
 // - If a turn runs, the message steers it: the turn takes it in after the
 //   results of its present step. A message that comes too late for the turn
 //   starts the next turn.
@@ -93,7 +98,7 @@ import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
 import { Sandbox } from "./sandbox.ts"
-import { type Call as CallRow, type Event, type Message, Store, StoreError, type Turn } from "./store.ts"
+import { type Call as CallRow, type Event, type Message, SENDER_KEY, Store, StoreError, type Turn } from "./store.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "turn")
@@ -564,9 +569,13 @@ export class Turns extends Context.Service<Turns, {
 
         const say = (text: string, key?: string | null) =>
           lock.withPermits(1)(Effect.gen(function*() {
+            // A key of another form: refused here, before the store and the
+            // memory, with the error that the store's `append` gives for it;
+            // the store keeps its own check for every other caller.
+            if (key !== undefined && key !== null && !SENDER_KEY.test(key)) {
+              return yield* new StoreError({ op: "append", cause: new Error("the sender's key is not 1 to 128 bytes of visible ASCII") })
+            }
             // A key that the chat has: its first message, and nothing more.
-            // The store gives none for a key of another form, and refuses it
-            // below.
             if (key !== undefined && key !== null) {
               const known = Option.getOrNull(yield* store.keyed(key))
               if (known !== null) {

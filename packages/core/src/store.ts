@@ -410,7 +410,11 @@ export interface Reading {
 
   // The message of the key `key` in this chat (`append`), on one state of
   // the database; none when the chat has no message with this key. A key of
-  // another form is none too: no message has it.
+  // another form is none too: no message has it. A keyed message is written
+  // with its own `accepted` event, whose `msg` is its first page, in one
+  // transaction (as `Turns.say` does); on a chat that breaks this (no such
+  // event, or a keyed message with no last page), `keyed` dies: a defect of
+  // its writer, not a `StoreError`, since no input from outside reaches it.
   keyed(key: string): Effect.Effect<Option.Option<Keyed>, StoreError>
 
   // The tree. `nodesIn`: the nodes of level `l` from node `from` up to, and
@@ -480,8 +484,11 @@ export class Store extends Context.Service<Store, Reading & {
   // The log. `append` gives the messages the next ids, with no gap, and
   // returns them as written. `key`: the key of the sender of the message
   // that the first of them starts (SENDER_KEY), written on its row only. A
-  // key of another form, a key with no message, and a key that the chat
-  // has already fail, and nothing is written.
+  // key of another form, a key with no message, a key that the chat has
+  // already, and a key where the chat's last message continues (`more`: the
+  // first of them would not start a message) fail, and nothing is written.
+  // A keyed append goes with its own `accepted` event, whose `msg` is the
+  // first of them, in one transaction (`keyed`).
   append(messages: ReadonlyArray<NewMessage>, key?: string | null): Effect.Effect<Array<Message>, StoreError>
 
   // The tree. A node is written once: a second write of a node fails.

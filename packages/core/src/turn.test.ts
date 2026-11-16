@@ -698,6 +698,34 @@ test("a key of another form is the store's to refuse: its error reaches the call
   assert.equal(wire.sent.length, 0)
 })
 
+// `say` refuses a key of another form before the store and the memory
+// (lead, ec-p8n7o, 1): that say alone fails, and the memory goes on.
+test("after a refused key of another form, a say with no key logs its message and gives its accepted; the refused say wrote nothing", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  const got = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    const refused = yield* Effect.flip(turnsService.say("hello", "a key"))
+    const after = counts(file)
+    const sent = yield* turnsService.say("hello again")
+    const accepted = (yield* PubSub.takeUpTo(subscription, 10)).filter((event) => event.type === "accepted")
+    yield* turnsService.idle
+    return { refused, after, sent, accepted }
+  })))
+  assert.ok(got.refused instanceof StoreError)
+  assert.equal(got.refused.op, "append")
+  assert.equal(String(got.refused.cause), "Error: the sender's key is not 1 to 128 bytes of visible ASCII")
+  assert.deepStrictEqual(got.after, [{ msgs: 0, events: 0, turns: 0 }])
+  assert.equal(got.sent.repeat, false)
+  assert.deepStrictEqual(got.sent.messages.map((message) => [message.i, message.text]), [[0, "hello again"]])
+  assert.deepStrictEqual(got.accepted.map((event) => event.type === "accepted" ? [event.n, event.messages.map((message) => message.i)] : null), [[got.sent.accepted, [0]]])
+  // Message 0 is the say's; the turn's reply follows it.
+  assert.deepStrictEqual(rows(file, "select i, text, sender_key from everchat_msg where i = 0"), [{ i: 0, text: "hello again", sender_key: null }])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg where text = 'hello'"), [{ n: 0 }])
+  assert.deepStrictEqual(rows(file, "select n, type from everchat_event where n = " + got.sent.accepted), [{ n: got.sent.accepted, type: "accepted" }])
+})
+
 test("a message that is interrupted while its log writes is logged, its `start` is published, and its turn runs to its end", async () => {
   const file = newFile()
   const wire = fakeWire((asked) => says(asked, "Read."))

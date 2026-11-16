@@ -614,6 +614,22 @@ test("`pushWith` with a key writes it on the message's first page only; with non
   ])
 })
 
+// A write with a key and no message is no empty write: it goes to the store,
+// which refuses it, and the caller gets that failure (lead, ec-p8n7o, 3).
+test("`pushWith` with a key and no message reaches the store, which refuses it, and the caller gets the store's error", async () => {
+  const file = newFile()
+  let also = 0
+  const error = await withMemory(file, recorder().layer, Effect.gen(function*() {
+    const memory = yield* Memory
+    return yield* Effect.flip(memory.pushWith([], () => Effect.sync(() => (also += 1)), "key-1"))
+  }))
+  assert.ok(error instanceof StoreError)
+  assert.equal(error.op, "append")
+  assert.equal(String(error.cause), "Error: the sender's key has no message")
+  assert.equal(also, 0)
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg"), [{ n: 0 }])
+})
+
 // Alone 3,272 to 14,496 ms (median 8,016, 10 runs, load 30 to 40 on 30 cores).
 test("a restart loads the views as they were, never rebuilt, and asks again for a compaction that a stop cut", { timeout: 60_000 }, async () => {
   const file = newFile()

@@ -846,7 +846,10 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
   // write: a check in the table would need a pattern, which SQLite and
   // MariaDB write in two ways (docs/schema.html, everchat_msg). A key that
   // the chat has already is refused by the index (chat, sender_key), and
-  // the transaction takes back what it wrote.
+  // the transaction takes back what it wrote. A key goes only on a row that
+  // starts a message: when the chat's last row continues (`more` 1), a
+  // keyed append fails before its first insert (one read by the table's
+  // key); one with no key may continue that message.
   const append = Effect.fn("Store.append")(function*(messages: ReadonlyArray<NewMessage>, given?: string | null) {
     const key = given ?? null
     if (key !== null && !SENDER_KEY.test(key)) {
@@ -858,6 +861,10 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     return yield* sql.withTransaction(Effect.gen(function*() {
       const created = yield* now
       const first = yield* nextMessage(sql, chat)
+      if (key !== null && first > 0) {
+        const { more } = yield* only(yield* sql<{ more: number }>`select more from everchat_msg where chat = ${chat} and i = ${first - 1}`)
+        if (more === 1) return yield* Effect.fail(new Error("the sender's key is not at a message's start"))
+      }
       const written: Array<Message> = []
       for (const [k, message] of messages.entries()) {
         const text = message.text.toWellFormed()
