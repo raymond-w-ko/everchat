@@ -13,9 +13,16 @@ gives the fact, what to do, and the file or command that shows it.
    there. See `packages/sqlite/src/sqlite.ts:795` and
    `node_modules/effect/src/Layer.ts`.
 3. Bun's types say that an import of an `.html` file is a bundle
-   (`node_modules/bun-types/extensions.d.ts:41`). With `type: "text"` the
-   value is the file's text, so cast it to `string`. See
-   `packages/local/src/inspector.ts:37`.
+   (`declare module "*.html"`, in the file `extensions.d.ts` of the package
+   `bun-types`, which `@types/bun` brings). With `type: "text"` the value is
+   the file's text, so cast it to `string`. See
+   `packages/local/src/inspector.ts:37`. The linker keeps `bun-types` under
+   `node_modules/.bun/`, at a path with its version; from the root this
+   finds the line, whatever the version:
+
+   ```sh
+   grep -n 'declare module "\*.html"' "$(bun -p 'require.resolve("bun-types/extensions.d.ts", { paths: [require.resolve("@types/bun/package.json")] })')"
+   ```
 4. `happy-dom` has no layout and no content security policy: a size is 0,
    and an inline script runs under a policy of `script-src 'none'`, in a
    `<meta>` or in a header. The tests of the page

@@ -517,7 +517,8 @@ export const check = (given: string, tables: Tables = TABLES): Array<string> => 
             fault(file, one.line, why, one.specifier)
           }
         } else {
-          queue.push(target)
+          // why is null only where target is not.
+          queue.push(target!)
         }
       }
     }

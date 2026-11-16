@@ -10,8 +10,9 @@ test *args:
 # Check the types, one program for each package: the core alone, with no Bun
 # and no Node types (its guard); the core's tests, with the Bun types; the
 # packages openai, sqlite, codemode and local, their tests too, with the Bun
-# types. Then the boundaries of the packages, which the types do not see:
-# their imports and their manifests (tools/graph.ts).
+# types; the tools, but tools/golden.ts, with the Bun types
+# (tools/tsconfig.json). Then the boundaries of the packages, which the types
+# do not see: their imports and their manifests (tools/graph.ts).
 check:
     bunx tsc --noEmit -p packages/core
     bunx tsc --noEmit -p packages/core/tsconfig.test.json
@@ -19,6 +20,7 @@ check:
     bunx tsc --noEmit -p packages/sqlite
     bunx tsc --noEmit -p packages/codemode
     bunx tsc --noEmit -p packages/local
+    bunx tsc --noEmit -p tools
     bun tools/graph.ts
 
 # Run EverChat from its source, in this terminal.

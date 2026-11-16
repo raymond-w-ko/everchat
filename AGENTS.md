@@ -44,8 +44,10 @@ that we do not use.
   (`packages/core/tsconfig.test.json`), then `openai`, `sqlite`, `codemode`
   and `local`, each with its tests and with the Bun types for now
   (`packages/openai/tsconfig.json`, `packages/sqlite/tsconfig.json`,
-  `packages/codemode/tsconfig.json`, `packages/local/tsconfig.json`). Then
-  `tools/graph.ts` checks
+  `packages/codemode/tsconfig.json`, `packages/local/tsconfig.json`), then
+  the tools with the Bun types (`tools/tsconfig.json`): every file of
+  `tools/` but `golden.ts`, which imports the old code in `ref/`, and the
+  project keeps that code out of the type check. Then `tools/graph.ts` checks
   what the types do not see: the imports and the manifests of the packages
   (see "Be modular").
 
@@ -141,7 +143,8 @@ The rest:
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
 - `tools/`: scripts outside the packages, which import them by their names
-  (the root `package.json` names all five). `tools/graph.ts` is a step of
+  (the root `package.json` names all five); `just check` checks the types of
+  all but `golden.ts` (`tools/tsconfig.json`). `tools/graph.ts` is a step of
   `just check` (see "Be modular"), and `tools/graph.test.ts` its tests.
   `tools/golden.ts` makes `packages/local/tests/golden.json` from the old
   code. `tools/probe.ts` sends real requests to a vendor (see "Model access

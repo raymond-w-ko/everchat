@@ -359,7 +359,7 @@ test("budget fails closed: the same through ./z.mts, a kind of code that the scr
   // With only b.ts allowed, c.mts is itself the reach outside it.
   expect(run(root, only)).toEqual([
     UNCHECKED("packages/core/src/c.mts"),
-    lost(B + ":1", "./c.mts")[0],
+    lost(B + ":1", "./c.mts")[0]!,
     B + ":1: budget, @everchat/local may reach only " + B + ", and reaches packages/core/src/c.mts: ./c.mts"
   ])
   // And ./z.mts with only z.ts on disk: no file.
