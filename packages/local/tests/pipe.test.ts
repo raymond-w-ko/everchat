@@ -178,6 +178,8 @@ test("the reader of the standard output goes away: the program ends at once with
   expect(turns(at.file).map((one) => one.status).filter((status) => status !== "running")).toEqual(["done"])
 })
 
+// Six starts of the program: alone it takes 3,846 to 4,392 ms (median 4,070,
+// 10 runs), too near Bun's default limit of 5,000 ms on a loaded machine.
 test("--log-level sets the lowest level of the diagnostics, and no level puts a line on the standard output", async () => {
   const diagnostics = async (...level: Array<string>) => {
     const at = place()
@@ -199,7 +201,7 @@ test("--log-level sets the lowest level of the diagnostics, and no level puts a 
   // The store logs a line of the level debug while it opens the database,
   // before the diagnostics' logger is there. It must go nowhere.
   expect(await diagnostics("--log-level", "debug")).toContain("info")
-})
+}, 20_000)
 
 test("the home is the directory that EVERCHAT_HOME names, and with none or an empty one it is .everchat in the person's own directory", async () => {
   const server = fake(() => text("Hello."))
