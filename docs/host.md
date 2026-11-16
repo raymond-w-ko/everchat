@@ -7,7 +7,7 @@ code batch is planned from this page, bead by bead, so each interface is given e
 
 Where this page and `docs/design.md` differ, `docs/design.md` wins. The facts of the tree
 come from the investigation ec-f7m3i; this page cites its answers as "ec-f7m3i Q1" to
-"ec-f7m3i Q10", and other facts by `path:line` at d90ec5c. A decision cites its question
+"ec-f7m3i Q10", and other facts by `path:line` at 3d374f3 (lead, ec-0r89g). A decision cites its question
 of the settled list (`[Q19]`), "lead, ec-mxcl": the lead's eleven decisions, in the
 bead ec-1h538, "lead, ec-vgn58": the lead's form of the fixes of the page's two
 reviews, by its rule's name (A1 to E), "lead, ec-7bi64": the lead's form of the fixes
@@ -47,7 +47,7 @@ WebSocket, and a signed token (ec-f7m3i Q5, Q6). No dependency is new.
 
 The caller gives the host three things:
 
-- the tag `Chats` (`packages/core/src/store.ts:516-520`): the chats of the database, each
+- the tag `Chats` (`packages/core/src/store.ts:545-549`): the chats of the database, each
   found by its tenant and its UUID;
 - the stack of one chat, as a function of that chat's store: everything above the store
   that a loaded chat needs (the diagnostics, the memory, the wire, the sandbox, the
@@ -84,7 +84,7 @@ What the local command (`everchat serve`, section 7) adds:
 
 | Part | What `everchat serve` gives | Where it comes from |
 | --- | --- | --- |
-| `Chats` | `chatsLayer(file)` over its own file, `serve.db` in the home | `packages/sqlite/src/sqlite.ts:1148` |
+| `Chats` | `chatsLayer(file)` over its own file, `serve.db` in the home | `packages/sqlite/src/sqlite.ts:1220-1221` |
 | the stack | the local stack with the hosted set of functions (below), as a function of a store | today's `layer`, `packages/local/src/main.ts:145-157`, made a function of a store |
 | the author's inference gateway | `gatewayLayer`, built one time for the process and given to each stack | `packages/local/src/gateway.ts:60-66` |
 | the HTTP server | `BunHttpServer.layer({ hostname: "127.0.0.1", port, idleTimeout: 190, websocket: { idleTimeout: 120 } })`, as the inspector has it but with Bun's idle limits (section 3, "Admission", 9) | `packages/local/src/inspector.ts:131-136` |
@@ -96,15 +96,16 @@ no file functions (`read`, `write`, `edit`): only the functions that need no mac
 (lead, ec-mxcl, decision 2; for a hosted chat, `docs/design.md`, "Tenants and isolation"
 [Q5, Q8, Q13]). The reason: the host is the trial of the hosted use, and a page that
 reaches a shell through HTTP is a risk with no use here. So no chat of the host needs a
-work directory or an environment. The set is the core's `zoom` and `date`
-(`packages/core/src/functions.ts:138`) and `result`. Today `result` is a function of the
-local package (`packages/local/src/localfunctions.ts:128-145`), but it reads the call's
-whole output from the store (`store.call`, `:132`); its file is a copy only. So a code
-bead moves it to the core, with no file (section 9). The output limit of a host's chat
-writes no file either (section 9). The set is a parameter (the stack), so that the
+work directory or an environment. The set is the core's `HOSTED`: `zoom`, `date` and
+`result` (`packages/core/src/functions.ts`: `ZOOM`, `DATE`, `RESULT`), whose functions
+`hostedLayer` gives over the store and the memory. The core's `result` reads the call's
+whole output from the store (`store.call`) and writes no file (ec-o9i2n). The output limit
+of a host's chat writes no file either: the core's `noFileLayer`
+(`packages/core/src/limit.ts`) names `result(id)` only. The set is a parameter (the
+stack), so that the
 operator's other answer, the local functions, changes one caller: the stack that
 `everchat serve` gives. The sandbox stays as the design wants it for a hosted chat: a new QuickJS
-engine for each program (`packages/codemode/src/thread.ts:115-119`; [Q5, Q8, Q13]).
+engine for each program (`packages/codemode/src/thread.ts:131-136`; [Q5, Q8, Q13]).
 
 ## 2. The life of a chat in the host
 
@@ -157,7 +158,7 @@ host's own frames to a client are not gives, and a client that has not joined ge
 too (below, "The host's own frames"; lead, ec-9p347, T7). Each give
 runs under the channel's give lock, as one step that an interruption cannot split
 (`Effect.uninterruptible`, as the turn loop's `record` does,
-`packages/core/src/turn.ts:208-216`; lead, ec-vgn58, A2). A give never waits: a full
+`packages/core/src/turn.ts:274-285`; lead, ec-vgn58, A2). A give never waits: a full
 buffer ends its client (section 8, "A slow client"). The one exception is a client's own
 first read, which waits for room before each page, with no place and no lock held
 (below). Every give puts the JSON of the entry that the fit made (section 8, "The bytes of
@@ -182,9 +183,11 @@ gives it this way and only this way (lead, ec-vgn58, A1):
   in the same step. A page that no longer fits is not given, and does not end the client:
   the first read gives its place back, drops the page, and starts again at step 1 (lead,
   ec-9p347, T7). The client is ended as `slow` when its buffer has no room for a page 30 s
-  after the last page was given to it, or after it became a client (section 8, "A slow
-  client"; lead, ec-7bi64, G2). A page that was dropped does not start the 30 s again:
-  they run from the last page that was given. When the read is at the store's end (a call
+  after the last page was given to it, or after its first read started (section 8, "A
+  slow client"; lead, ec-7bi64, G2; lead, ec-0r89g, W2). On R6 the first read starts when
+  the snapshot frame was put, so a snapshot that waited for its place takes nothing from
+  these 30 s. A page that was dropped does not start the 30 s again: they run from the
+  last page that was given. When the read is at the store's end (a call
   of the store gives fewer events than it asked for: section 8, "Pages"), the client
   **joins**, under the give lock, in the same step as a check of two parts (lead,
   ec-9p347, T9): its `given` is `last` or more, or the channel has no `last`; and its
@@ -194,7 +197,7 @@ gives it this way and only this way (lead, ec-vgn58, A1):
   given (above), so a client whose `given` is below it reads on first (lead, ec-12a32,
   N3). So no event comes between the client's read and the gives that reach the clients
   that joined: every numbered event up to `last` is in the store, because the turn loop
-  publishes an event only after its commit (`packages/core/src/turn.ts:208-216`). And a
+  publishes an event only after its commit (`packages/core/src/turn.ts:274-285`). And a
   client that joins has room for one largest entry at least, so a live entry does not end
   as `slow` a client that is still draining its last page. A burst after the join can
   still end it: that is the buffer's bound, as designed. Before the chat's first load the
@@ -213,7 +216,9 @@ gives it this way and only this way (lead, ec-vgn58, A1):
   A frame that no longer fits, because a `said` or an `error` took room, is dropped, and
   the snapshot starts again with its wait. The 30 s of `slow` hold for it as for a page:
   the client is ended as `slow` when its buffer has no room for `page` bytes 30 s after
-  it became a client. So a snapshot never ends a client by its size. A ping is put only
+  it became a client. These 30 s are the snapshot's own: the first read's run from its
+  own start, after the frame was put (lead, ec-0r89g, W2). So a snapshot never ends a
+  client by its size. A ping is put only
   into an empty buffer. A `said` or an `error` is put when its `say` is answered; one that
   finds no room ends the client as `slow`, as a give does. The frame of an end (R4's
   `close`, R6's close code) is not in the buffer.
@@ -224,9 +229,9 @@ never opens a second store of a chat that it holds: a second request for the cha
 its channel, and so its one loaded instance (lead, ec-mxcl, decision 6). Today a second
 `Chats.store` of a held chat closes the first launch as a crash, and both stores could
 write (ec-f7m3i Q2); and "one turn at a time" is held only by the one `Turns` of a chat
-(`packages/core/src/turn.ts:193, 200`; ec-f7m3i Q3). So one instance is the rule that keeps
+(`packages/core/src/turn.ts:243, 254`; ec-f7m3i Q3). So one instance is the rule that keeps
 both. Two processes on one file: the store's refusal of a live launch of this host
-(`LaunchLive`, `packages/sqlite/src/sqlite.ts:701-702`) stays the wall for the local use.
+(`LaunchLive`, `packages/sqlite/src/sqlite.ts:753-754`) stays the wall for the local use.
 The host answers it with `409 chat_elsewhere`. The lease is the server plan's [Q22].
 
 ### Load
@@ -235,20 +240,20 @@ The host loads a chat for a message in (a `POST`, or a `say` frame of a socket),
 the channel's lock:
 
 1. `Chats.store(tenant, chat, launch)`: the chat by its tenant and its UUID; `NoChat` for
-   any chat that is not the tenant's (`packages/core/src/store.ts:355-362`). The launch
+   any chat that is not the tenant's (`packages/core/src/store.ts:369-376`). The launch
    row is written.
 2. The stack, built over that store, in the loaded chat's scope. A load makes all again
    from the database (`docs/design.md`, "Tenants and isolation" [Q12, Q20]): the turn
-   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:538-559`),
+   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:631-652`),
    and the memory loads from the database (ec-f7m3i Q8).
 3. The listener: the host subscribes to the turn loop (`Turns.subscribe`,
-   `packages/core/src/turn.ts:178-181`), and reads the chat's `seq` from the store. Then,
+   `packages/core/src/turn.ts:228-231`), and reads the chat's `seq` from the store. Then,
    under the give lock, in one step, it chooses and sets `last`: the lowest `given` of the
    clients that have joined, or, with no client that joined, that `seq` (lead, ec-12a32,
    N1, N4). A client that has not joined does not count: it reads on by itself, and the
    join's check covers it. So a join cannot fall between the choice and the set. Then the
    listener reads the events after `last` from the store (`eventsAfter`,
-   `packages/core/src/store.ts:381-387`, in pages: section 8, "Pages"); gives each
+   `packages/core/src/store.ts:395-401`, in pages: section 8, "Pages"); gives each
    (above, "The give"); and drops each live event whose number is not above `last`. This
    is the rule of `packages/core/src/follow.ts:17-19`, for events. It is needed: the
    restart of step 2 writes events before anyone can subscribe.
@@ -262,7 +267,7 @@ the channel's lock:
    out" [Q10, Q17]).
 
 A read needs no load. The snapshot, the older messages and the events after a number
-come from the chat's reads (`Chats.reads`, `packages/core/src/store.ts:519`), which take no
+come from the chat's reads (`Chats.reads`, `packages/core/src/store.ts:548`), which take no
 launch. A client that only reads never loads a chat.
 
 ### Work, and the 6 minutes
@@ -274,10 +279,12 @@ client is no work: the chat unloads and the client stays connected to its channe
 
 The host's timer of a loaded chat: a fiber that sleeps until 6 minutes after the last
 work, then takes the channel's lock, and unloads the chat when it has no work and its last
-work is 6 minutes old or more; else it sleeps again until the new time. It needs two
-values that the tree does not have: "busy now", with no wait, and the time of the last
-work (ec-f7m3i Q8, gap 1; section 9). Today `Turns.idle` and `Memory.idle` only wait
-(`packages/core/src/turn.ts:534-536`, `packages/core/src/memory.ts:849`).
+work is 6 minutes old or more; else it sleeps again until the new time. It reads two
+values that the core gives with no wait (ec-f7m3i Q8, gap 1; section 9; ec-9txv3): "busy
+now", `Turns.busy` and `Memory.busy`, and the time of the last work, `Turns.worked` and
+`Memory.worked`, in milliseconds of Effect's `Clock` (`packages/core/src/turn.ts`,
+`packages/core/src/memory.ts`). `Turns.idle` and `Memory.idle` wait; the timer does not
+use them.
 
 ### Unload
 
@@ -321,23 +328,25 @@ ec-349x0, Q1; section 3, "Admission", 5).
 
 - **The log of a message stays as the core has it** (O1): from its start to its publish
   no interruption cuts it. `record` runs the write and the publish of its events as one
-  uninterruptible step (`packages/core/src/turn.ts:208-216`), and `Memory.apply` runs the
-  memory's change and its write the same way (`packages/core/src/memory.ts:707-730`). So
+  uninterruptible step (`packages/core/src/turn.ts:274-285`), and `Memory.apply` runs the
+  memory's change and its write the same way (`packages/core/src/memory.ts:739-765`). So
   an interruption that comes in the log waits for its end: the order of the commit and the
   publish holds, and a message that was committed is published. Section 9 asks for no
-  change of this. One step after it is not yet in it: `Turns.say` forks the turn that its
-  log began only after `record` returns (`launch`, `packages/core/src/turn.ts:483-490`,
-  called at `:519-521`). An interruption between the two would leave a turn's row running
-  and its `start` published, with no fiber to run it, and the next message would begin a
-  second turn. So section 9, item 9 asks that the fork be in the same uninterruptible step
-  as the log: a fork does not wait.
+  change of this. The step after it is in it too (section 9, item 9; ec-ts3qg):
+  `Turns.say` forks the turn that its log began (`launch`) in the log's uninterruptible
+  step, after the publish (`record`'s `next`, `packages/core/src/turn.ts`). So no
+  interruption leaves a turn's row running and its `start` published with no fiber to run
+  it, which would make the next message begin a second turn; and a fork does not wait.
 - **The store bounds the part that cannot be interrupted** (O3). Each call of the store
   ends, done or with a typed fault, within the limit `store` (5 s), by the store's own
-  timer on the call (section 9, item 9); a transaction counts as one call. The log of a
+  timer on the call (section 9, item 9); a transaction counts as one call. On SQLite the
+  timer is the driver's own wait on the file's locks, and a call waits longer only behind
+  calls of its own process on the one connection (lead, ec-0r89g; section 8, "What is not
+  proved here"). The log of a
   message is one transaction (the memory's writes and the caller's, with the event rows,
-  `packages/core/src/memory.ts:675-691`), so it ends within `store`. A write that fails
+  `packages/core/src/memory.ts:704-721`), so it ends within `store`. A write that fails
   so is rolled back, and nothing is published for it. After a write fails, the memory of
-  that loaded chat refuses each later write (`packages/core/src/memory.ts:711-719`): so
+  that loaded chat refuses each later write (`packages/core/src/memory.ts:744-752`): so
   the host unloads the chat at once, under the same lock (Unload, steps 1 to 3), and the
   next message loads it again. Where the timer cannot tell whether a commit happened (a
   store on a network whose answer to the commit is lost), the message may be in the log
@@ -345,16 +354,16 @@ ec-349x0, Q1; section 3, "Admission", 5).
 - **A load that is stopped** closes its scope as an unload does (Unload, steps 1 to 3).
   The close is work too, under the lock. Its calls of the store, one after the other:
   the one write that was in flight when the stop came (the memory's writes are one at a
-  time, under its lock, `packages/core/src/memory.ts:707-730`); the flush of the
+  time, under its lock, `packages/core/src/memory.ts:739-765`); the flush of the
   diagnostics batch (`packages/core/src/diagnostics.ts:125-132`); the end of the launch
-  row (`packages/sqlite/src/sqlite.ts:727-732`, registered at `:752`); and the read of
+  row (`packages/sqlite/src/sqlite.ts:779-784`, registered at `:804`); and the read of
   Unload step 2, one call for each 100 events that the load wrote (the restart's: a
   `start`, and the pages of a cut program's `tool` and `echo`,
-  `packages/core/src/turn.ts:538-559`), so one call when it wrote at most 100 events
+  `packages/core/src/turn.ts:631-652`), so one call when it wrote at most 100 events
   that fit one page; large events need more ("Accepted risks", 1).
 - **A turn that started is never stopped because a request ended**: it runs in the
   loaded chat's scope, not in the request's (`Turns.say`,
-  `packages/core/src/turn.ts:492-523`).
+  `packages/core/src/turn.ts:570-613`).
 
 **What the page promises, and what it sums** (lead, ec-349x0, R1, R2). The page promises
 three things about the end of work. Ownership goes back when the work has ended, never
@@ -403,7 +412,7 @@ names the first two for the beads of the store and the server.
    - Conditions: a write of the memory is in flight (a compaction's summary) when a
      message's log starts near the deadline, and both transactions take nearly the
      store's timer. `Memory.apply` waits for the memory's lock inside its
-     uninterruptible step (`packages/core/src/memory.ts:711-730`), so the deadline cannot
+     uninterruptible step (`packages/core/src/memory.ts:744-765`), so the deadline cannot
      cut that wait: the reviewer measured the lock free after 27.2 s, not 25 s.
    - Rare: it needs two slow transactions back to back at the deadline.
    - Fails safe: as in 1.
@@ -446,7 +455,7 @@ The process holds, one time for all chats:
   (`packages/local/src/gateway.ts:60-66`), so a second build in the process cannot find
   it (ec-f7m3i Q1, item 1; Q2). The caller builds it one time and gives it to each stack;
 - the engine's WebAssembly file, which the library keeps by its path
-  (`packages/codemode/src/thread.ts:119`);
+  (`packages/codemode/src/thread.ts:136`);
 - the host: its channels, its secret, its limits.
 
 ## 3. The client's interface
@@ -506,7 +515,7 @@ Each route R1 to R6 runs these checks, in this order, before it reads a body:
    `Authorization` (above, "A token's place"; below).
 3. **The chat.** A chat that the token does not name gets `404 no_chat`, the same answer
    as a chat of another tenant or a UUID that no chat has (`NoChat`,
-   `packages/core/src/store.ts:355-362`). A tenant cannot learn that another tenant's chat
+   `packages/core/src/store.ts:369-376`). A tenant cannot learn that another tenant's chat
    exists, nor that a chat outside its token exists.
    The host's tests have the two tenants of the design (`docs/design.md`, "Tenants and
    isolation" [Q5, Q8, Q13]): for each route and for the socket, a token of tenant A that
@@ -550,7 +559,7 @@ D). Each number is a limit of section 8.
    `retry-after: 1`, and nothing is logged; with a key, the client sends it again safely
    (section 5). The channel's lock is held for a load, an unload, or the log of one
    message and the start of its turn: not for the turn, which runs after the answer
-   (`Turns.say`, `packages/core/src/turn.ts:492-523`). The work under the lock has a
+   (`Turns.say`, `packages/core/src/turn.ts:570-613`). The work under the lock has a
    deadline of 20 s, and the lock is free when that work has ended (section 2, "The
    deadline of the work under the lock"). (D4)
 5. **An end** (lead, ec-349x0, Q). However a request ends (its deadline, its client's
@@ -586,8 +595,10 @@ D). Each number is a limit of section 8.
    gives to no one (item 9). With a good token the bound is 256 requests, each with a body
    of at most 512 KiB (128 MiB in all), each until its work has ended, its client there or
    gone (item 5): 35 s by the sum for the common case, or 50 s when its work is a load
-   that is stopped or a log whose write failed (item 10; section 2, "Accepted risks"); and
-   the clients (section 8).
+   that is stopped or a log whose write failed (item 10; section 2, "Accepted risks"); the
+   reads of `reads` and the answers of R2, R3 and R5 that are held while they are written
+   (section 8, "Pages", "The sums of memory for reads", (b) and (c): 634 MiB and 512 MiB
+   at the defaults); and the clients (section 8).
 7. **The local routes R9 and R10** have their own limit, not a chat's: R9 at most 10 in a
    minute, R10 at most 60 in a minute, for the host. Each request that passes the start
    value and the checks of `Origin` and `Host` counts, whether it then succeeds or not.
@@ -765,7 +776,7 @@ host's own origin (section 7).
 - Query: `from` and `to`, whole numbers, `0 <= from < to`, `to - from <= 200`.
 - `200`: `{"messages": [<message>, ...]}`: the messages from `from` upward, up to and not
   with `to`, in the order of their ids (`Reading.messages`,
-  `packages/core/src/store.ts:393`). An id that the chat does not have yet gives no
+  `packages/core/src/store.ts:407`). An id that the chat does not have yet gives no
   message. The answer's JSON is at most
   `page` bytes: it closes before the message that would pass `page`, as a page of events
   closes before the entry that would pass it (lead, ec-x0hhp, U1). One message always
@@ -935,8 +946,9 @@ The reason text does not say why a token failed.
    connection, however many bytes they are; a client whose buffer has no
    room for a page 30 s after its last page is ended as `slow`. The read holds one page in
    memory. At the store's end the client joins the listener's gives, when its `given` is
-   `last` or more and its buffer has room for one entry of `entry` bytes; else it reads on
-   and checks again (section 2, "The give"; lead, ec-9p347, T9). Each event comes once,
+   `last` or more, or the channel has no `last`, and its buffer has room for one entry of
+   `entry` bytes; else it reads on and checks again (section 2, "The give"; lead,
+   ec-9p347, T9). Each event comes once,
    in the order of the numbers. On R5, an answer with fewer events than `limit` is no
    end: the client asks again after its last number, until an answer is
    `{"events": []}`.
@@ -960,7 +972,7 @@ The reason text does not say why a token failed.
    or shown again. Pieces are best effort [Q10, Q17].
 5. **A chat's event numbers run with no gap**, one more each time, from 1: the store makes
    each event's number as the chat's `seq` plus 1, and writes the event's row and the new
-   `seq` in one transaction (`addEvent`, `packages/sqlite/src/sqlite.ts:1004-1016`). So a
+   `seq` in one transaction (`addEvent`, `packages/sqlite/src/sqlite.ts:1076-1088`). So a
    client that gets a numbered event whose number is not its last plus one drops it, and
    connects again with its last number as `after` (lead, ec-vgn58, A3). With the host's
    rules this does not happen; the rule keeps a client whole if it does.
@@ -983,11 +995,11 @@ characters, `packages/core/src/pages.ts:13`). Times are milliseconds since 1970.
 
 ### The events
 
-The numbered events are the store's `Event` (`packages/core/src/store.ts:198-203`), as
+The numbered events are the store's `Event` (`packages/core/src/store.ts:212-217`), as
 JSON, field for field. The turn loop publishes the same type, with the pieces: its
-`TurnEvent` is `Event` and the three pieces (`packages/core/src/turn.ts:130-132`). The
+`TurnEvent` is `Event` and the three pieces (`packages/core/src/turn.ts:142-144`). The
 store reads them again with the same fields (`eventsAfter`,
-`packages/core/src/store.ts:381-387`):
+`packages/core/src/store.ts:395-401`):
 
 ```json
 {"type": "accepted", "n": 41, "messages": [<message>, ...]}
@@ -1032,22 +1044,22 @@ The three pieces have no number:
 }
 ```
 
-- `chat`: from `Reading.chat` (`packages/core/src/store.ts:120-129`): the UUID, the pick and
+- `chat`: from `Reading.chat` (`packages/core/src/store.ts:134-143`): the UUID, the pick and
   the goal. No draft and no views (lead, ec-mxcl, decision 7).
 - `seq`: the chat's last event number; 0 with no event (`Chat.seq`,
-  `packages/core/src/store.ts:126`).
-- `count`: the id of the chat's next message (`Reading.count`, `packages/core/src/store.ts:392`).
+  `packages/core/src/store.ts:140`).
+- `count`: the id of the chat's next message (`Reading.count`, `packages/core/src/store.ts:406`).
 - `messages`: of the last `last` messages (R2's query; 50 when not given; at most 200; R6's
   snapshot: the last 50), the longest run that ends at the chat's last message and fits
   (below), in the order of their ids. It may be empty. Its first message may have a higher
   id than the last `last` would give, and it may be a page in the middle of a text: R3
   reads the messages before it, as the client does for those before `last`.
 - `turn`: the turn that runs (`Reading.runningTurns(null)`,
-  `packages/core/src/store.ts:417`), or `null`: its id, its pick, its first message and its
+  `packages/core/src/store.ts:440`), or `null`: its id, its pick, its first message and its
   start time. Not its head, which is the whole system prompt.
 
 All five are read in one snapshot of the store (`Reading.snapshot`,
-`packages/core/src/store.ts:372`).
+`packages/core/src/store.ts:386`).
 
 **Its bound** (lead, ec-x0hhp, U1, U1a). The JSON of a snapshot, R2's answer or R6's
 `snapshot` frame whole, is at most `page` bytes. Its list keeps the newest messages that
@@ -1099,19 +1111,28 @@ to the diagnostics.
   with another text gets the first message's numbers. This is a limit, and it is the
   sender's rule (only the sender knows that two sends are one message). A key is of its
   chat: the same key in another chat is another message.
-- **The key's place** (a proposal for the code batch's schema bead; the schema's page and
-  its mark change there, not here). A column `key` on `everchat_msg`, `text`, null for a
+- **The key's place** (`docs/schema.html`, mark 6; ec-bu4bg). A column `sender_key` on
+  `everchat_msg` (not `key`, a reserved word on MariaDB), `text` on SQLite, null for a
   message with no key, set on the row of the message's first page only, and written in the
   insert of the transaction that logs the message (the table refuses an update); and a
-  unique index `everchat_msg_key (chat, key)`. Both SQLite and MariaDB let many rows have a
-  null key under a unique index. It is kept as long as the message: for ever. To find the
-  `accepted` number of a repeat, the store reads the chat's `accepted` row whose `msg` is
-  the first page's id; the bead adds an index `(chat, msg)` on `everchat_event` if a
-  measure shows the need. Today the schema has no place for a key
-  (`docs/schema.html:96`; ec-f7m3i Q3).
+  unique index `everchat_msg_sender_key (chat, sender_key)`. Both SQLite and MariaDB let
+  many rows have a null key under a unique index. It is kept as long as the message: for
+  ever. To find the `accepted` number of a repeat, the store reads the chat's `accepted`
+  row whose `msg` is the first page's id (`Reading.keyed`), by the index
+  `everchat_event_msg (chat, msg)`. Left for MariaDB, in the `mariadb` package: the column
+  as a `varchar(128)` in ASCII with a compare by bytes, its DDL, and the proof of its
+  index.
+- **The key's refusals** (ec-bu4bg, ec-p8n7o, ec-6vxao). The host's `400` for a key of
+  another form stays the first wall. Behind it, the store's `append` refuses, and writes
+  nothing: a key that is not 1 to 128 bytes of visible ASCII (`SENDER_KEY`,
+  `packages/core/src/store.ts`); a key with no message; a key that the chat has (the
+  unique index; `Turns.say` finds a repeat by `Reading.keyed` first); and a key that does
+  not start a message (a keyed append after an append that ended with `more`). `Turns.say`
+  refuses a key of another form before it reads or writes, with the store's error
+  (`StoreError`, `append`), and that `say` alone fails: the chat's next `say` runs.
 - **What the answer says**: the `accepted` event's number and the first and last page ids
   (R1, the `said` frame). The answer comes when the message is in the log; the turn runs
-  after it (`Turns.say`, `packages/core/src/turn.ts:492-523`).
+  after it (`Turns.say`, `packages/core/src/turn.ts:570-613`).
 - **While a turn runs** the message steers, as the turn loop does today: it is logged at
   once with its `accepted`, and the turn takes it in after its step's results; one that
   comes too late starts the next turn (ec-f7m3i Q3). The host adds no queue.
@@ -1133,7 +1154,7 @@ chats and an end time (`docs/design.md`, "Messages in, events out" [Q19, Q33, Q3
   - `exp`: the end time, in whole seconds since 1970, as JWT has it. Required.
   - Any other claim is ignored, but `nbf`: a token whose `nbf` is after now is refused.
 - A UUID as text is 36 characters: lower-case hex digits in groups of 8-4-4-4-12, as the
-  store gives it (`packages/sqlite/src/sqlite.ts:268`).
+  store gives it (`packages/sqlite/src/sqlite.ts:289`).
 - The largest token that `makeToken` gives, 64 chats with an `exp` of ten digits, is
   3,511 bytes, under the bound of 4,096 (measured with `Jwt.sign` of `effect/jose` and
   dummy key bytes; 100 chats would be 5,383 bytes).
@@ -1145,9 +1166,12 @@ the check's number and no part of the token:
 1. The header `Authorization` is there, and is `Bearer ` and the token (on R6: the `auth`
    frame's `token`).
 2. The token is at most 4,096 bytes, and is three parts of base64url joined by dots.
-3. The header's `alg` is `HS256`. Any other, and `none`, is refused.
+3. The header's `alg` is `HS256`. Any other, and `none`, is refused, before any call of
+   the library.
 4. The signature is HS256 of the first two parts with the secret, compared in constant time
-   (`Jwt.verify` of `effect/jose`, over Web Crypto).
+   (`Jws.verify` of `effect/jose`, over Web Crypto). `Jws.verify` on purpose: `Jwt.verify`
+   would check `exp` and `nbf` before the claims' forms, out of this order (the comment in
+   `packages/server/src/token.ts`; review ec-n7ws6).
 5. The claims are JSON, and have `tenant`, `chats` and `exp` of the forms above.
 6. `exp` is after now, and at most one hour after now: the host refuses a token with a
    longer life (a limit of the host; the backend's tokens are shorter).
@@ -1215,7 +1239,7 @@ The common fault is an `exp` made as `Date.now() / 1000 + 600`, which is a fract
 `NaN`, `Infinity` and `-Infinity` each fail with `exp_not_whole`, and sign nothing.
 
 `Chats.make` makes the tenant's row when it is not there
-(`packages/core/src/store.ts:507-520`). How a hosted deployment's backend reaches these
+(`packages/core/src/store.ts:536-549`). How a hosted deployment's backend reaches these
 functions (a library call, a command, a service of its own) is the server plan's, not this
 page's.
 
@@ -1232,7 +1256,7 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
 - **Its file.** `serve.db` in the home (`EVERCHAT_HOME`, `packages/local/src/main.ts:107`),
   next to the terminal's `everchat.db`. The file is its own, because the local layers
   refuse a file with more than one tenant or chat
-  (`packages/sqlite/src/sqlite.ts:302, 311`), and the host's file has many chats. It is
+  (`packages/sqlite/src/sqlite.ts:323, 332`), and the host's file has many chats. It is
   made when it is not there.
 - **Its tenant.** One local tenant, a fixed UUID in the code
   (`00000000-0000-4000-8000-000000000001`). A fixed value needs no read of a tenant list,
@@ -1301,8 +1325,12 @@ build can serve it too when the server plan wants it.
 
 ### Limits
 
-Each is a field of `HostOptions.limits`, with this default; the name in `code` is the
-field's, where the checks at start or a sum use it ("The checks at start"). The numbers are measured before
+Each is a field of `HostOptions.limits`, with this default. Each row starts with its
+field's name in `code`, as `Limits` names it (`packages/server/src/limits.ts`, its head
+comment); a row with two or three numbers names a field for each (lead, ec-0r89g). The code
+holds each time in milliseconds where this table says seconds or minutes (`request` is
+30,000). The two rows that hold no number of the host, the connections that Bun holds with
+no request and an event's whole text past `entry`, have no field. The numbers are measured before
 they are fixed for a hosted deployment, as the design's limits are
 (`docs/design.md`, "Functions, approval, programs" [Q34, Q42]). On a store that holds
 events, `text`, `body` and `entry` may rise, not fall ("The checks at start", S1).
@@ -1311,38 +1339,38 @@ events, `text`, `body` and `entry` may rise, not fall ("The checks at start", S1
 | --- | --- | --- |
 | `text`: a message's text | 65,536 bytes | `400` |
 | `body`: a body of R1 or a socket's frame after `ready` | 512 KiB | `413`; `1009` |
-| a socket's frame before `ready` | 8 KiB | `1009` |
-| an `Idempotency-Key` | 128 bytes | `400` |
-| a token | 4,096 bytes; a life of one hour; 1 to 64 chats | `401`; `4401`; `makeToken` fails with `TokenRefused`, R10 answers `400` |
-| messages in, for one chat | 30 in a window of 60 s (section 3, "Admission", 8) | `429 too_many` with `retry-after`; on a socket, an `error` frame |
-| R9, for the host | 10 in a window of 60 s ("Admission", 7 and 8) | `429 too_many` with `retry-after` |
-| R10, for the host | 60 in a window of 60 s ("Admission", 7 and 8) | `429 too_many` with `retry-after` |
-| HTTP requests in flight, for the host | 256 ("Admission", 3); a place counts work, not a connection: it stays taken after its client has gone, until its work has ended ("Admission", 5) | `503 busy` with `retry-after: 1`, before the body is read |
-| sockets that wait for their `auth`, for the host | 256 ("Admission", 2) | `503 busy`, before the upgrade |
-| the read of a body | 10 s | `408 timeout`, and the connection closes |
-| a message's wait for its channel's lock | 10 s | `503 busy` with `retry-after: 1`; on a socket, an `error` frame; nothing is logged |
-| `hub`: the turn loop's hub of a loaded chat | 1,024 entries | the oldest entries are dropped; the listener reads the lost numbered events from the store (section 2, Load, step 3) |
-| `buffer`: a client's buffer | 4,096 entries or 8 MiB of JSON, the first reached; the host's own frames to the client count in both (section 2, "The host's own frames"; lead, ec-9p347, T7) | the host ends that client's stream (`slow`) or socket (`4408`) |
+| `early`: a socket's frame before `ready` | 8 KiB | `1009` |
+| `key`: an `Idempotency-Key` | 128 bytes | `400` |
+| `token`, `life` and `chats`: a token, its size, its life and its chats | 4,096 bytes; a life of one hour; 1 to 64 chats | `401`; `4401`; `makeToken` fails with `TokenRefused`, R10 answers `400` |
+| `said` and `saidWindow`: messages in, for one chat | 30 in a window of 60 s (section 3, "Admission", 8) | `429 too_many` with `retry-after`; on a socket, an `error` frame |
+| `newChats` and `newChatsWindow`: R9, for the host | 10 in a window of 60 s ("Admission", 7 and 8) | `429 too_many` with `retry-after` |
+| `newTokens` and `newTokensWindow`: R10, for the host | 60 in a window of 60 s ("Admission", 7 and 8) | `429 too_many` with `retry-after` |
+| `requests`: HTTP requests in flight, for the host | 256 ("Admission", 3); a place counts work, not a connection: it stays taken after its client has gone, until its work has ended ("Admission", 5) | `503 busy` with `retry-after: 1`, before the body is read |
+| `waiting`: sockets that wait for their `auth`, for the host | 256 ("Admission", 2) | `503 busy`, before the upgrade |
+| `bodyRead`: the read of a body | 10 s | `408 timeout`, and the connection closes |
+| `lockWait`: a message's wait for its channel's lock | 10 s | `503 busy` with `retry-after: 1`; on a socket, an `error` frame; nothing is logged |
+| `hub`: the turn loop's hub of a loaded chat | 1,024 entries; a whole number from 1 to 65,536, since the hub allocates its arrays for its whole capacity when it is made (`PubSub.ts`, effect 4.1.2; a capacity of 2**31 − 1 took 26 GB in a test; lead, ec-9p347; ec-9txv3, ec-tvs01) | the oldest entries are dropped; the listener reads the lost numbered events from the store (section 2, Load, step 3) |
+| `buffer` (entries) and `bufferBytes` (bytes): a client's buffer | 4,096 entries or 8 MiB of JSON, the first reached; the host's own frames to the client count in both (section 2, "The host's own frames"; lead, ec-9p347, T7) | the host ends that client's stream (`slow`) or socket (`4408`) |
 | `entry`: the JSON of one event or one piece that the host gives | 1 MiB; the host refuses to start with less than the largest whole event that the limits in use allow, or more than `buffer` in bytes ("The checks at start") | a numbered event is cut (`"cut": true`); a piece is dropped ("The bytes of one entry") |
-| `page`: a page of a read from the store; the JSON of a snapshot or of R3's answer | 1,000 events or 2 MiB of JSON after the fit, the first reached: a page is at most `page` bytes, since it closes before the entry that would pass it; a snapshot and R3's answer are at most `page` bytes too (lead, ec-x0hhp, U1); the host refuses to start with less than `entry`, or more than `buffer` in bytes ("The checks at start") | the page ends; the next page is read after it ("Pages"); a snapshot keeps its newest messages, and R3 ends before the message that would pass it |
-| room for a page in a first read's client's buffer, or for R6's snapshot (lead, ec-x0hhp, U2) | 30 s after the last page was given to it, or after it became a client: a rate of one page (2 MiB) in 30 s, about 70 KB/s (0.56 Mbit/s), asked of a client that catches up | the host ends that client (`slow`; `4408`); it keeps what it took and connects again from its number |
+| `page` (events) and `pageBytes` (bytes): a page of a read from the store; the JSON of a snapshot or of R3's answer | 1,000 events or 2 MiB of JSON after the fit, the first reached: a page is at most `page` bytes, since it closes before the entry that would pass it; a snapshot and R3's answer are at most `page` bytes too (lead, ec-x0hhp, U1); the host refuses to start with less than `entry`, or more than `buffer` in bytes ("The checks at start") | the page ends; the next page is read after it ("Pages"); a snapshot keeps its newest messages, and R3 ends before the message that would pass it |
+| `room`: room for a page in a first read's client's buffer, or for R6's snapshot (lead, ec-x0hhp, U2) | for a first read, 30 s after the last page was given to it, or after the first read started (on R6, when the snapshot frame was put; lead, ec-0r89g, W2); for R6's snapshot, 30 s after the socket became a client (U2): a rate of one page (2 MiB) in 30 s, about 70 KB/s (0.56 Mbit/s), asked of a client that catches up | the host ends that client (`slow`; `4408`); it keeps what it took and connects again from its number |
 | `reads`: first reads, reads of R5, and reads of messages (R2, R3, R6's snapshot) at one time, for the host | 16 ("Admission", 11; lead, ec-x0hhp, U3) | the next waits at most 30 s, then `503 busy` with `retry-after: 1`; `4503` |
 | `request`: the whole life of a request that holds a place | 30 s ("Admission", 10) | the host asks its work to stop; the place and the holder are free when it has ended, by the sum for the common case `request` + `store` (35 s) after the head, or `request` + 4 × `store` (50 s) for a load that is stopped or a log whose write failed (section 2, "Accepted risks"); then `503 busy` with `retry-after: 1`, or the connection closes when bytes were sent |
 | `lock`: the work under a channel's lock for a message in | 20 s (section 2, "The deadline of the work under the lock") | the host asks it to stop; the lock is free when it has ended, by the sum for the common case `lock` + `store` (25 s) after it was taken, or `lock` + 4 × `store` (40 s) for a load that is stopped or a log whose write failed (section 2, "Accepted risks"); `503 busy` with `retry-after: 1`; on a socket, an `error` frame (`busy`) |
 | `store`: one call of the store, a transaction as one call | 5 s, by the store's own timer (section 9, item 9) | the call fails with a typed fault; a write is rolled back, and nothing is published for it |
 | `idle`: Bun's idle limit of HTTP (`idleTimeout`) | 190 s: twice the longest silence ("Admission", 9); the host refuses to start with less than twice it, or more than 255 | Bun closes the connection, or a response that sends no byte for that long |
-| the WebSocket's idle limit (`websocket.idleTimeout`) | 120 s ("Admission", 9); the host refuses to start with less than twice `ping`, or more than 960 | Bun closes the socket; Bun pings shortly before, and a client that answers stays |
+| `socketIdle`: the WebSocket's idle limit (`websocket.idleTimeout`) | 120 s ("Admission", 9); the host refuses to start with less than twice `ping`, or more than 960 | Bun closes the socket; Bun pings shortly before, and a client that answers stays |
 | connections that Bun holds with no request | none of the host's: the limit of open files of the process, and in a hosted deployment the front before the host ("Admission", 9) | the deployment's bound |
 | an event's whole text, past `entry` | not given by any route of this step | the event is given cut |
-| clients of one chat | 32 | `503 busy`; `4503`, after the `auth` |
-| clients of the host | 4,096 | `503 busy`; `4503`, after the `auth` |
-| loaded chats | 200 (the design counts 100 chats at work at one time, `docs/design.md`, "Tenants and isolation" [Q3]) | `503 busy`, with `retry-after: 5` |
+| `chatClients`: clients of one chat | 32 | `503 busy`; `4503`, after the `auth` |
+| `hostClients`: clients of the host | 4,096 | `503 busy`; `4503`, after the `auth` |
+| `loaded`: loaded chats | 200 (the design counts 100 chats at work at one time, `docs/design.md`, "Tenants and isolation" [Q3]) | `503 busy`, with `retry-after: 5` |
 | `wait`: R5's largest `wait` | 25 s | `400` |
-| R5's `limit` | 1,000 events | `400` |
-| R2's `last` and R3's `to - from` | 200 messages | `400` |
-| the socket's `auth` | 5 s after the upgrade | `4401` |
+| `events`: R5's `limit` | 1,000 events | `400` |
+| `history`: R2's `last` and R3's `to - from` | 200 messages | `400` |
+| `auth`: the socket's `auth` | 5 s after the upgrade | `4401` |
 | `ping`: an idle stream or socket | a `ping` every 15 s | |
-| an idle loaded chat | 6 minutes with no work | it unloads (section 2) |
+| `unload`: an idle loaded chat | 6 minutes with no work | it unloads (section 2) |
 
 **A slow client** (lead, ec-mxcl, decision 9). Each client has a buffer with the bound
 above. A give of the listener puts each event and piece into the buffer of each client
@@ -1355,9 +1383,10 @@ again and reads from its last number. A client's own first read is the one give 
 waits: before each page it waits for room for a whole page in that client's buffer, with
 no place and no lock held, so a client that reads gets every event after its number on
 one connection. When its buffer has no room for a page 30 s after the last page was given
-to it, the host ends the client as `slow` (lead, ec-7bi64, G2; ec-12a32, M4): it keeps
-what it took, and connects again from its number. A client's memory is its buffer, and
-the count of clients is bounded.
+to it, or after its first read started (on R6, when the snapshot frame was put; lead,
+ec-0r89g, W2), the host ends the client as `slow` (lead, ec-7bi64, G2; ec-12a32, M4): it
+keeps what it took, and connects again from its number. A client's memory is its buffer,
+and the count of clients is bounded.
 
 ### The bounds between the turn loop and a client
 
@@ -1366,13 +1395,13 @@ Each queue between the turn loop and a client has a bound (lead, ec-vgn58, C):
 | Queue | Bound | When it is full |
 | --- | --- | --- |
 | the turn loop's hub of a loaded chat | 1,024 entries | the oldest entries are dropped, and the turn loop never waits |
-| a page of a read (`eventsAfter`: the client's first read, the read at a load, at an unload, after a loss, the read of R5) | 1,000 events or 2 MiB of JSON (`page`), one page in memory for each read at a time ("Pages") | none: the next page is read after this one is given; a first read waits for room in its client's buffer |
+| a page of a read (`eventsAfter`: the client's first read, the read at a load, at an unload, after a loss, the read of R5) | 1,000 events or 2 MiB of JSON (`page`), one page in memory for each read at a time ("Pages") | none: the next page is read after this one is given, or, for a first read, after this one is dropped: a first read waits for room in its client's buffer, and a page that no longer fits there (a frame of the host took the room) is dropped and read again after that wait (section 2, "The give"; lead, ec-9p347, T7) |
 | a client's buffer | 4,096 entries or 8 MiB of JSON | the host ends that client (`slow`; `4408`) |
 
-- **The hub.** Today the hub has no bound (`PubSub.unbounded`,
-  `packages/core/src/turn.ts:194`; ec-f7m3i Q4). `Turns.layer` gets an option, the hub's
-  capacity: with none, the hub stays as today, with no bound, for the terminal; the stack
-  of a host's chat sets it, 1,024 entries by default (section 9). The hub with a capacity
+- **The hub.** `Turns.layer` has an option, the hub's capacity (`Options.hub`,
+  `packages/core/src/turn.ts`; ec-9txv3), a whole number from 1 to 65,536: with none, the
+  hub has no bound (`PubSub.unbounded`), for the terminal; the stack of a host's chat sets
+  it, 1,024 entries by default (section 9). The hub with a capacity
   is `PubSub.sliding` (`node_modules/effect/src/PubSub.ts:442-488`, effect 4.1.2). Its
   `publish` into a full hub calls the strategy's `handleSurplus`
   (`PubSub.ts:1312-1330`), which for the sliding strategy drops the oldest entry and
@@ -1389,8 +1418,8 @@ Each queue between the turn loop and a client has a bound (lead, ec-vgn58, C):
   limits in use: at the defaults an `accepted` is at most 394,452 bytes, a `message`
   180,246, an `end` 12,087, and a `start` 61. A `call`'s `program`, an `end`'s `why` and a piece's `delta`
   have no bound in the tree: the program and the delta are what the model wrote
-  (`packages/core/src/turn.ts:310`, `:378`), and `why` a text of the turn loop or of the
-  vendor (`packages/core/src/turn.ts:284-295`, `:382`; the vendor's error text,
+  (`packages/core/src/turn.ts:381`, `:449`), and `why` a text of the turn loop or of the
+  vendor (`packages/core/src/turn.ts:355-366`, `:453`; the vendor's error text,
   `packages/openai/src/openai.ts:288-295`). The next two parts bound them.
 
 ### The bytes of one entry
@@ -1423,10 +1452,10 @@ The host bounds what it gives in bytes (lead, ec-7bi64, F).
    largest entry finite:
    - an `end`'s `why` can be a vendor's error text with no bound: the wire copies the
      vendor's `error.message` whole (`packages/openai/src/openai.ts:288-295`), and the turn
-     loop ends the turn with it (`packages/core/src/turn.ts:382`). The turn loop keeps at
+     loop ends the turn with it (`packages/core/src/turn.ts:453`). The turn loop keeps at
      most 2,000 characters of a `why`, for every use, before it stores and publishes it
      (section 9). It makes a `why` well formed one time already, so the row and the event
-     hold the same text (`packages/core/src/turn.ts:284-295`); the cut goes in the same
+     hold the same text (`packages/core/src/turn.ts:355-366`); the cut goes in the same
      place, so they stay equal;
    - a `call`'s `program` and a piece's `delta` are parts of one answer of the model. The
      stack of a host's chat gives the wire a cap on one answer (`request.max`, sent as
@@ -1447,7 +1476,7 @@ The host bounds what it gives in bytes (lead, ec-7bi64, F).
 A read from the store is given a page at a time (lead, ec-7bi64, G1). A page ends at
 1,000 events or at the limit `page`, 2 MiB of JSON after the fit, the first reached. The
 store's read takes a count only (`eventsAfter(after, limit)`,
-`packages/core/src/store.ts:381-387`), so the host reads at most 100 events in one call of
+`packages/core/src/store.ts:395-401`), so the host reads at most 100 events in one call of
 the store, fits each, and closes the page before the event that would take it past
 `page`; the next page starts after the page's last number, and the events of that call
 that did not fit are read again then. A read is at the store's end when one call gives
@@ -1458,10 +1487,11 @@ ec-12a32, P4).
 
 **The largest page** is `page` bytes, exactly (lead, ec-12a32, M1): the page closes before
 the entry that would take it past `page`, so no entry passes it, and its first entry
-always fits, since `entry` ≤ `page`. It also has at most 1,000 entries. This is the room
-that a first read waits for in its client's buffer before each page (section 2, "The
-give"), and R6's snapshot before its frame (section 2, "The host's own frames"; lead,
-ec-x0hhp, U2), and the number that the check `page` ≤ `buffer` uses.
+always fits, since `entry` ≤ `page`. It also has at most 1,000 entries. A first read
+waits for that room in its client's buffer before each page, `page` bytes and 1,000
+entries (section 2, "The give"); R6's snapshot waits for `page` bytes before its frame
+(section 2, "The host's own frames"; lead, ec-x0hhp, U2); and the check `page` ≤ `buffer`
+uses both numbers.
 
 **The messages of an answer** (lead, ec-x0hhp, U1). A snapshot (R2's answer, R6's
 `snapshot` frame) and R3's answer hold messages, not events, and their JSON is at most
@@ -1473,24 +1503,32 @@ R3's answer with it is 15 + 180,196 = 180,211 bytes (`{"messages":[]}` is 15), w
 less than `message` (180,246) ≤ `entry` ≤ `page` ("The checks at start"). A snapshot
 counts its other fields too, so near the limits' edge its list may be empty (U1a).
 
-**The sums of memory for reads** (lead, ec-9p347, T10). One read holds one page after its
-fit, at most `page` bytes, and one call of the store before its fit, at most 100 × the
-largest of the sums and C (above). At the defaults, with C at most 394,452 bytes, that is
-2,097,152 + 39,445,200 = 41,542,352 bytes (39.6 MiB) for one read. The host holds, for
-reads:
+**The sums of memory for reads** (lead, ec-9p347, T10). One read of events holds one page
+after its fit, at most `page` bytes, and one call of the store before its fit, at most
+100 × the largest of the sums and C (above). At the defaults, with C at most 394,452 bytes,
+that is 2,097,152 + 39,445,200 = 41,542,352 bytes (39.6 MiB) for one read. The host holds,
+for reads:
 
 - (a) **the listener's own reads** (at a load, at an unload, after a loss), which the
   listener of a loaded chat reads one at a time: over the 200 loaded chats,
   200 × 41,542,352 = 8,308,470,400 bytes (7.74 GiB);
 - (b) **the reads of `reads`**, first reads, R5's and the reads of messages (section 3,
-  "Admission", 11; lead, ec-x0hhp, U3): 16 × 41,542,352 = 664,677,632 bytes (634 MiB). A
-  read of messages holds, in its place, one call of the store before its cut, at most 200
-  messages (R2's `last` and R3's `to - from`; R6's snapshot reads 50), and its cut, at
-  most `page` bytes: 200 × 180,196 = 36,039,200 bytes, and 36,039,200 + 2,097,152 =
-  38,136,352 bytes at the defaults, beside a snapshot's other fields. That is less than
-  the 41,542,352 bytes of a read of events, so (b)'s number does not rise (U4);
+  "Admission", 11; lead, ec-x0hhp, U3). One place of `reads` holds the larger of a read
+  of events (above: `page` + 100 × the largest of the sums and C) and a read of messages
+  (lead, ec-0r89g, W1). A read of messages holds, in its place, one call of the store
+  before its cut, at most 200 messages (R2's `last` and R3's `to - from`; R6's snapshot
+  reads 50), each at most `message` − 50 bytes (180,196: "The messages of an answer"),
+  and its cut, at most `page` bytes: `page` + 200 × (`message` − 50) bytes, beside a
+  snapshot's other fields. (b) is `reads` times the larger one. At the defaults a read of
+  events is the larger, 41,542,352 bytes against 2,097,152 + 200 × 180,196 = 38,136,352
+  bytes, so (b) is 16 × 41,542,352 = 664,677,632 bytes (634 MiB) (lead, ec-x0hhp, U4). `message` does not
+  depend on `text` (a page of the log is 30,000 characters at most), and `accepted` does:
+  with C at most `accepted`, a read of messages is the larger under a `text` below 59,925
+  bytes (an `accepted` below 360,392). At `text` = 32,768, for one, a read of events is
+  2,097,152 + 100 × 197,450 = 21,842,152 bytes, and (b) is 16 × 38,136,352 = 610,181,632
+  bytes (582 MiB);
 - (c) **the answers of R2, R3 and R5 that are held while they are written**: one page for
-  each request in flight, 256 × 2,097,152 = 536,870,912 bytes (512 MiB) (U4).
+  each request in flight, 256 × 2,097,152 = 536,870,912 bytes (512 MiB) (lead, ec-x0hhp, U4).
 
 (a) and (c) have no limit of their own: they are products of limits (the loaded chats,
 the requests in flight, `page`, and the largest entry), and the worst case needs every
@@ -1517,7 +1555,7 @@ most bytes of JSON of that event when it is given whole:
 
 - `F` = 196: one message (section 4) with an empty text, each number at `N`, its `kind`
   4 bytes, `more` as `false`, and `line` as `null` (no code of the tree sets it,
-  `packages/sqlite/src/sqlite.ts:805`).
+  `packages/sqlite/src/sqlite.ts:877`).
 - `P(T)` = 2 × ⌊(T − 1) / 30,000⌋ + 2: the most pages of a text of `T` bytes. A page is
   at most 30,000 characters and ends after its last newline (`packages/core/src/pages.ts:13-27`);
   so two pages in a row, but the last, hold at least 30,000 characters, and a text of `T`
@@ -1543,10 +1581,10 @@ sum is a bound over every text, with up to six pages.)
 | `entry` ≥ the largest of `accepted`, `message`, `end` and `start` | `entry`, `text` | each of the four is given whole |
 | `entry` ≤ `buffer` in bytes | `entry`, `buffer` | one entry fits an empty buffer |
 | `page` ≥ `entry` | `page`, `entry` | the first entry of a page always fits it |
-| `page` ≤ `buffer` in bytes, and 1,000 ≤ `buffer` in entries | `page`, `buffer` | a first read's room for one page can come |
-| `idle` ≥ 2 × (`wait` + 2 × (`request` + `store`)), and `idle` ≥ 2 × `ping`, and `idle` ≤ 255 | `idle`, `wait`, `request`, `store`, `ping` | Bun's idle limit does not close a client that waits (section 3, "Admission", 9) |
-| the WebSocket's idle limit ≥ 2 × `ping`, and ≤ 960 | the WebSocket's idle limit, `ping` | Bun does not close a socket that the host pings |
-| `hub` ≥ 1 | `hub` | the hub's maximum is `hub` × the largest sum and C ("The bytes of one entry", 5) |
+| `page` ≤ `buffer` in bytes, and `page` in events ≤ `buffer` in entries (1,000 at the default) | `page`, `buffer` | a first read's room for one page can come |
+| `idle` ≥ 2 × (`wait` + 2 × (`request` + `store`)), and `idle` ≥ 2 × `ping`, and `idle` ≤ 255,000 | `idle`, `wait`, `request`, `store`, `ping` | Bun's idle limit does not close a client that waits (section 3, "Admission", 9) |
+| the WebSocket's idle limit (`socketIdle`) ≥ 2 × `ping`, and ≤ 960,000 | `socketIdle`, `ping` | Bun does not close a socket that the host pings |
+| `hub` ≥ 1 | `hub` | the hub's maximum is `hub` × the largest sum and C ("The bytes of one entry", 5); its field's own range, 1 to 65,536, refuses a `hub` under 1 first (lead, ec-9p347; ec-tvs01) |
 
 A set of limits that passes these has no numbered event that cannot be given whole, but a
 `call`'s `program` or an `end`'s `why` that F4 cuts (the `why` only past `entry`), among
@@ -1571,11 +1609,11 @@ the events written under it.
   itself at most one time in 30 s (section 3, "The order and the numbers", rule 3; lead,
   ec-9p347, T11). A new connection reads from the client's number and meets the
   same event until the limits are set back, so the code is how the client and the
-  operator of the deployment learn that the fault is the host's. The two entries
-  `internal` of R4 and `1011` of R6 are for two cases only: this one, and a snapshot whose
-  other fields alone pass `page`, which R2 answers with `500 internal` and R6 closes with
-  `1011` (section 4, "The snapshot"; lead, ec-x0hhp, U1a). The client's rule 3 after
-  `internal` covers both. (S2a)
+  operator of the deployment learn that the fault is the host's. R4's `internal` is for
+  this case only. The second case is a snapshot whose other fields alone pass `page`,
+  which R2 answers with `500 internal` and R6 closes with `1011` (section 4, "The
+  snapshot"; lead, ec-x0hhp, U1a): so R6's `1011` is for these two cases only. The
+  client's rule 3 after `internal` covers both. (S2a)
 
 ### What is not proved here
 
@@ -1608,12 +1646,27 @@ or a later bead does, as named.
   answered, keep a socket open past 120 s with no other frame. The socket's bead proves it.
 - **A store that stalls** (lead, ec-12a32, O6): that each call of the store is ended by
   its own timer within `store` (section 9, item 9), and that the lock and the place are
-  then free by the numbers of section 2, "The deadline of the work under the lock". The
-  local store's calls do not yield: the SQLite driver runs each statement on the
-  process's one thread, and waits up to 5 s on a locked file
-  (`packages/sqlite/src/database.ts:8`). So a stall there stops the process's other work
-  for that time, and no timer of the host can cut it. The store's beads prove the timer.
-  Until they land, the bounds of the deadline are the design's, not measured ones.
+  then free by the numbers of section 2, "The deadline of the work under the lock". On
+  SQLite it is proved (ec-go3ne, ec-werq6, ec-fbcoc; lead, ec-0r89g, the store's waits):
+  each wait on the file ends within `store` (5 s by default), by the driver's own wait on
+  a locked file, which is given the limit `store` (`packages/sqlite/src/database.ts`), and
+  fails with a `StoreError` that names its operation. The local store's calls do not
+  yield: the driver runs each statement on the process's one thread, so such a wait stops
+  the process's other work for that time, and no timer of the host can cut it. A call
+  waits longer than `store` only behind calls of its own process on the one connection,
+  whose transactions hold only calls of the store: accepted, with no mechanism. The open
+  of the file is not one wait: on a file not yet in WAL mode it can wait at three
+  statements in a row (the readiness `BEGIN`, its `COMMIT`, the change to WAL), so it ends
+  within 3 × `store`, and within `store` on a WAL file; the build of `storeLayer` adds the
+  launch's transaction (4 × and 2 × `store` by sum). These are sums of the driver's waits
+  on the file's locks: the scheduler's time, a process's start and the statements
+  themselves are on top. For the host the open is at the process's start, not in a
+  request, and the launch of a load (`Chats.store`) is one call of the store, inside the
+  page's sums. An open that fails at the change to WAL of a new file leaves the schema and
+  this version's mark in the rollback-journal mode, with no launch row and no row of a
+  chat; the next open finds the mark, writes no schema and changes the mode: accepted as
+  the recovery. A store on a network covers the wait for a connection with its timer
+  (section 9, item 9); its own bead proves it.
 - **The two cases that pass the deadline's sums** (lead, ec-349x0, R5; section 2,
   "Accepted risks", 1 and 2): the replay of a stopped load by fitted pages, and a log
   that waits for the memory's own lock. The store's beads and the host's server bead
@@ -1621,14 +1674,17 @@ or a later bead does, as named.
 - **The cap of one answer in bytes** (C of "The bytes of one entry"): the host's stack
   bead sets `request.max` for a host's chat and measures the bytes of the largest
   `program` and the sum of a turn's pieces under it.
-- **`Jwt.verify` refuses `alg: none` and an `alg` other than the key's**: the token's bead
-  proves each with a case.
+- **The token's `alg`** (ec-f6ftq; review ec-n7ws6): proved. Check 3 refuses `alg: none`
+  and an `alg` other than HS256 before any call of the library, and check 4 is
+  `Jws.verify` of `effect/jose`, on purpose: `Jwt.verify` would check `exp` and `nbf`
+  before the claims' forms (the comment in `packages/server/src/token.ts`). A case of
+  `packages/server/src/token.test.ts` holds each: `none`, and HS512 with the same secret.
 - **The bytes of a chat's pick and goal** (lead, ec-x0hhp, U1a): the pick's four texts
   and the goal have no bound in bytes of their own in the store, and a snapshot counts
   them. No route of the host writes either: a host's chat gets its pick from the
   backend's `makeChat` or R9's default pick, and no function of a host's chat sets a goal.
 - **Two processes of `everchat serve` on one file**: the refusal of a live launch holds per
-  chat (`packages/sqlite/src/sqlite.ts:701-702`), but each process would take other chats.
+  chat (`packages/sqlite/src/sqlite.ts:753-754`), but each process would take other chats.
   The local use runs one; the lease is the server plan's [Q22].
 - **The time of a load and the memory of a loaded chat** in this host: the design's 30 ms
   and 2 MB [Q12, Q22] were measured elsewhere; the smoke test measures them here.
@@ -1649,22 +1705,26 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
 1. **The read of events, and `seq`** (ec-f7m3i Q4). The tree has both (7ee9e87):
    `Reading.eventsAfter(after, limit)`, the chat's numbered events after `after`, in the
    order of their numbers, at most `limit`, with the store's `Event`, which the turn loop
-   publishes too (`packages/core/src/store.ts:381-387`, `:198-203`); and the chat's `seq` in
-   `Chat`, 0 with no event (`packages/core/src/store.ts:126`). The host adds `cut` (section
+   publishes too (`packages/core/src/store.ts:395-401`, `:212-217`); and the chat's `seq` in
+   `Chat`, 0 with no event (`packages/core/src/store.ts:140`). The host adds `cut` (section
    4) and reads in pages (section 8, "Pages").
-2. **The key** (section 5). The schema's column and index, with a new mark; the store's
-   append takes a key for a message's first page; a read of the message of a key with its
-   pages and its `accepted` number; and `Turns.say(text, key?)`, which, for a key that the
-   chat has, writes nothing and gives the first message. `say` gives its `accepted` number
-   too: today it gives only the pages (`packages/core/src/turn.ts:492-523`).
-3. **"Busy now" and the time of the last work** (ec-f7m3i Q8, gap 1). The turn loop gives
-   both, with no wait: busy while a turn or a call runs; the memory gives busy while a
-   compaction runs; and the time when the chat last had work. The host's timer reads them
-   under the channel's lock (section 2).
-4. **`result` in the core, over the store.** Today it is in the local package and writes
-   a file again (`packages/local/src/localfunctions.ts:128-145`). The host's chat needs it
-   with no file; and an output limit that writes no file and names `result(id)` only (the
-   interface allows it: `packages/core/src/limit.ts:108-112`).
+2. **The key** (section 5). Done (ec-bu4bg, ec-ts3qg): the schema's column and index,
+   with the mark 6; the store's append takes a key for a message's first page
+   (`Store.append(messages, key?)`); a read of the message of a key with its pages and its
+   `accepted` number (`Reading.keyed`); and `Turns.say(text, key?)`, which, for a key that
+   the chat has, writes nothing and gives the first message. `say` gives
+   `Sent { messages, accepted, repeat }`: the pages, the `accepted` number, and whether
+   the key was a repeat (`packages/core/src/turn.ts`).
+3. **"Busy now" and the time of the last work** (ec-f7m3i Q8, gap 1). Done (ec-9txv3):
+   the turn loop gives both, with no wait: busy while a turn or a call runs
+   (`Turns.busy`); the memory gives busy while a compaction runs (`Memory.busy`); and the
+   time when each last had work (`Turns.worked`, `Memory.worked`). The host's timer reads
+   them under the channel's lock (section 2).
+4. **`result` in the core, over the store.** Done (ec-o9i2n): the core gives `RESULT`,
+   whose function reads the call's output from the store (`store.call`) with no file,
+   `HOSTED` (`zoom`, `date`, `result`) and `hostedLayer`
+   (`packages/core/src/functions.ts`); and an output limit that writes no file and names
+   `result(id)` only, `noFileLayer` (`packages/core/src/limit.ts`).
 5. **The local stack as a function of a store.** `packages/local/src/main.ts:145-157`
    builds the store itself; the host needs it over the store that `Chats.store` gives, with
    `gatewayLayer` built one time for the process (section 2). The stack of a host's chat
@@ -1675,37 +1735,41 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    in the batch that makes the local package serve `Chats` (lead, ec-mxcl, comment of
    2026-11-16 15:38Z). The core's `NoChat` keeps its name.
 7. **A bound on the turn loop's hub** (section 8, "The bounds between the turn loop and a
-   client"; lead, ec-vgn58, C). `Turns.layer`'s options (`Options`,
-   `packages/core/src/turn.ts:165-168`) get the hub's capacity, a whole number of entries,
-   optional: with it the hub is `PubSub.sliding` of that capacity; with none it is
-   `PubSub.unbounded`, as today (`packages/core/src/turn.ts:194`), and the terminal gives
-   none. The stack of a host's chat gives the limit of section 8, 1,024 by default. The
+   client"; lead, ec-vgn58, C). Done (ec-9txv3): `Turns.layer`'s options have the hub's
+   capacity (`Options.hub`, `packages/core/src/turn.ts`), a whole number of entries from 1
+   to 65,536, optional: with it the hub is `PubSub.sliding` of that capacity; with none it
+   is `PubSub.unbounded`, and the terminal gives none. The stack of a host's chat gives
+   the limit of section 8, 1,024 by default. The
    test, in the host's batch: with the listener held, a burst of more numbered events than
    the capacity; then each client gets each number once, in order, and the listener read
    the lost ones from the store.
 8. **A bound on an `end`'s `why`** (section 8, "The bytes of one entry", 5; lead, ec-7bi64,
    F5). The turn loop keeps at most 2,000 characters of a `why`, for every use, before it
-   stores and publishes it, at the place where it makes the `why` well formed one time
-   (`end`, `packages/core/src/turn.ts:284-295`). Today
-   a failed turn's `why` is the wire's message (`packages/core/src/turn.ts:382`), which
-   holds the vendor's error text whole (`packages/openai/src/openai.ts:288-295`). The
-   test: a failed turn whose vendor error text is 100,000 characters gives an `end` whose
+   stores and publishes it, at the place where it makes the `why` well formed one time.
+   Done (ec-9txv3): `WHY` = 2,000 and `whyOf` (`packages/core/src/turn.ts`), which `end`
+   applies to every `why`, so a failed turn's `why`, the wire's message with the vendor's
+   error text (`packages/openai/src/openai.ts:288-295`), is cut there. The test: a failed
+   turn whose vendor error text is 100,000 characters gives an `end` whose
    `why` is 2,000 characters, the same in the row and in the event.
 9. **A timer on each call of the store** (section 2, "The deadline of the work under the
    lock"; lead, ec-12a32, O3). Each call of the store ends, done or with a typed fault
    (`StoreError`), within the limit `store` (5 s), by the store's own timer on the call;
    a transaction counts as one call, from its start to its commit. For a store on a
-   network, the timer covers the wait for a connection and the statement. A write that
+   network, the timer covers the wait for a connection and the statement. On SQLite the
+   timer is the driver's own wait on the file's locks, given `store`, and it is proved
+   (ec-go3ne, ec-werq6, ec-fbcoc): a call waits longer only behind calls of its own
+   process on the one connection, accepted with no mechanism, and the open of the file is
+   not one call (lead, ec-0r89g; section 8, "What is not proved here"). A write that
    fails so is rolled back, and nothing is published for it. The test, in each store's
    bead: a call that stalls fails at `store`, and the next call of the chat runs. No
    change of the log's order (O1): the turn loop's `record` and `Memory.apply` stay one
-   step that no interruption cuts (`packages/core/src/turn.ts:208-216`,
-   `packages/core/src/memory.ts:707-730`), so the commit comes before the publish, a
+   step that no interruption cuts (`packages/core/src/turn.ts:274-285`,
+   `packages/core/src/memory.ts:739-765`), so the commit comes before the publish, a
    key's numbers on a retry are those of the message that was committed, and a turn runs
-   in the loaded chat's scope, as today. One change next to it: `Turns.say` forks the turn
-   that its log began (`launch`, `packages/core/src/turn.ts:483-490`) in the same
-   uninterruptible step as its `record` (today the fork comes after it, `:519-521`), so a
-   turn that was logged always runs. The test: a `say` that is interrupted while its log
+   in the loaded chat's scope, as today. One change next to it, done (ec-ts3qg):
+   `Turns.say` forks the turn that its log began (`launch`, `packages/core/src/turn.ts`)
+   in the same uninterruptible step as its `record`, so a turn that was logged always
+   runs. The test: a `say` that is interrupted while its log
    writes ends with the message logged, its `start` published and its turn running.
 
 ## 10. Open
@@ -1734,8 +1798,8 @@ For a later glossary bead. Elsewhere this page uses the glossary's words.
   not joined gets only its own first read's gives.
 - **join**: the step at the end of a client's first read, under the give lock, at which
   the client starts to get the gives of the listener and of the reads at a load, after a
-  loss and at an unload; it needs the client's `given` at `last` or more and room in its
-  buffer for one entry of `entry` bytes.
+  loss and at an unload; it needs the client's `given` at `last` or more, or a channel
+  with no `last`, and room in its buffer for one entry of `entry` bytes.
 - **longest silence**: the longest time in which the host sends no byte to a client that
   waits, on any way (section 3, "Admission", 9); Bun's idle limit is at least twice it.
 - **fit**: the one function of the host that makes the JSON of an entry, measures it, and
