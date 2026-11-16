@@ -22,6 +22,23 @@
 //
 // The limits of memory and compute are parameters too, with defaults.
 //
+// The two bounds of compute:
+//
+// - The compute limit (`compute`, COMPUTE by default): a time, 60 s for one
+//   stretch of compute with no function at work. Its clock starts when the
+//   worker has booted (`onStarted`), not before; it stops while a function
+//   is at work, and starts again after each function.
+// - The compute budget (`polls`, none by default): a count of the engine's
+//   interrupt polls over the whole program, also while a function is at
+//   work; past it the program is stopped, with the inline engine's text.
+//   It bounds bytecode work, not time: work in a native between two polls
+//   (`repeat`, a string join, `JSON.parse`) is not counted (inline.ts). The
+//   investigation's measures, on its machine (ec-mgwvn, K8): 100,000 polls
+//   stop `for (;;) {}` after about 4.2 s, and do not stop
+//   `for (;;) Date.now()` within 60 s, where the compute limit stops it.
+//   The boot and the prelude take about 3 polls. The local use sets none;
+//   a hosted deployment sets it after a measure there.
+//
 // The call rows of the functions and the result are calls.ts's code, which
 // both engines use.
 
@@ -39,27 +56,21 @@ import { type Fields, functionCalls, numbers, ran } from "./calls.ts"
 // throws a RangeError for any other value (calls.ts, `numbers`).
 export interface Options {
   readonly memory?: number | undefined // bytes
-  readonly compute?: number | undefined // milliseconds
-  // The compute budget, in milliseconds: the most time that a program may
-  // compute with no function at work, summed over the whole program (the
-  // compute limit bounds one such stretch). It does not bound what a
-  // program computes while a function is at work: a program that starts a
-  // function, does not wait for it, and computes, is not stopped by the
-  // budget. Today nothing bounds what a program computes while a function
-  // is at work; the deadline of a program, which a hosted deployment will
-  // have, will bound it (docs/design.md, "Limits for hosted programs": 10
-  // minutes; not built yet). None when not given: the local use has none,
-  // and a hosted deployment sets it.
-  readonly budget?: number | undefined
+  readonly compute?: number | undefined // milliseconds: the compute limit
+  // The compute budget: the count of the engine's interrupt polls over the
+  // whole program, also while a function is at work; past it the program
+  // is stopped. A count, not a time, as on the inline engine (inline.ts
+  // says what it bounds). None when not given: the worker then counts
+  // nothing. The local use sets none; a hosted deployment sets it.
+  readonly polls?: number | undefined
   readonly worker?: URL | undefined // the program of the worker thread
   readonly quickjs?: string | undefined // the path of the QuickJS file
 }
 
 // The numeric fields of `Options`: the type check holds this list to them.
-const NUMBERS: Fields<Options> = { memory: true, compute: true, budget: true }
-
-// A time for a person: seconds, with a tenth below 10 s.
-const seconds = (ms: number): string => (ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10)) + " s"
+// A name that is not on it (the old time budget, `budget`, too) is no
+// option: the type check refuses it, and the engine does not read it.
+const NUMBERS: Fields<Options> = { memory: true, compute: true, polls: true }
 
 export const threadLayer = (options: Options = {}) => {
   // Read once, here: the engine uses only these.
@@ -71,9 +82,15 @@ export const threadLayer = (options: Options = {}) => {
       const store = yield* Store
       const memory = given.memory ?? MEMORY
       const compute = given.compute ?? COMPUTE
-      const budget = given.budget
+      const polls = given.polls
       const worker = options.worker
       const quickjs = options.quickjs ?? QUICKJS
+
+      // The program that the count stopped: the inline engine's text, to
+      // the byte (inline.ts), not the adopted code's, which names its
+      // option. With no count, no program ends so.
+      const spent = "The program was stopped: it computed for too long in all (" + polls +
+        " polls of the engine). Do less in one program."
 
       const run = Effect.fn("Sandbox.run")(function*(program: string, at: { readonly turn: number; readonly call: number }) {
         // The functions at work, and one call of a function: its row, its
@@ -83,39 +100,29 @@ export const threadLayer = (options: Options = {}) => {
           Effect.provideService(Store, store)
         )
 
-        // The compute limit and the compute budget: a clock that runs only
-        // while no function is at work. The limit starts again at each arm;
-        // the budget is what is left of it, and each disarm takes from it
-        // the time since the arm.
+        // The compute limit: a clock that runs only while no function is at
+        // work, and starts again at each arm. The count of polls is the
+        // worker's, and no function stops it.
         const controller = new AbortController()
         let pending = 0
         let timer: ReturnType<typeof setTimeout> | undefined
-        let armed: number | null = null // when the clock was armed
-        let left = budget ?? Number.POSITIVE_INFINITY
         let over = false
         const arm = () => {
-          armed = performance.now()
-          const spent = left <= compute
           timer = setTimeout(() => {
             controller.abort(new Error(
-              spent
-                ? "The program was stopped: it used up its compute budget, " + seconds(budget ?? 0) + " of compute in all with no function at work. Do less in one program."
-                : "The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\")."
+              "The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\")."
             ))
-          }, Math.max(0, Math.min(compute, left)))
+          }, compute)
         }
         const disarm = () => {
           clearTimeout(timer)
           timer = undefined
-          if (armed !== null) {
-            left -= performance.now() - armed
-            armed = null
-          }
         }
 
         const vm = new CodemodeSandbox({
           timeoutMs: Number.POSITIVE_INFINITY,
           memoryLimitBytes: memory,
+          ...(polls === undefined ? {} : { interruptBudget: polls }),
           // Read and compiled once: the adopted code keeps it by its path.
           wasm: loadQuickJSWasm(quickjs),
           ...(worker === undefined ? {} : { workerUrl: worker }),
@@ -135,21 +142,28 @@ export const threadLayer = (options: Options = {}) => {
 
         const result = yield* Effect.promise((signal) => {
           signal.addEventListener("abort", () => controller.abort(new Error("The program was stopped.")), { once: true })
-          // The clock counts the boot of the worker too: `vm.execute` starts
-          // a new worker and loads QuickJS, and on a loaded host that can
-          // take most of the limit. The adopted code's `execute` gives no
-          // point after the boot; its `start` does (`onStarted`), but only
-          // in its deterministic mode, which changes what a program sees.
-          // That is the draft ec-q2nbc.
-          arm()
-          return vm.execute(program, { signal: controller.signal })
+          // The clock starts after the boot: `vm.execute` starts a new
+          // worker and loads QuickJS, which on a loaded host can take most
+          // of the limit, and `onStarted` comes once, when the prelude has
+          // run and before the program is compiled (pi/runtime/vm.ts). So
+          // no clock runs for a worker that never starts. What ends such a
+          // run is the stop: the fiber's interruption, or the end of the
+          // scope that runs it, aborts `controller` (above), and the adopted
+          // code then stops the worker. A worker that fails in its boot
+          // ends the run with its crash.
+          return vm.execute(program, { signal: controller.signal, onStarted: arm })
         }).pipe(
           Effect.ensuring(Effect.sync(() => {
             over = true
             disarm()
           }))
         )
-        return yield* ran(result, calls.working)
+        // With no deadline (`timeoutMs`), only the count ends a program as
+        // a `timeout`.
+        return yield* ran(
+          polls !== undefined && !result.ok && result.error.kind === "timeout" ? { ...result, error: { ...result.error, message: spent } } : result,
+          calls.working
+        )
       }, Effect.scoped)
 
       return Sandbox.of({ run })

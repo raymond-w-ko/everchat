@@ -311,7 +311,7 @@ export async function startVm(options: StartVmOptions): Promise<VmSession> {
 		settle = api.getProp("settle");
 		const run = api.getProp("run");
 		stalled = api.getProp("stalled");
-		if (clock) {
+		{
 			const versions = vm.versions;
 			const budget = options.interruptBudget ?? "none";
 			post({

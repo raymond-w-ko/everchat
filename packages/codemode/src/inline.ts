@@ -27,7 +27,8 @@
 //   of memory: `for (;;) {}` was stopped after 0.42 s, and the slow regular
 //   expression of tests/cases.ts after 2.6 s, but `for (;;)
 //   'x'.repeat(1e5)` still ran after 100 s.
-// - This engine has no limit in time and no compute budget. Where it is
+// - This engine has no limit in time. Its compute budget is the count of
+//   polls, `polls` (above). Where it is
 //   used, a limit of the platform on CPU time must bound it, or the thread
 //   engine is used.
 // - It blocks its host while a program computes: no timer and no other

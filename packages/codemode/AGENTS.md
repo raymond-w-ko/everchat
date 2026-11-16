@@ -30,3 +30,11 @@ The root `AGENTS.md` holds the rules for every file.
   be the one that the adopted code was written for, which its notice
   records, and a test checks it (`packages/codemode/src/sandbox.test.ts`).
   Change both together.
+- Its two bounds of compute (`packages/codemode/src/thread.ts`): the
+  compute limit (`compute`), a time for one stretch with no function at
+  work, which starts again after each function; and the compute budget
+  (`polls`), a count of the engine's polls over the whole program, also
+  while a function is at work, as on the inline engine. The count is no
+  time: work in a native between two polls is not counted. It has no
+  default: the local use sets none, and a hosted deployment sets it after a
+  measure there.

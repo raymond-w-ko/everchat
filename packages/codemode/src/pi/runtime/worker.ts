@@ -11,21 +11,42 @@
  * or embedded-module string specifier as `workerUrl`.
  */
 import { parentPort, workerData } from "node:worker_threads";
-import { isHostToWorkerMessage, type WorkerData, type WorkerToHostMessage } from "./protocol.ts";
+import {
+	isHostToWorkerMessage,
+	type WorkerData,
+	type WorkerExhaustedMessage,
+	type WorkerToHostMessage,
+} from "./protocol.ts";
 import { startVm } from "./vm.ts";
 
-function post(message: WorkerToHostMessage): void {
+function post(message: WorkerToHostMessage | WorkerExhaustedMessage): void {
 	parentPort?.postMessage(message);
 }
 
 async function main(data: WorkerData): Promise<void> {
 	const interrupt = new Int32Array(data.interrupt);
+	const budget = data.interruptBudget;
+	let polls = 0;
+	let exhausted = false;
 	// The VM lives until the host terminates the worker, so the session is never disposed.
 	const session = await startVm({
 		data,
 		wasm: data.wasm,
-		post,
-		shouldInterrupt: () => Atomics.load(interrupt, 0) !== 0,
+		...(budget === undefined ? {} : { interruptBudget: budget }),
+		post: (message) => {
+			// The interrupt surfaces as a crash or a failed done; report what caused it instead.
+			if (exhausted && budget !== undefined && (message.type === "done" || message.type === "crash")) {
+				post({ type: "exhausted", budget });
+				return;
+			}
+			post(message);
+		},
+		shouldInterrupt: () => {
+			if (Atomics.load(interrupt, 0) !== 0 || exhausted) return true;
+			if (budget === undefined || ++polls <= budget) return false;
+			exhausted = true;
+			return true;
+		},
 	});
 	parentPort?.on("message", (message: unknown) => {
 		if (isHostToWorkerMessage(message)) session.deliver(message);

@@ -2,7 +2,7 @@ import { Worker } from "node:worker_threads";
 import type { CodemodeSandboxOptions } from "../types.ts";
 import { type CodemodeWasmModule, loadQuickJSWasm } from "../wasm.ts";
 import { CodemodeSandboxBase, errorMessage, type VmLauncher } from "./execution.ts";
-import type { WorkerData } from "./protocol.ts";
+import { isWorkerExhaustedMessage, type WorkerData } from "./protocol.ts";
 
 function defaultWorkerUrl(): URL {
 	// `.ts` when running from source (tests, tsx), `.js` from the published dist.
@@ -26,7 +26,7 @@ function workerLauncher(options: CodemodeSandboxOptions): VmLauncher {
 			throw new Error(`Failed to load QuickJS: ${errorMessage(error)}`);
 		}
 		const interrupt = new SharedArrayBuffer(4);
-		const workerData: WorkerData = { ...data, wasm: module, interrupt };
+		const workerData: WorkerData = { ...data, wasm: module, interrupt, interruptBudget: options.interruptBudget };
 		const releaseWorker = options.acquireWorker?.();
 		let worker: Worker;
 		try {
@@ -44,6 +44,13 @@ function workerLauncher(options: CodemodeSandboxOptions): VmLauncher {
 				("watch:import" in message || "watch:require" in message)
 			)
 				return;
+			// Read here, before the execution checks the known messages: the worker and this host come from one
+			// build (a bundled host's worker entry imports this package's worker), so the worker that sends it
+			// is one that this host reads.
+			if (isWorkerExhaustedMessage(message)) {
+				events.failure({ kind: "timeout", message: `Execution exceeded its interrupt budget of ${message.budget}` });
+				return;
+			}
 			events.message(message);
 		});
 		worker.on("error", (error: unknown) => {

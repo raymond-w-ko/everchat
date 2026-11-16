@@ -181,6 +181,8 @@ interface ExecutionOptions {
 	store: Record<string, string>;
 	deterministic?: { startedAt: number; seed: number };
 	control?: Control;
+	/** `execute()`'s `onStarted`; a run with `control` uses its own. */
+	onStarted?: ((fingerprint: string) => void) | undefined;
 	launch: VmLauncher;
 }
 
@@ -193,6 +195,7 @@ class Execution {
 	private unsent: HostToWorkerMessage[] = [];
 	private readonly executors: ExecutionOptions["executors"];
 	private readonly control: Control | undefined;
+	private readonly onStarted: ((fingerprint: string) => void) | undefined;
 	/** Result numbers `deliver()` used. */
 	private readonly delivered = new Set<number>();
 	private readonly signal: AbortSignal | undefined;
@@ -209,6 +212,7 @@ class Execution {
 		});
 		this.executors = options.executors;
 		this.control = options.control;
+		this.onStarted = options.control ? options.control.onStarted : options.onStarted;
 		this.signal = options.signal;
 
 		if (Number.isFinite(options.timeoutMs)) {
@@ -340,7 +344,7 @@ class Execution {
 				else void this.handleCall(message);
 				break;
 			case "started":
-				this.control?.onStarted?.(message.fingerprint);
+				this.onStarted?.(message.fingerprint);
 				break;
 			case "idle":
 				this.control?.onIdle?.(message.seq, message.issued);
@@ -510,6 +514,7 @@ export class CodemodeSandboxBase {
 			signal: options.signal,
 			memoryLimitBytes: this.memoryLimitBytes,
 			store: serializeStore(options.store),
+			onStarted: options.onStarted,
 			launch: this.launch,
 		});
 		this.running.add(execution);

@@ -35,6 +35,8 @@ export interface WorkerData extends VmStartData {
 	 * polls it, because Bun's `worker.terminate()` cannot stop a thread that is spinning in wasm.
 	 */
 	interrupt: SharedArrayBuffer;
+	/** Interrupt polls the script may use, counted in the worker over the whole execution. Default: no count. */
+	interruptBudget?: number | undefined;
 }
 
 /** JSON-encoded `{ name?, message, stack? }` of an error thrown by the script. */
@@ -58,6 +60,13 @@ export type WorkerToHostMessage =
 	 * has issued `issued` calls in total.
 	 */
 	| { type: "idle"; seq: number; issued: number };
+
+/**
+ * The worker's count of polls passed `interruptBudget`: sent in place of the first `done` or `crash` after it. The
+ * worker launcher reads it before the execution checks the known messages, and fails the execution with
+ * `kind: "timeout"`.
+ */
+export type WorkerExhaustedMessage = { type: "exhausted"; budget: number };
 
 export type HostToWorkerMessage =
 	/**
@@ -86,6 +95,10 @@ export function isWorkerToHostMessage(value: unknown): value is WorkerToHostMess
 		type === "started" ||
 		type === "idle"
 	);
+}
+
+export function isWorkerExhaustedMessage(value: unknown): value is WorkerExhaustedMessage {
+	return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "exhausted";
 }
 
 export function isHostToWorkerMessage(value: unknown): value is HostToWorkerMessage {

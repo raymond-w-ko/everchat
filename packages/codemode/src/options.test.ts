@@ -20,7 +20,7 @@ import { threadLayer, type Options as ThreadOptions } from "./thread.ts"
 // it that is no such field, fails the type check (`just check`), so a new
 // numeric option cannot be left out of this test.
 type Numeric<T> = { [K in keyof T]-?: NonNullable<T[K]> extends number ? K : never }[keyof T]
-const THREAD = { memory: 32 * 1024 * 1024, compute: 250, budget: 5000 } satisfies Record<Numeric<ThreadOptions>, number>
+const THREAD = { memory: 32 * 1024 * 1024, compute: 250, polls: 100_000 } satisfies Record<Numeric<ThreadOptions>, number>
 const INLINE = { memory: 32 * 1024 * 1024, polls: 10_000 } satisfies Record<Numeric<InlineOptions>, number>
 
 const wasm = loadQuickJSWasm()
@@ -48,6 +48,7 @@ const BAD: ReadonlyArray<readonly [unknown, string]> = [
   [true, "true"],
   [Number.NaN, "NaN"],
   [0.5, "0.5"],
+  [1.5, "1.5"],
   [Number.MIN_VALUE, "5e-324"],
   [0, "0"],
   [-1, "-1"],
@@ -168,3 +169,23 @@ for (const engine of engines) {
     expect(large).toEqual({ output: "2", failed: false })
   }, 30_000)
 }
+
+// The old time budget, `budget`, is no option of the thread engine (its
+// compute budget is the count, `polls`). It is refused as every name that
+// is no option is: the type check refuses it, and a layer given it anyway
+// does not read it, so it bounds nothing. A program that computes for 600
+// ms after its start, which a budget of 250 ms stopped, runs to its end, as
+// with a name that never was an option.
+test("thread: { budget: 5000 } is no option: the type check refuses it, and the engine does not read it", async () => {
+  // @ts-expect-error `budget` is no option of the thread engine.
+  expect(thrown(() => threadLayer({ budget: 5000 }))).toBeUndefined()
+  // @ts-expect-error nor is `nine`.
+  expect(thrown(() => threadLayer({ nine: 5000 }))).toBeUndefined()
+  // Bad values are not checked either: the engine reads no such field.
+  expect(thrown(() => threadLayer({ budget: -1 } as ThreadOptions))).toBeUndefined()
+  const program = "const end = Date.now() + 600; while (Date.now() < end) {}\nreturn 'done'"
+  for (const given of [{ budget: 250 }, { nine: 250 }]) {
+    const [got] = await runs(threadLayer(given as ThreadOptions), [program])
+    expect(got).toEqual({ output: "done", failed: false })
+  }
+}, 30_000)

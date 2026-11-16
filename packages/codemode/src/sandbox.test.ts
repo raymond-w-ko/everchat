@@ -4,19 +4,24 @@
 // run by thread.test.ts) are not repeated here: what is here is this
 // engine's own.
 //
-// The bounds, by the suite's rule: the engine's clock starts before the
-// boot of its worker (thread.ts), which on a loaded host can take most of
-// a second, so a program that must run has a bound of BOUND, far past that
-// boot, with its stretches of compute and its waits sized to it; only a
-// program that a wall must stop runs under the small bound of 250 ms.
+// The bounds, by the suite's rule: the engine's clock starts after the
+// boot of its worker (thread.ts, `onStarted`), so the boot, which on a
+// loaded host can take most of a second, is not counted (a case below
+// holds the boot back past the limit). A loaded host slows the compute
+// itself too, so a program that must run has a bound of BOUND, with its
+// stretches of compute and its waits sized to it; only a program that a
+// wall must stop runs under the small bound of 250 ms.
 
 import { expect, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
 import { type Caller, FunctionError, Functions } from "@everchat/core/functions"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
+import { CodemodeSandbox, loadQuickJSWasm } from "./pi/index.ts"
 import { threadLayer } from "./thread.ts"
 
 type Fake = (args: ReadonlyArray<unknown>, caller: Caller) => Effect.Effect<unknown, FunctionError>
@@ -78,7 +83,7 @@ const withSandbox = <A, E>(
   file: string,
   fake: ReturnType<typeof fakes>,
   effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
-  over: { memory?: number; compute?: number; budget?: number } = {}
+  over: { memory?: number; compute?: number; polls?: number; worker?: URL } = {}
 ) => {
   const store = storeLayer(file, options())
   const sandbox = threadLayer(over).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
@@ -223,9 +228,9 @@ test("a function that the program did not wait for is stopped, and the result sa
 // Limits and stops
 // ----------------
 
-// The bound of a test whose programs must run: far past the boot of a
-// worker on a loaded host (most of a second), and short enough that the
-// file runs in well under 30 s. Its stops say "2 s".
+// The bound of a test whose programs must run: far past a stretch of their
+// compute on a loaded host, and short enough that the file runs in well
+// under 30 s. Its stops say "2 s".
 const BOUND = 2000
 
 test("the compute limit stops a program that loops, and not one that waits for a function", async () => {
@@ -254,68 +259,209 @@ test("the compute limit stops a program that loops, and not one that waits for a
 const busy = (ms: number, times: number) =>
   `for (let i = 0; i < ${times}; i++) { const end = Date.now() + ${ms}; while (Date.now() < end) {} await nothing() }\nreturn "done"`
 
-// The stop of a budget of `seconds` (as the engine writes them).
-const budgetStop = (seconds: string) =>
-  `The program was stopped: it used up its compute budget, ${seconds} of compute in all with no function at work. Do less in one program.`
+// The compute budget is a count of the engine's polls (thread.ts). A poll
+// is the engine's check for an interrupt, made as a program computes: a
+// loop of 1,000,000 steps takes about 200 of them, the same number on each
+// run, and the boot and the prelude about 3. So the count of these cases,
+// 1,000, is far above what a small program takes, and a loop of 1,500,000
+// steps (`steps`) takes about 0.3 of it.
+const POLLS = 1000
+const steps = (n: number) => `for (let i = 0; i < ${n}; i++) {}`
 
-test("with no budget, the compute limit starts again after each function", async () => {
+// The stop of the count (the inline engine's text, as the engine writes it).
+const spent = (polls: number) =>
+  `The program was stopped: it computed for too long in all (${polls} polls of the engine). Do less in one program.`
+
+test("with no count, the compute limit starts again after each function", async () => {
   const file = newFile()
   await withSandbox(file, fakes(), (run) =>
     Effect.gen(function*() {
       // 5 times a quarter of the bound: more than the limit in all, less in
-      // each stretch, also in the first, which has the boot in it.
+      // each stretch.
       expect(yield* run(busy(BOUND / 4, 5))).toEqual({ output: "done", failed: false })
     }), { compute: BOUND })
 }, 60_000)
 
-test("the compute budget stops a program that computes too long in all, and not one that waits", async () => {
+test("the count stops a program that computes too long in all, and not one that waits", async () => {
   const file = newFile()
   const fake = fakes()
   await withSandbox(file, fake, (run) =>
     Effect.gen(function*() {
-      // 8 stretches of 0.3 of the budget, a function after each: twice the
-      // budget in all. With the boot at most 0.7 of it, at least one
-      // function is called; and the budget runs out in the fourth stretch at
-      // the latest, so no more than 3 are.
-      expect(yield* run(busy(0.3 * BOUND, 8))).toEqual({ output: budgetStop("2 s"), failed: true })
-      expect(fake.seen.every((one) => one.name === "nothing")).toBe(true)
-      expect(fake.seen.length).toBeGreaterThanOrEqual(1)
-      expect(fake.seen.length).toBeLessThanOrEqual(3)
-      // A wait for a function is not compute time: after a wait longer than
-      // the budget, the program still computes, and is not stopped.
-      const waits = `const got = await slow(${BOUND + 200}); const end = Date.now() + 200; while (Date.now() < end) {}\nreturn got`
+      // 8 stretches of about 0.3 of the count, a function after each: more
+      // than twice the count in all. The boot takes about 3 polls and no
+      // clock, so three stretches end and call the function, and the count
+      // runs out in the fourth: exactly 3 calls.
+      expect(yield* run(`for (let k = 0; k < 8; k++) { ${steps(1_500_000)} await nothing() }\nreturn "done"`)).toEqual({ output: spent(POLLS), failed: true })
+      expect(fake.seen.map((one) => one.name)).toEqual(["nothing", "nothing", "nothing"])
+      // A wait for a function is no poll: after a wait longer than the
+      // compute limit, the program still computes a little, and is not
+      // stopped.
+      const waits = `const got = await slow(${BOUND + 200}); ${steps(100_000)}\nreturn got`
       expect(yield* run(waits)).toEqual({ output: "slept", failed: false })
-    }), { compute: BOUND, budget: BOUND })
+    }), { compute: BOUND, polls: POLLS })
 }, 60_000)
 
-test("a budget alone stops a loop after an await, and the limit still speaks when it is the nearer one", async () => {
+test("a count alone stops a loop after an await, and the limit still speaks when it is the nearer one", async () => {
   const file = newFile()
-  await withSandbox(file, fakes(), (run) =>
+  const fake = fakes()
+  await withSandbox(file, fake, (run) =>
     Effect.gen(function*() {
       const started = performance.now()
-      expect(yield* run("await nothing(); for (;;) {}")).toEqual({ output: budgetStop("0.3 s"), failed: true })
+      expect(yield* run("await nothing(); for (;;) {}")).toEqual({ output: spent(POLLS), failed: true })
       expect(performance.now() - started).toBeLessThan(3000)
-    }), { budget: 250 })
+      // The stop comes after the await: the function was called, once.
+      expect(fake.seen.map((one) => one.name)).toEqual(["nothing"])
+    }), { polls: POLLS })
+  // 100,000 polls take about 4 s of this loop; the limit, 250 ms, comes
+  // first.
   await withSandbox(newFile(), fakes(), (run) =>
     Effect.gen(function*() {
       const loop = yield* run("for (;;) {}")
       expect(loop.failed).toBe(true)
       expect(loop.output).toStartWith("The program was stopped: it computed for 0 s with no function at work.")
-    }), { compute: 250, budget: 5000 })
+    }), { compute: 250, polls: 100_000 })
 })
 
-// The known limit of the budget (ec-x0cm): the clock is on the host, and it
-// does not run while a function is at work, so a program that computes
-// then is not stopped. A change of the engine that bounds it fails here.
-test("the known limit (ec-x0cm): the budget does not count what a program computes while a function is at work", async () => {
-  const file = newFile()
-  await withSandbox(file, fakes(), (run) =>
+// The count is the worker's, and it goes on while a function is at work: a
+// program that starts a function, does not wait for it, and computes, is
+// stopped by it. The compute limit does not run then, so before the count
+// (ec-x0cm) no limit of the engine stopped it.
+test("the count stops a program that computes while a function is at work", async () => {
+  // About 20 times the count (about 0.8 s on an idle host), while `slow` is
+  // at work: `slow()` waits 60 s, and the end of the program stops it.
+  const program = `slow(); ${steps(100_000_000)}\nreturn 'done'`
+  await withSandbox(newFile(), fakes(), (run) =>
     Effect.gen(function*() {
-      // It computes for longer than its budget while the function is at work.
-      const out = yield* run(`slow(${2 * BOUND}); const end = Date.now() + ${BOUND + 500}; while (Date.now() < end) {}\nreturn 'done'`)
+      expect(yield* run(program)).toEqual({ output: spent(POLLS), failed: true })
+    }), { compute: BOUND, polls: POLLS })
+  // With no count, a program that computes for longer than the compute
+  // limit while `slow` is at work runs to its end: the limit waits while
+  // the function is at work. The stretch is timed by the clock, so that a
+  // loaded host does not change its length.
+  const longer = `slow(); const end = Date.now() + ${BOUND + 500}; while (Date.now() < end) {}\nreturn 'done'`
+  await withSandbox(newFile(), fakes(), (run) =>
+    Effect.gen(function*() {
+      const out = yield* run(longer)
       expect(out.failed).toBe(false)
       expect(out.output).toStartWith("done")
-    }), { budget: BOUND })
+    }), { compute: BOUND })
+}, 60_000)
+
+// A worker program for the cases below, in a directory of its own: it
+// waits, then runs the adopted code's worker, or never runs it.
+const ADOPTED = new URL("./pi/runtime/worker.ts", import.meta.url)
+const workerFile = (body: string) => {
+  const file = path.join(path.dirname(newFile()), "worker.ts")
+  fs.writeFileSync(file, body)
+  return new URL("file://" + file)
+}
+
+test("the compute limit's clock starts after the boot: a boot longer than the limit stops no program", async () => {
+  // The boot is held back for 1 s, four times the limit, before the
+  // adopted worker starts.
+  const held = workerFile(`await new Promise((done) => setTimeout(done, 1000))\nawait import(${JSON.stringify(ADOPTED.href)})\n`)
+  await withSandbox(newFile(), fakes(), (run) =>
+    Effect.gen(function*() {
+      const started = performance.now()
+      expect(yield* run("return 1")).toEqual({ output: "1", failed: false })
+      // The run had the held boot in it.
+      expect(performance.now() - started).toBeGreaterThanOrEqual(1000)
+      // After the boot the clock runs: a loop is stopped by it.
+      const loop = yield* run("for (;;) {}")
+      expect(loop.failed).toBe(true)
+      expect(loop.output).toStartWith("The program was stopped: it computed for 0 s with no function at work.")
+    }), { compute: 250, worker: held })
+}, 60_000)
+
+// The point that the clock starts at (`onStarted`, pi/runtime/vm.ts): once
+// for each run, after the prelude has run. A memory limit of 64 KiB lets
+// QuickJS start and its prelude run out of memory: such a VM never gives
+// the point.
+test("the point after the boot comes once, after the prelude: a VM whose prelude fails never gives it", async () => {
+  const wasm = loadQuickJSWasm()
+  const run = async (memoryLimitBytes: number) => {
+    let started = 0
+    const result = await new CodemodeSandbox({ timeoutMs: 30_000, wasm, memoryLimitBytes }).execute("return 1", { onStarted: () => void started++ })
+    return { ok: result.ok, started }
+  }
+  expect(await run(64 * 1024)).toEqual({ ok: false, started: 0 })
+  expect(await run(32 * 1024 * 1024)).toEqual({ ok: true, started: 1 })
+}, 60_000)
+
+// A worker program that never runs the adopted worker, so no `started`
+// comes, and that beats: it appends one byte to a file every 50 ms while
+// its thread lives. The file is in the worker's own directory, under the
+// run's temporary root. `size` reads the file's size (0 before the first
+// beat).
+const beatingWorker = () => {
+  const dir = path.dirname(newFile())
+  const beat = path.join(dir, "beat.txt")
+  const file = path.join(dir, "worker.ts")
+  fs.writeFileSync(file, `import * as fs from "node:fs"\nsetInterval(() => fs.appendFileSync(${JSON.stringify(beat)}, "x"), 50)\n`)
+  return { url: new URL("file://" + file), size: () => (fs.existsSync(beat) ? fs.statSync(beat).size : 0) }
+}
+
+// Waits for the worker's first beat; fails if none comes within BOUND.
+const beats = (size: () => number) =>
+  Effect.gen(function*() {
+    const start = performance.now()
+    while (size() === 0) {
+      if (performance.now() - start > BOUND) return yield* Effect.die(new Error(`the worker did not beat within ${BOUND} ms`))
+      yield* Effect.sleep("20 millis")
+    }
+  })
+
+// Waits until the worker beats no more: two reads 500 ms apart (ten beats)
+// that are equal. No single wait decides it, so a loaded host does not;
+// fails if no such pair comes within BOUND.
+const stops = (size: () => number) =>
+  Effect.gen(function*() {
+    const start = performance.now()
+    let last = size()
+    for (;;) {
+      yield* Effect.sleep("500 millis")
+      const now = size()
+      if (now === last) return
+      if (performance.now() - start > BOUND) {
+        return yield* Effect.die(new Error(`the worker still beats ${BOUND} ms after the stop (${last} then ${now} bytes)`))
+      }
+      last = now
+    }
+  })
+
+test("a worker that never starts is not stopped by the clock, and the stop ends its run", async () => {
+  // It keeps its thread alive, and never runs the adopted worker: no
+  // `started` comes.
+  const never = beatingWorker()
+  await withSandbox(newFile(), fakes(), (run) =>
+    Effect.gen(function*() {
+      const fiber = yield* Effect.forkChild(run("return 1"))
+      // Four times the limit: no clock ends it.
+      yield* Effect.sleep("1 second")
+      expect(fiber.pollUnsafe()).toBeUndefined()
+      // The worker runs: the case cannot pass with one that never ran.
+      yield* beats(never.size)
+      expect(never.size()).toBeGreaterThan(0)
+      const started = performance.now()
+      yield* Fiber.interrupt(fiber)
+      expect(performance.now() - started).toBeLessThan(1000)
+      // The stop aborts the run, and the adopted code ends the worker.
+      yield* stops(never.size)
+    }), { compute: 250, worker: never.url })
+}, 60_000)
+
+test("the end of a run's scope ends a worker that never starts", async () => {
+  const never = beatingWorker()
+  await withSandbox(newFile(), fakes(), (run) =>
+    Effect.gen(function*() {
+      // A run forked in a scope, and not stopped by hand: the end of the
+      // scope stops it.
+      yield* Effect.scoped(Effect.gen(function*() {
+        yield* Effect.forkScoped(run("return 1"))
+        yield* beats(never.size)
+      }))
+      yield* stops(never.size)
+    }), { compute: 250, worker: never.url })
 }, 60_000)
 
 test("a program that takes too much memory fails, and EverChat goes on", async () => {

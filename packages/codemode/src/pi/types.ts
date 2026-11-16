@@ -67,6 +67,11 @@ export interface CodemodeSandboxOptions extends CodemodeSandboxBaseOptions {
 	 * limits until it exits. A thrown callback error fails the execution and requests worker termination.
 	 */
 	onWorkerStarted?(exited: Promise<void>): void;
+	/**
+	 * Interrupt polls an execution may use before it fails with `kind: "timeout"`, counted in the worker over the
+	 * whole execution, also while a tool is at work. Default: no count.
+	 */
+	interruptBudget?: number | undefined;
 }
 
 /** A call the script made in a {@link CodemodeSandboxBase.start} run, answered with `CodemodeRun.deliver()`. */
@@ -152,4 +157,6 @@ export interface CodemodeExecuteOptions {
 	 * `store()` calls come back as `result.storeWrites`; persisting them is up to the caller.
 	 */
 	store?: Readonly<Record<string, unknown>>;
+	/** The VM is built and its prelude has run: the script is compiled next. Once, before any of its calls. */
+	onStarted?(fingerprint: string): void;
 }

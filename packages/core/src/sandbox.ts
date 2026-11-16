@@ -25,17 +25,17 @@
 //   no function at work. The sandbox has no timers, so a program that
 //   computes for that long is in a loop. The limit starts again after each
 //   function, so it bounds one stretch of compute, not the program.
-// - The compute budget, an option of the engine: the most time that a
-//   program may compute with no function at work, summed over the whole
-//   program (the compute limit bounds one such stretch). The local use has
-//   none; a hosted deployment sets it. The time that a program waits for a
-//   function counts for neither. Neither bounds what a program computes
-//   while a function is at work: a program that starts a function, does
-//   not wait for it, and computes, is not stopped by the budget.
-//   Today nothing bounds what a program computes while a function is at
-//   work; the deadline of a program, which a hosted deployment will have,
-//   will bound it (docs/design.md, "Limits for hosted programs": 10
-//   minutes; not built yet).
+// - The compute budget, an option of each engine (`polls`): a count of the
+//   engine's interrupt polls over the whole program, also while a function
+//   is at work. Past it the program is stopped. It bounds bytecode work,
+//   not time: work in a native between two polls is not counted, which is
+//   why the compute limit stays (packages/codemode/src/thread.ts gives the
+//   measures). The time that a program waits for a function counts for
+//   neither. The local use sets none; a hosted deployment sets it after a
+//   measure there. The one time wall while a function is at work will be
+//   the deadline of a program, which a hosted deployment will have
+//   (docs/design.md, "Limits for hosted programs": 10 minutes; not built
+//   yet).
 // - No function is left at work. When a program ends, the functions that
 //   it did not wait for are stopped, and the result says so. When a
 //   program is stopped, its functions are stopped too. A function that was
