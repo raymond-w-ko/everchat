@@ -89,7 +89,10 @@ const ACCENT = "frümpelin"
 const SIGMA = "θριμοσ"
 const ENDS_N = "nebwick"
 const JOINED = "snerk1aword"
-const ALL_WORDS = [...WORDS, "zub", ACCENT, SIGMA, ENDS_N, JOINED]
+// A word that the end of X1's head, `(EACCES): `, and the start of a path
+// make together.
+const HEAD_JOINED = "eaccesmoorvex"
+const ALL_WORDS = [...WORDS, "zub", ACCENT, SIGMA, ENDS_N, JOINED, HEAD_JOINED]
 
 // No word of `words` in the output, in any letter case, and with no mark
 // inside it, in either form of the compare.
@@ -639,6 +642,32 @@ const followOnRows: Array<Case> = [
     code: 1,
     lines: ["a.md:1: a word of the list (line 1)", "a.md:3: a word of the list (line 1)"],
     last: /^words: 2 matches of the list in 1 files$/
+  },
+  {
+    name: "X: the end of the head of a file that cannot be read and the start of its path make a word: the path is written over whole",
+    tracked: { "moorvex.md": "clean\n" },
+    setup: (root) => fs.chmodSync(path.join(root, "moorvex.md"), 0),
+    list: `zorblat\n${HEAD_JOINED}\n`,
+    skip: ROOT_USER,
+    code: 1,
+    lines: [],
+    last: /^words: a file of the tree cannot be read \(EACCES\): \*{10}$/
+  },
+  {
+    name: "U: a path with a capital I with a dot above (U+0130) that holds a word: reported as path, and written over whole",
+    tracked: { "docs/\u0130-quexxu.md": "clean\n" },
+    code: 1,
+    lines: [`${"*".repeat([..."docs/\u0130-quexxu.md"].length)}:path: a word of the list (line 3)`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "V: a line of the list with an escape is read in its plain form: a text without the escape's letter does not match",
+    tracked: { "a.md": "the zorblat here\n" },
+    // The plain form is `zorbnlat`; only the escaped form would be `zorblat`.
+    list: "zorb\\nlat\n",
+    code: 0,
+    lines: [],
+    last: /^words: 1 files, no word of the list$/
   }
 ]
 
