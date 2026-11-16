@@ -116,6 +116,12 @@ The rest:
   `just scoped packages/core/src/memory.test.ts` or
   `just scoped packages/sqlite/src/store.test.ts`). It runs `just check`
   first.
+- One case again, or one file, in a fresh process (a loop of runs, a
+  mutant): `bun test --isolate --timeout 20000 <path from the root> -t
+  <name>`, started at the root of the tree or of its copy, never in a
+  package's directory. Bun reads `bunfig.toml`, and so the preload
+  `tools/tmproot.ts` that removes the run's temporary files, only in the
+  directory where `bun test` starts.
 - Full check in a worktree: yes
 - Worktree setup: `bun install --frozen-lockfile`
 

@@ -4,6 +4,7 @@
 // to the file.
 
 import { Database as Sqlite } from "bun:sqlite"
+import { afterAll } from "bun:test"
 import { Effect, type Scope } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -14,8 +15,73 @@ import { type Chats, type LaunchInput, type Options, type Pick, Store } from "@e
 
 export const PICK: Pick = { vendor: "openai", model: "gpt-test", effort: "medium", speed: "slow" }
 
-// The path of the database in a new, empty home.
-export const newFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-test-")), Database.FILE)
+// The temporary root, when no preload made one. A `bun test` started at
+// the repository's root loads `tools/tmproot.ts` (bunfig.toml), which sets
+// TMPDIR to a root of the run, `everchat-run-*`, and removes it at the end.
+// Bun reads bunfig.toml only in the directory where `bun test` starts, so a
+// run started in a package's directory, or in a copy with no bunfig.toml,
+// has no such root; nor has a plain `bun <script>.ts`. There, this file
+// makes the root itself, as the preload does, and removes it at the end
+// that it can see: the end of the test file that loaded it (an `afterAll`),
+// or the exit of a script (SIGINT and SIGTERM too). Several files in one
+// process with no `--isolate`, or a file under `--rerun-each`, load this
+// file once: its `afterAll` runs at the end of the first file or pass, and
+// the next `newFile` makes a root again, which stays: one directory for the
+// run, not one for each case.
+const RUN = "everchat-run-"
+let own: string | undefined
+// TMPDIR as it was before this file set it to `own`.
+let before: string | undefined
+
+const remove = (): void => {
+  if (own === undefined) return
+  try {
+    fs.rmSync(own, { recursive: true, force: true })
+  } catch {
+    // A root that stays is no failure of a case.
+  }
+  // Give TMPDIR back only when it is still ours: a case that set its own
+  // keeps it.
+  if (process.env.TMPDIR === own) {
+    if (before === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = before
+  }
+  own = undefined
+}
+
+const root = (): void => {
+  if (own !== undefined) {
+    if (fs.existsSync(own)) return
+    // Removed by someone else: give TMPDIR back, and make it again.
+    remove()
+  }
+  if (path.basename(os.tmpdir()).startsWith(RUN)) return
+  before = process.env.TMPDIR
+  own = fs.mkdtempSync(path.join(os.tmpdir(), RUN))
+  process.env.TMPDIR = own
+}
+
+root()
+try {
+  afterAll(remove)
+} catch {
+  // Not under `bun test`: a script.
+  process.on("exit", remove)
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const end = (): void => {
+      remove()
+      process.removeListener(signal, end)
+      process.kill(process.pid, signal)
+    }
+    process.on(signal, end)
+  }
+}
+
+// The path of the database in a new, empty home, under the run's root.
+export const newFile = () => {
+  root()
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-test-")), Database.FILE)
+}
 
 export const options = (launch: Partial<LaunchInput> = {}): Options => ({
   launch: { pid: process.pid, host: "test-host", cwd: "/work", version: "0.0.0-test", runTag: "tag", ...launch },
