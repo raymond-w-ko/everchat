@@ -6,6 +6,7 @@
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Deferred, Effect, Fiber, Layer, Schedule } from "effect"
+import { TestClock } from "effect/testing"
 import { compactor, newFile, options, rows, withMemory } from "@everchat/local/testing"
 import {
   type Block,
@@ -307,6 +308,159 @@ test("a leaf starts only while fewer than JOBS leaves before it are not built", 
   assert.equal(asked, JOBS + 36) // every leaf once; the merges of such short lines are free
 })
 
+test("busy is true while a compaction runs and false after; worked is the layer's start, then the clock's now while busy, then the end's time", async () => {
+  const file = newFile()
+  const started = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  const held = compactor(() => Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(gate), { text: "s" })))
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const now = Effect.all({ busy: memory.busy, worked: memory.worked })
+      // The layer's start, with no work: the clock moves, worked does not.
+      const start = yield* memory.worked
+      yield* TestClock.adjust(60_000)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start })
+      yield* memory.push([{ kind: "user", text: sized(600) }])
+      yield* Deferred.await(started)
+      assert.deepStrictEqual(yield* now, { busy: true, worked: start + 60_000 })
+      yield* TestClock.adjust(5000)
+      assert.deepStrictEqual(yield* now, { busy: true, worked: start + 65_000 })
+      yield* Deferred.succeed(gate, undefined)
+      yield* memory.idle
+      // After the end: the end's time, also when the clock has moved by 7
+      // minutes since.
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 65_000 })
+      yield* TestClock.adjust(7 * 60_000)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 65_000 })
+    }).pipe(
+      Effect.provide(Memory.layer.pipe(Layer.provideMerge(storeLayer(file, options())), Layer.provide(held))),
+      Effect.provide(TestClock.layer())
+    )
+  )
+  assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "s" }])
+})
+
+test("a compaction is busy until its write is done: while the store holds its nodes, busy stays true and worked follows the clock; after, worked is the end's time", async () => {
+  const file = newFile()
+  const writing = Deferred.makeUnsafe<void>()
+  const release = Deferred.makeUnsafe<void>()
+  // The compactor answers at once; the store then holds the write of its
+  // node until the test lets it go.
+  let answered = false
+  const quick = compactor(() => {
+    answered = true
+    return { text: "summary" }
+  })
+  const holding = Layer.effect(
+    Store,
+    Store.useSync((store) =>
+      Store.of({
+        ...store,
+        putNodes: (nodes) =>
+          answered
+            ? Effect.andThen(Deferred.succeed(writing, undefined), Effect.andThen(Deferred.await(release), store.putNodes(nodes)))
+            : store.putNodes(nodes)
+      }))
+  ).pipe(Layer.provide(storeLayer(file, options())))
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const now = Effect.all({ busy: memory.busy, worked: memory.worked })
+      const start = yield* memory.worked
+      yield* TestClock.adjust(60_000)
+      yield* memory.push([{ kind: "user", text: sized(600) }])
+      yield* Deferred.await(writing)
+      assert.deepStrictEqual(yield* now, { busy: true, worked: start + 60_000 })
+      yield* TestClock.adjust(7 * 60_000)
+      assert.deepStrictEqual(yield* now, { busy: true, worked: start + 480_000 })
+      yield* Deferred.succeed(release, undefined)
+      yield* memory.idle
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 480_000 })
+      yield* TestClock.adjust(7 * 60_000)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 480_000 })
+    }).pipe(
+      // A failed check lets the write go too, so the layer can close.
+      Effect.ensuring(Deferred.succeed(release, undefined)),
+      Effect.provide(Memory.layer.pipe(Layer.provide(holding), Layer.provide(quick))),
+      Effect.provide(TestClock.layer())
+    )
+  )
+  assert.deepStrictEqual(rows(file, "select text from everchat_node"), [{ text: "summary" }])
+})
+
+test("a failed write of a long message starts no compaction and leaves no work: busy is false and worked stays; a compaction that runs when a write fails is busy until it ends", async () => {
+  // The store, with a transaction that fails on demand.
+  const faulty = (file: string, fail: { on: boolean }) =>
+    Layer.effect(
+      Store,
+      Store.useSync((store) =>
+        Store.of({
+          ...store,
+          transaction: (effect) =>
+            Effect.suspend(() => fail.on ? Effect.fail(new StoreError({ op: "transaction", cause: "disk full" })) : store.transaction(effect))
+        }))
+    ).pipe(Layer.provide(storeLayer(file, options())))
+
+  // The long message's write fails: the leaf it prepared never starts.
+  const fail = { on: false }
+  let asked = 0
+  const counted = compactor(() => {
+    asked += 1
+    return { text: "summary" }
+  })
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const now = Effect.all({ busy: memory.busy, worked: memory.worked })
+      const start = yield* memory.worked
+      yield* TestClock.adjust(60_000)
+      fail.on = true
+      const error = yield* Effect.flip(memory.push([{ kind: "user", text: sized(600) }]))
+      assert.ok(error instanceof StoreError)
+      assert.equal(asked, 0)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start })
+      yield* TestClock.adjust(7 * 60_000)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start })
+      assert.equal(asked, 0)
+    }).pipe(
+      Effect.provide(Memory.layer.pipe(Layer.provide(faulty(newFile(), fail)), Layer.provide(counted))),
+      Effect.provide(TestClock.layer())
+    )
+  )
+
+  // A compaction runs when another write fails: it is work until it ends.
+  const again = { on: false }
+  const started = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  const held = compactor(() => Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(gate), { text: "s" })))
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const now = Effect.all({ busy: memory.busy, worked: memory.worked })
+      const start = yield* memory.worked
+      yield* memory.push([{ kind: "user", text: sized(600) }])
+      yield* Deferred.await(started)
+      again.on = true
+      yield* Effect.flip(memory.push([{ kind: "user", text: "lost" }]))
+      yield* TestClock.adjust(60_000)
+      assert.deepStrictEqual(yield* now, { busy: true, worked: start + 60_000 })
+      // The job's own write is refused now (the memory stopped), and it ends.
+      yield* Deferred.succeed(gate, undefined)
+      for (let n = 0; n < 1000 && (yield* memory.busy); n++) {
+        yield* Effect.yieldNow
+      }
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 60_000 })
+      yield* TestClock.adjust(7 * 60_000)
+      assert.deepStrictEqual(yield* now, { busy: false, worked: start + 60_000 })
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(gate, undefined)),
+      Effect.provide(Memory.layer.pipe(Layer.provide(faulty(newFile(), again)), Layer.provide(held))),
+      Effect.provide(TestClock.layer())
+    )
+  )
+})
+
 // The views
 // ---------
 
@@ -442,7 +596,26 @@ test("a message is written with its free nodes, and a compaction with its usage"
   ])
 })
 
-test("a restart loads the views as they were, never rebuilt, and asks again for a compaction that a stop cut", async () => {
+test("`pushWith` with a key writes it on the message's first page only; with none, no page has one", async () => {
+  const file = newFile()
+  const paste = Array.from({ length: 900 }, (_, n) => "line " + n + " " + "p".repeat(40)).join("\n") // two pages
+  await withMemory(file, recorder().layer, Effect.gen(function*() {
+    const memory = yield* Memory
+    const [written] = yield* memory.pushWith([{ kind: "user", text: paste }], () => Effect.void, "key-1")
+    assert.deepStrictEqual(written.map((message) => message.i), [0, 1])
+    yield* memory.pushWith([{ kind: "user", text: "no key" }], () => Effect.void)
+    yield* memory.push([{ kind: "user", text: "nor here" }])
+  }))
+  assert.deepStrictEqual(rows(file, "select i, sender_key from everchat_msg order by i"), [
+    { i: 0, sender_key: "key-1" },
+    { i: 1, sender_key: null },
+    { i: 2, sender_key: null },
+    { i: 3, sender_key: null }
+  ])
+})
+
+// Alone 3,272 to 14,496 ms (median 8,016, 10 runs, load 30 to 40 on 30 cores).
+test("a restart loads the views as they were, never rebuilt, and asks again for a compaction that a stop cut", { timeout: 60_000 }, async () => {
   const file = newFile()
   const never = compactor(() => Effect.never)
   const { layer } = recorder((_, node) => "n" + node.l + "/" + node.i + " " + "s".repeat(380))

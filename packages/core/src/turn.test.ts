@@ -5,42 +5,55 @@
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Deferred, Effect, Fiber, Layer, PubSub } from "effect"
+import { TestClock } from "effect/testing"
 import * as path from "node:path"
-import { compactor, fakeWire, newFile, options, reply, rows, wireError } from "@everchat/local/testing"
+import { compactor, fakeWire, newFile, options, PICK, reply, rows, wireError } from "@everchat/local/testing"
 import { Ask, AskDelay } from "./ask.ts"
 import { Cache } from "./cache.ts"
 import { head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import type { Item, Reply, Request } from "./request.ts"
-import { storeLayer } from "@everchat/sqlite/bun"
-import { Store } from "./store.ts"
+import { chatsLayer, storeLayer } from "@everchat/sqlite/bun"
+import { Chats, Store, StoreError } from "./store.ts"
 import { limitLayer } from "@everchat/local/limitfile"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
 import { Sandbox } from "./sandbox.ts"
-import { CUT, cutText, HEAD, STOPPED, type TurnEvent, Turns } from "./turn.ts"
+import { CUT, cutText, HEAD, STOPPED, type TurnEvent, Turns, WHY, whyOf } from "./turn.ts"
 import { Stream } from "effect"
 
 type Run = (program: string) => Effect.Effect<{ output: string; failed: boolean }>
 
 // One launch: the store, the memory, the ask service over a fake wire, a
 // fake sandbox, and the turn loop. `over` puts a wrapper over the store or
-// the memory that the turn loop gets.
+// the memory that the turn loop gets; `over.base` is a store in place of the
+// file's chat; `over.hub` is the hub's capacity; `over.clock` runs it all on
+// a TestClock.
 const withTurns = <A, E>(
   file: string,
   wire: ReturnType<typeof fakeWire>,
   run: Run,
   effect: Effect.Effect<A, E, Turns | Memory | Store>,
   summaries: Parameters<typeof compactor>[0] = () => "a summary",
-  over: { readonly store?: Layer.Layer<Store, never, Store>; readonly memory?: Layer.Layer<Memory, never, Memory> } = {}
+  over: {
+    readonly store?: Layer.Layer<Store, never, Store>
+    readonly memory?: Layer.Layer<Memory, never, Memory>
+    readonly base?: Layer.Layer<Store>
+    readonly hub?: number
+    readonly clock?: boolean
+  } = {}
 ) => {
-  const real = storeLayer(file, options())
+  const real = over.base ?? storeLayer(file, options())
   const store = over.store === undefined ? real : over.store.pipe(Layer.provide(real))
   const memory = (over.memory === undefined ? Memory.layer : over.memory.pipe(Layer.provide(Memory.layer))).pipe(Layer.provideMerge(store), Layer.provide(compactor(summaries)))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
   const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
-  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
-  return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
+  const turns = Turns.layer({ declarations: DECLARATIONS, ...(over.hub === undefined ? {} : { hub: over.hub }) }).pipe(
+    Layer.provideMerge(memory),
+    Layer.provide(Layer.mergeAll(asking, sandbox, limit))
+  )
+  const ran = effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0)))
+  return Effect.runPromise(over.clock === true ? ran.pipe(Effect.provide(TestClock.layer())) : ran)
 }
 
 const noPrograms: Run = () => Effect.die("no program was expected")
@@ -86,7 +99,7 @@ test("a message starts a turn: one request with the view and the message, and th
     yield* Effect.forkChild(Stream.runForEach(turnsService.events, (event) => Effect.sync(() => seen.push(event))))
     yield* Effect.sleep("5 millis")
     const written = yield* turnsService.say("hello")
-    assert.deepStrictEqual(written.map((message) => [message.i, message.kind, message.text]), [[0, "user", "hello"]])
+    assert.deepStrictEqual(written.messages.map((message) => [message.i, message.kind, message.text]), [[0, "user", "hello"]])
     yield* turnsService.idle
     yield* Effect.sleep("5 millis")
     return (yield* (yield* Store).chat).uuid
@@ -363,9 +376,9 @@ test("a listener gets the events in the order of their numbers: a message of the
       const real = yield* Memory
       return Memory.of({
         ...real,
-        pushWith: (said, also) =>
+        pushWith: (said, also, key) =>
           Effect.gen(function*() {
-            const out = yield* real.pushWith(said, also)
+            const out = yield* real.pushWith(said, also, key)
             const say = window.say
             if (say !== null && said[0]?.kind === "asst") {
               window.say = null
@@ -458,7 +471,7 @@ test("a message that comes while a turn runs steers it, and starts no turn of it
     yield* turnsService.say("do this")
     yield* eventually(() => started)
     const written = yield* turnsService.say("and also that") // logged at once, while the program runs
-    assert.equal(written[0]!.i, 1)
+    assert.equal(written.messages[0]!.i, 1)
     assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_turn"), [{ n: 1 }])
     yield* Deferred.succeed(gate, undefined)
     yield* turnsService.idle
@@ -515,6 +528,208 @@ test("a long message goes in pages, and a turn waits until the messages before i
   const view = sent.kind === "user" ? sent.blocks.slice(0, -1).map((block) => block.text).join("") : ""
   assert.equal(view, "<chat>\n0+1|a summary\n</chat>\n")
   assert.deepStrictEqual(rows(file, "select taken from everchat_chat"), [{ taken: 2 }])
+})
+
+// The sender's key
+// ----------------
+
+// The rows that a repeat must leave as they were.
+const counts = (file: string) =>
+  rows(file, "select (select count(*) from everchat_msg) as msgs, (select count(*) from everchat_event) as events, (select count(*) from everchat_turn) as turns")
+
+test("a message with its sender's key gives its pages, the number of the `accepted` event that a listener got, and no repeat", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Hello to you."))
+  const [sent, seen] = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    const sent = yield* turnsService.say("hello", "key-1")
+    yield* turnsService.idle
+    return [sent, yield* PubSub.takeAll(subscription)] as const
+  })))
+  const accepted = seen.filter((event) => event.type === "accepted")
+  assert.equal(accepted.length, 1)
+  assert.deepStrictEqual(sent, { messages: accepted[0]!.messages, accepted: accepted[0]!.n, repeat: false })
+  assert.deepStrictEqual(sent.messages.map((message) => [message.i, message.kind, message.text]), [[0, "user", "hello"]])
+  assert.deepStrictEqual(rows(file, "select i, sender_key from everchat_msg order by i"), [{ i: 0, sender_key: "key-1" }, { i: 1, sender_key: null }])
+})
+
+test("the same key again, while idle and while a turn runs: nothing is written, published or started, and the first message comes back", async () => {
+  const file = newFile()
+  const gate = Deferred.makeUnsafe<void>()
+  let started = false
+  const wire = fakeWire((asked, n) => (n === 2 ? runs(asked, "call_1", "wait()") : says(asked, "Reply " + n + ".")))
+  const run: Run = () => Effect.as(Effect.andThen(Effect.sync(() => (started = true)), Deferred.await(gate)), { output: "ok", failed: false })
+  await withTurns(file, wire, run, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const first = yield* turnsService.say("hello", "key-1")
+    yield* turnsService.idle
+    // While idle.
+    const before = counts(file)
+    const subscription = yield* turnsService.subscribe
+    assert.deepStrictEqual(yield* turnsService.say("hello", "key-1"), { ...first, repeat: true })
+    assert.deepStrictEqual(counts(file), before)
+    assert.deepStrictEqual(yield* PubSub.takeUpTo(subscription, 1000), [])
+    assert.equal(wire.sent.length, 1)
+    // While a turn runs.
+    const second = yield* turnsService.say("run it", "key-2")
+    yield* eventually(() => started)
+    const during = counts(file)
+    yield* PubSub.takeUpTo(subscription, 1000)
+    assert.deepStrictEqual(yield* turnsService.say("run it", "key-2"), { ...second, repeat: true })
+    assert.deepStrictEqual(yield* turnsService.say("hello", "key-1"), { ...first, repeat: true })
+    assert.deepStrictEqual(counts(file), during)
+    assert.deepStrictEqual(yield* PubSub.takeUpTo(subscription, 1000), [])
+    yield* Deferred.succeed(gate, undefined)
+    yield* turnsService.idle
+  })))
+  // No repeat steered the turn that ran, and none started one.
+  assert.equal(wire.sent.length, 3)
+  assert.deepStrictEqual(wire.sent[2]!.items.map((item) => item.kind), ["user", "turn", "back"])
+  assert.deepStrictEqual(turns(file).map((turn) => [turn.id, turn.status]), [[1, "done"], [2, "done"]])
+  assert.deepStrictEqual(messages(file).filter((m) => m.kind === "user").map((m) => m.text), ["hello", "run it"])
+})
+
+test("the same key with another text gives the first message, and logs nothing", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const first = yield* turnsService.say("hello", "key-1")
+    yield* turnsService.idle
+    const before = counts(file)
+    assert.deepStrictEqual(yield* turnsService.say("something else", "key-1"), { ...first, repeat: true })
+    assert.deepStrictEqual(counts(file), before)
+  }))
+  assert.deepStrictEqual(messages(file).map((m) => m.text), ["hello", "Read."])
+})
+
+test("two messages of one key at the same time log one message: the key is read under the loop's lock", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  // The read of a key takes a while: with no lock over the read and the
+  // write, both messages read no message, and both are written.
+  const slowKeyed = Layer.effect(
+    Store,
+    Store.useSync((store) => Store.of({ ...store, keyed: (key) => Effect.tap(store.keyed(key), () => Effect.sleep("20 millis")) }))
+  )
+  const both = await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const both = yield* Effect.all([turnsService.say("hello", "key-1"), turnsService.say("hello", "key-1")], { concurrency: "unbounded" })
+    yield* turnsService.idle
+    return both
+  }), undefined, { store: slowKeyed })
+  assert.deepStrictEqual(both.map((sent) => sent.repeat).sort(), [false, true])
+  assert.deepStrictEqual(both[0]!.messages, both[1]!.messages)
+  assert.equal(both[0]!.accepted, both[1]!.accepted)
+  assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["asst", "Read."]])
+  assert.equal(turns(file).length, 1)
+})
+
+test("the same key in a second chat is a new message there, and each chat keeps its own", async () => {
+  const file = newFile()
+  const tenant = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a"
+  const made = await Effect.runPromise(
+    Effect.scoped(Chats.use((chats) => Effect.all([chats.make(tenant, PICK), chats.make(tenant, PICK)]))).pipe(Effect.provide(chatsLayer(file)))
+  )
+  const base = (chat: string) =>
+    Layer.effect(Store, Effect.orDie(Chats.use((chats) => chats.store(tenant, chat, options().launch)))).pipe(Layer.provide(chatsLayer(file)), Layer.orDie)
+  const say = (chat: string) =>
+    withTurns(file, fakeWire((asked) => says(asked, "Read.")), noPrograms, Effect.gen(function*() {
+      const turnsService = yield* Turns
+      const sent = yield* turnsService.say("hello", "key-1")
+      yield* turnsService.idle
+      return sent
+    }), undefined, { base: base(chat) })
+  const a = await say(made[0])
+  const b = await say(made[1])
+  const again = await say(made[0])
+  assert.equal(a.repeat, false)
+  assert.equal(b.repeat, false)
+  assert.deepStrictEqual(again, { ...a, repeat: true })
+  // One message of the key in each chat, each the first of its chat.
+  assert.deepStrictEqual(rows(file, "select chat, i from everchat_msg where sender_key = 'key-1' order by chat"), [{ chat: 1, i: 0 }, { chat: 2, i: 0 }])
+  assert.equal(b.messages[0]!.i, 0)
+})
+
+test("a message with no key is logged each time", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  const sent = await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const one = yield* turnsService.say("hello")
+    yield* turnsService.idle
+    const two = yield* turnsService.say("hello")
+    yield* turnsService.idle
+    return [one, two]
+  }))
+  assert.deepStrictEqual(sent.map((one) => [one.messages[0]!.i, one.repeat]), [[0, false], [2, false]])
+  assert.notEqual(sent[0]!.accepted, sent[1]!.accepted)
+  assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["asst", "Read."], ["user", "hello"], ["asst", "Read."]])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg where sender_key is not null"), [{ n: 0 }])
+})
+
+test("a message of more than one page with a key: `keyed` gives all its pages, and a repeat gives them back", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  const paste = Array.from({ length: 900 }, (_, n) => "line " + n + " " + "p".repeat(40)).join("\n") // two pages
+  await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const sent = yield* turnsService.say(paste, "key-1")
+    yield* turnsService.idle
+    assert.deepStrictEqual(sent.messages.map((message) => [message.i, message.more]), [[0, true], [1, false]])
+    assert.equal(sent.messages.map((message) => message.text).join(""), paste)
+    const keyed = yield* (yield* Store).keyed("key-1")
+    assert.deepStrictEqual(keyed._tag === "Some" ? keyed.value : null, { messages: sent.messages, accepted: sent.accepted })
+    assert.deepStrictEqual(yield* turnsService.say(paste, "key-1"), { ...sent, repeat: true })
+  }))
+  assert.deepStrictEqual(rows(file, "select i, sender_key from everchat_msg order by i"), [{ i: 0, sender_key: "key-1" }, { i: 1, sender_key: null }, { i: 2, sender_key: null }])
+})
+
+test("a key of another form is the store's to refuse: its error reaches the caller, and nothing is logged", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  const error = await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    return yield* Effect.flip(turnsService.say("hello", "a key"))
+  }))
+  assert.ok(error instanceof StoreError)
+  assert.deepStrictEqual(counts(file), [{ msgs: 0, events: 0, turns: 0 }])
+  assert.equal(wire.sent.length, 0)
+})
+
+test("a message that is interrupted while its log writes is logged, its `start` is published, and its turn runs to its end", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  // The person's message: once its log has committed, the step waits.
+  const inside = Deferred.makeUnsafe<void>()
+  const memory = Layer.effect(
+    Memory,
+    Memory.useSync((real) =>
+      Memory.of({
+        ...real,
+        pushWith: (said, also, key) =>
+          said[0]?.kind !== "user" ? real.pushWith(said, also, key) : Effect.gen(function*() {
+            const out = yield* real.pushWith(said, also, key)
+            yield* Deferred.succeed(inside, undefined)
+            yield* Effect.sleep("50 millis")
+            return out
+          })
+      }))
+  )
+  const seen = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    const fiber = yield* Effect.forkChild(turnsService.say("hello"))
+    yield* Deferred.await(inside)
+    yield* Fiber.interrupt(fiber)
+    yield* eventually(() => turns(file)[0]?.status === "done")
+    yield* turnsService.idle
+    return yield* PubSub.takeAll(subscription)
+  })), undefined, { memory })
+  assert.deepStrictEqual(seen.map((event) => event.type), ["accepted", "start", "text", "message", "end"])
+  assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["asst", "Read."]])
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
 })
 
 // Ends that are not good
@@ -661,4 +876,134 @@ test("a turn that was cut before its first request was built builds it at the ne
   assert.equal(wire.sent.length, 1)
   assert.deepStrictEqual(lastText(wire.sent[0]!.items[0]), { text: HEAD + "hello", mark: true })
   assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 1 }])
+})
+
+// Busy now, and the last work
+// ---------------------------
+
+test("busy is false when idle, true while a request waits and while a call runs, and false after the end; worked follows the clock", async () => {
+  const file = newFile()
+  const seen: Record<string, unknown> = {}
+  let service: Turns["Service"] | null = null
+  // Read while the loop waits for the request: the wire's answer runs then.
+  const now = () => ({ busy: Effect.runSync(service!.busy), worked: Effect.runSync(service!.worked) })
+  const wire = fakeWire((asked, n) => {
+    seen["request " + n] = now()
+    return n === 1 ? runs(asked, "call_1", "return 1") : says(asked, "Done.")
+  })
+  const run: Run = () =>
+    Effect.gen(function*() {
+      // The clock moves while the call runs: worked is the clock's now.
+      yield* TestClock.adjust(5000)
+      seen.call = now()
+      return { output: "1", failed: false }
+    })
+  await withTurns(file, wire, run, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    service = turnsService
+    // The layer's start, with no work: the clock moves, worked does not.
+    const start = yield* turnsService.worked
+    yield* TestClock.adjust(60_000)
+    assert.deepStrictEqual({ busy: yield* turnsService.busy, worked: yield* turnsService.worked }, { busy: false, worked: start })
+    yield* turnsService.say("hello")
+    yield* turnsService.idle
+    assert.deepStrictEqual(seen, {
+      "request 1": { busy: true, worked: start + 60_000 },
+      call: { busy: true, worked: start + 65_000 },
+      "request 2": { busy: true, worked: start + 65_000 }
+    })
+    // After the end: the end's time, also when the clock has moved by 7
+    // minutes since.
+    assert.deepStrictEqual({ busy: yield* turnsService.busy, worked: yield* turnsService.worked }, { busy: false, worked: start + 65_000 })
+    yield* TestClock.adjust(7 * 60_000)
+    assert.deepStrictEqual({ busy: yield* turnsService.busy, worked: yield* turnsService.worked }, { busy: false, worked: start + 65_000 })
+  }), undefined, { clock: true })
+})
+
+// The hub's bound
+// ---------------
+
+// The types of what a subscriber that does not read holds after one turn
+// that says one thing: 5 events in all.
+const held = async (hub: number | undefined) => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Hi."))
+  return withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    yield* turnsService.say("hello")
+    // The turn ends: nothing waits for the subscriber.
+    yield* turnsService.idle
+    return (yield* PubSub.takeAll(subscription)).map((event) => event.type)
+  })), undefined, hub === undefined ? {} : { hub })
+}
+
+test("a hub of capacity 4: a turn that publishes 5 events ends, and a subscriber that did not read gets the last 4", async () => {
+  assert.deepStrictEqual(await held(4), ["start", "text", "message", "end"])
+})
+
+test("with no capacity, the hub keeps every event, as before", async () => {
+  assert.deepStrictEqual(await held(undefined), ["accepted", "start", "text", "message", "end"])
+})
+
+test("a capacity of 0, 1.5, 65,537 or 2**31 is a defect of the layer, with a message; 1 and 65,536 are taken", async () => {
+  for (const hub of [0, 1.5, 65_537, 2 ** 31]) {
+    await assert.rejects(held(hub), (error: unknown) => {
+      assert.ok(error instanceof RangeError, String(error))
+      assert.equal(error.message, "The option `hub` of the turn loop must be a whole number from 1 to 65536, not " + String(hub) + ".")
+      return true
+    })
+  }
+  // Both ends of the range are taken (a bounded hub allocates its whole
+  // capacity when it is made: 65,536 is about 1.5 MB).
+  assert.deepStrictEqual(await held(1), ["end"])
+  assert.deepStrictEqual(await held(65_536), ["accepted", "start", "text", "message", "end"])
+})
+
+// The why's bound
+// ---------------
+
+// A turn whose request fails with `message`: the turn's row's `why`, the
+// `end` event's, and the note.
+const failedWith = async (message: string) => {
+  const file = newFile()
+  const wire = fakeWire(() => wireError("input", { message }))
+  const ends = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    yield* turnsService.say("hello")
+    yield* turnsService.idle
+    return (yield* PubSub.takeAll(subscription)).flatMap((event) => (event.type === "end" ? [event.why] : []))
+  })))
+  const row = turns(file)[0] as { why: string }
+  const note = messages(file).find((m) => m.kind === "note")?.text
+  return { row: row.why, event: ends[0], ends: ends.length, note }
+}
+
+test("a vendor's error of 100,000 characters: the row, the end event and the note keep the same first 2,000", async () => {
+  const got = await failedWith("w".repeat(100_000))
+  const why = "w".repeat(WHY)
+  assert.equal(WHY, 2000)
+  assert.deepStrictEqual(got, { row: why, event: why, ends: 1, note: "No reply: " + why + ". Send a message to try again." })
+})
+
+test("a why with a pair of surrogates across the 2,000th place is cut before the pair: no lone half", async () => {
+  // The pair is at 1,999 and 2,000 (from 0): its first half is the 2,000th character.
+  const given = "a".repeat(WHY - 1) + "😀" + "b".repeat(10)
+  const got = await failedWith(given)
+  assert.equal(got.row, "a".repeat(WHY - 1))
+  assert.equal(got.event, got.row)
+  assert.ok(got.row.isWellFormed())
+  // The pair one place earlier fits whole.
+  assert.equal(whyOf("a".repeat(WHY - 2) + "😀" + "b"), "a".repeat(WHY - 2) + "😀")
+  // A lone half is made well formed first, then cut.
+  assert.equal(whyOf("a".repeat(WHY - 1) + "\ud83d" + "b"), "a".repeat(WHY - 1) + "\ufffd")
+})
+
+test("a why of 2,000 characters or fewer does not change", async () => {
+  const exact = "x".repeat(WHY)
+  assert.equal(whyOf(exact), exact)
+  assert.equal(whyOf("short"), "short")
+  const got = await failedWith("OpenAI answered 400: Too much input.")
+  assert.deepStrictEqual({ row: got.row, event: got.event }, { row: "OpenAI answered 400: Too much input.", event: "OpenAI answered 400: Too much input." })
 })

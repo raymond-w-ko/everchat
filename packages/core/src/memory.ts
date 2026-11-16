@@ -35,7 +35,7 @@
 // - Dropped with their features: imports (a second side), billing holds,
 //   the move of a chat to another process, acts. Images are not here yet.
 
-import { Context, Deferred, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
 import { page, pages } from "./pages.ts"
 import type { Block } from "./request.ts"
 import { type Kind, type Message, type NewMessage, type NewUsage, Store, type StoreError } from "./store.ts"
@@ -245,6 +245,7 @@ interface Job extends Part {
 interface Journal {
   from: number // the id of the first new message
   messages: Array<NewMessage>
+  key: string | null // the key of the sender of the first message (store.ts, `append`)
   nodes: Array<Part & { readonly text: string }>
   usage: Array<NewUsage>
   views: boolean
@@ -267,7 +268,7 @@ interface Mem {
   journal: Journal
 }
 
-const journal = (from: number): Journal => ({ from, messages: [], nodes: [], usage: [], views: false })
+const journal = (from: number): Journal => ({ from, messages: [], key: null, nodes: [], usage: [], views: false })
 
 const fresh = (count: number, high = HIGH, seen = SEEN): Mem => ({
   count,
@@ -565,11 +566,15 @@ export class Memory extends Context.Service<Memory, {
 
   // The same, with more writes of the caller in the same transaction: an
   // event that logs a message and writes other rows is still one
-  // transaction. `also` gets the pages as written. If it fails, the memory
-  // stops for good, as after any failed write.
+  // transaction. `also` gets the pages as written. `key`: the key of the
+  // sender of the first message, written on its first page (store.ts,
+  // `append`); the store refuses a key of another form and one that the chat
+  // has. If the write fails, the memory stops for good, as after any failed
+  // write.
   pushWith<B>(
     said: ReadonlyArray<Said>,
-    also: (written: Array<Message>) => Effect.Effect<B, StoreError>
+    also: (written: Array<Message>) => Effect.Effect<B, StoreError>,
+    key?: string | null
   ): Effect.Effect<readonly [Array<Message>, B], StoreError>
 
   // The first message, from `from` on, from which the messages to the end
@@ -584,6 +589,16 @@ export class Memory extends Context.Service<Memory, {
 
   // Waits until no compaction runs.
   readonly idle: Effect.Effect<void, StoreError>
+
+  // True while a compaction runs, its write too, with no wait. A
+  // compaction that was prepared and never started (its change's write
+  // failed) is no work.
+  readonly busy: Effect.Effect<boolean>
+
+  // When the memory was last busy, in milliseconds of Effect's `Clock`: now
+  // while a compaction runs (its write too), else when the last one ended,
+  // else when the layer started.
+  readonly worked: Effect.Effect<number>
 
   // The chat's view as the blocks of a request: its lines built before
   // message `upto` (none: all).
@@ -605,6 +620,20 @@ export class Memory extends Context.Service<Memory, {
       const lock = yield* Semaphore.make(1)
       const waiters = new Set<{ readonly ok: () => boolean; readonly done: Deferred.Deferred<void, StoreError> }>()
       let broken: StoreError | null = null
+      const clock = yield* Clock.Clock
+      // The compactions that run: forked and not yet ended, their write
+      // too. A job that was prepared and never forked (its change's write
+      // failed) is no work. `mem.busy` is the algorithm's, and holds such
+      // jobs too.
+      let running = 0
+      // When the last compaction ended; the layer's start before any.
+      let rested = clock.currentTimeMillisUnsafe()
+      // After a job ends, its write too: if none runs now, the memory rests
+      // from now on.
+      const ended = () => {
+        running -= 1
+        if (running === 0) rested = clock.currentTimeMillisUnsafe()
+      }
 
       // Load
       // ----
@@ -669,11 +698,12 @@ export class Memory extends Context.Service<Memory, {
       const flush = <B>(also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null) => Effect.gen(function*() {
         const wrote = mem.journal
         mem.journal = journal(mem.count)
-        if (also === null && wrote.messages.length === 0 && wrote.nodes.length === 0 && wrote.usage.length === 0 && !wrote.views) {
+        if (also === null && wrote.messages.length === 0 && wrote.key === null && wrote.nodes.length === 0 && wrote.usage.length === 0 && !wrote.views) {
           return [[] as Array<Message>, undefined as B] as const
         }
         return yield* db.transaction(Effect.gen(function*() {
-          const written = wrote.messages.length === 0 ? [] : yield* db.append(wrote.messages)
+          // A key with no message goes to the store too, which refuses it.
+          const written = wrote.messages.length === 0 && wrote.key === null ? [] : yield* db.append(wrote.messages, wrote.key)
           if (written[0] !== undefined && written[0].i !== wrote.from) {
             return yield* Effect.die(new Error(`the log gave message ${written[0].i}, and the memory expected ${wrote.from}`))
           }
@@ -704,9 +734,12 @@ export class Memory extends Context.Service<Memory, {
       // One change of the state: the algorithm with no pause, then its
       // writes, then the jobs it started. One at a time, and never cut in
       // the middle.
+      // `wrote`: run once the writes are done, before the jobs start and
+      // the waiters wake.
       const apply = <A, B = void>(
         change: () => A,
-        also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null = null
+        also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null = null,
+        wrote: (() => void) | null = null
       ): Effect.Effect<readonly [A, Array<Message>, B], StoreError> =>
         lock.withPermits(1)(Effect.gen(function*() {
           if (broken !== null) {
@@ -722,7 +755,9 @@ export class Memory extends Context.Service<Memory, {
               }
               waiters.clear()
             }))
+          wrote?.()
           for (const job of mem.started.splice(0)) {
+            running += 1
             yield* Effect.forkIn(run(job), scope)
           }
           yield* wake
@@ -734,8 +769,17 @@ export class Memory extends Context.Service<Memory, {
       // a line too long adds only a note with its size and where the limit
       // cuts it: never more than the first request and that note. No line:
       // the node is its source, cut.
-      const run = (job: Job): Effect.Effect<void> =>
-        Effect.gen(function*() {
+      const run = (job: Job): Effect.Effect<void> => {
+        // The job's end, one time: after its write, or when it fails or is
+        // stopped.
+        let finished = false
+        const end = () => {
+          if (!finished) {
+            finished = true
+            ended()
+          }
+        }
+        return Effect.gen(function*() {
           const lines: Array<string> = []
           const used: Array<NewUsage> = []
           let ask = job.blocks
@@ -768,7 +812,7 @@ export class Memory extends Context.Service<Memory, {
             mem.busy.delete(slot(job.l, job.i))
             pump(mem)
             fit(mem)
-          })
+          }, null, end)
         }).pipe(
           // The compactor gave up (a schedule that ends), the write failed,
           // or the job itself has a defect. The node stays not built, and it
@@ -776,11 +820,15 @@ export class Memory extends Context.Service<Memory, {
           Effect.catchCause((cause) =>
             Effect.gen(function*() {
               mem.busy.delete(slot(job.l, job.i))
+              end()
               yield* diagnostic(Effect.logError(`node ${job.l}/${job.i} is not built`, cause))
               yield* wake
             })
-          )
+          ),
+          // A stop of the job ends it too.
+          Effect.ensuring(Effect.sync(end))
         )
+      }
 
       // The first change: the views to the chat's end, kept, and the
       // compactions that a stop cut start again.
@@ -842,11 +890,17 @@ export class Memory extends Context.Service<Memory, {
 
       return Memory.of({
         push: (said) => Effect.map(apply(() => push(mem, said)), ([, written]) => written),
-        pushWith: (said, also) => Effect.map(apply(() => push(mem, said), also), ([, written, more]) => [written, more] as const),
+        pushWith: (said, also, key) =>
+          Effect.map(apply(() => {
+            push(mem, said)
+            mem.journal.key = key ?? null
+          }, also), ([, written, more]) => [written, more] as const),
         whole,
         say,
         settle: (upto) => until(() => first(mem) >= upto),
         idle: until(() => mem.busy.size === 0),
+        busy: Effect.sync(() => running > 0),
+        worked: Effect.sync(() => (running > 0 ? clock.currentTimeMillisUnsafe() : rested)),
         view: (upto) => Effect.sync(() => blocks(mem, upto ?? mem.count, mem.view.parts)),
         zoom,
         state: Effect.sync((): State => ({

@@ -88,6 +88,20 @@ export interface NewMessage {
   readonly images?: ReadonlyArray<number> | undefined // image ids, in order
 }
 
+// The key of a message's sender (the host's `Idempotency-Key`): 1 to 128
+// bytes of visible ASCII (0x21 to 0x7E). Two keys that differ in letter
+// case are two keys. A key is of its chat: the same key in another chat is
+// another message. The store refuses a key of another form.
+export const SENDER_KEY = /^[\x21-\x7e]{1,128}$/
+
+// The message of a key: its pages (the first one has the key; the pages
+// that follow it in the same message), and the number of its `accepted`
+// event.
+export interface Keyed {
+  readonly messages: ReadonlyArray<Message>
+  readonly accepted: number
+}
+
 // One node of the tree: a line that covers the 2^l messages from i·2^l on.
 export const Node = Schema.Struct({
   l: Schema.Int,
@@ -394,6 +408,11 @@ export interface Reading {
   messagesAfter(after: number, kinds: ReadonlyArray<Kind>): Effect.Effect<Array<Message>, StoreError>
   imagesOf(i: number): Effect.Effect<Array<number>, StoreError>
 
+  // The message of the key `key` in this chat (`append`), on one state of
+  // the database; none when the chat has no message with this key. A key of
+  // another form is none too: no message has it.
+  keyed(key: string): Effect.Effect<Option.Option<Keyed>, StoreError>
+
   // The tree. `nodesIn`: the nodes of level `l` from node `from` up to, and
   // not with, node `to`, in order. `levels`: the count of the nodes built at
   // each level that has one, lowest first.
@@ -459,8 +478,11 @@ export class Store extends Context.Service<Store, Reading & {
   setTaken(i: number): Effect.Effect<void, StoreError>
 
   // The log. `append` gives the messages the next ids, with no gap, and
-  // returns them as written.
-  append(messages: ReadonlyArray<NewMessage>): Effect.Effect<Array<Message>, StoreError>
+  // returns them as written. `key`: the key of the sender of the message
+  // that the first of them starts (SENDER_KEY), written on its row only. A
+  // key of another form, a key with no message, and a key that the chat
+  // has already fail, and nothing is written.
+  append(messages: ReadonlyArray<NewMessage>, key?: string | null): Effect.Effect<Array<Message>, StoreError>
 
   // The tree. A node is written once: a second write of a node fails.
   putNodes(nodes: ReadonlyArray<NewNode>): Effect.Effect<Array<Node>, StoreError>

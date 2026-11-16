@@ -19,10 +19,12 @@
 // hard limit keeps a command that never stops printing from filling the
 // memory and the database.
 //
-// This file is the core's part: the cap, and the tag. The layer, which
-// writes the files, is in limitfile.ts.
+// This file is the core's part: the cap, the rule that shortens a result
+// and its line, the tag, and the layer with no file (`noFileLayer`), for a
+// chat that has no machine: its line names `result(id)` only. The layer
+// that writes the files is in `packages/local/src/limitfile.ts`.
 
-import { Context, Effect } from "effect"
+import { Context, Effect, Layer } from "effect"
 
 // The most characters of a result that the model is shown, when the config
 // gives no other number. Three harnesses agree on about this size.
@@ -105,13 +107,45 @@ export interface Shown {
   readonly shown: number // its bytes
 }
 
+// Where the whole result of a call is: in `file` when one holds it, else
+// only from `result(id)`.
+export const where = (call: number, file?: string): string =>
+  file === undefined
+    ? "result(" + call + ") gives the whole result to a program."
+    : "The whole result is in the file " + file + ", and result(" + call + ") gives it to a program."
+
+// A call's result as the model is shown it, by the rule of `shorten`: whole
+// within `limit` characters, else its head and its tail, with a line that
+// names `file` when it holds the whole text. Every layer shows a result
+// with this.
+export const view = (call: number, text: string, limit: number, file?: string): Shown => {
+  const short = shorten(text, limit, where(call, file))
+  return { text: short, shown: bytes(short) }
+}
+
 export class Limit extends Context.Service<Limit, {
   // A call's result as the model is shown it. A result over the limit is
-  // shortened, and its whole text is written to the call's file. This never
-  // fails: with no file, the line names only `result(id)`.
+  // shortened, and a layer that writes files writes its whole text to the
+  // call's file. This never fails: with no file, the line names only
+  // `result(id)`.
   show(call: number, text: string): Effect.Effect<Shown>
-  // The path of a call's file, whether it exists or not.
+  // The path of a call's file, whether it exists or not. The empty string:
+  // this layer writes no file (`noFileLayer`).
   file(call: number): string
   // Writes a call's whole result to its file again. False: it could not.
   put(call: number, text: string): Effect.Effect<boolean>
 }>()("everchat/limit/Limit") {}
+
+// The layer with no file: it shortens a result as the file's layer does,
+// and writes nothing. `limit` is in characters; `LIMIT` when not given.
+export const noFileLayer = (options: { readonly limit?: number | undefined } = {}): Layer.Layer<Limit> => {
+  const limit = options.limit ?? LIMIT
+  return Layer.succeed(
+    Limit,
+    Limit.of({
+      show: (call, text) => Effect.sync(() => view(call, text, limit)),
+      file: () => "",
+      put: () => Effect.succeed(false)
+    })
+  )
+}

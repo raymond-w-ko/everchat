@@ -23,7 +23,7 @@
 
 // The mark of this schema, the file's `pragma user_version`. A file that
 // Effect's migrator made has none (0).
-export const VERSION = 5
+export const VERSION = 6
 
 export const schema: ReadonlyArray<string> = [
   // Each tenant: its UUIDv4, from outside. The local file has one.
@@ -183,22 +183,25 @@ export const schema: ReadonlyArray<string> = [
 
   // The log: every message of the chat, for ever.
   `create table everchat_msg (
-       chat    integer not null references everchat_chat (id) on delete cascade,
-       i       integer not null,
-       kind    integer not null references everchat_kind (id),
-       text    text    not null,
-       size    integer not null,
-       more    integer not null default 0 check (more in (0, 1)),
-       line    text,
-       turn    integer,
-       call    integer,
-       launch  integer not null,
-       created integer not null,
+       chat       integer not null references everchat_chat (id) on delete cascade,
+       i          integer not null,
+       kind       integer not null references everchat_kind (id),
+       text       text    not null,
+       size       integer not null,
+       more       integer not null default 0 check (more in (0, 1)),
+       line       text,
+       turn       integer,
+       call       integer,
+       sender_key text,
+       launch     integer not null,
+       created    integer not null,
        primary key (chat, i),
        foreign key (chat, turn) references everchat_turn (chat, n) on delete cascade,
        foreign key (chat, call) references everchat_call (chat, n) on delete cascade,
        foreign key (chat, launch) references everchat_launch (chat, n) on delete cascade
      ) strict`,
+  // A key of its chat: the same key in another chat is another message.
+  `create unique index everchat_msg_sender_key on everchat_msg (chat, sender_key)`,
   `create trigger everchat_msg_no_update before update on everchat_msg
        begin select raise(abort, 'everchat_msg is append only'); end`,
   `create trigger everchat_msg_no_delete before delete on everchat_msg when exists (select 1 from everchat_chat where id = old.chat)
@@ -321,6 +324,8 @@ export const schema: ReadonlyArray<string> = [
        foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade,
        foreign key (chat, msg_last) references everchat_msg (chat, i) on delete cascade
      ) strict`,
+  // The events of a message, by its first page: the accepted of a key's message.
+  `create index everchat_event_msg on everchat_event (chat, msg)`,
   `create trigger everchat_event_no_update before update on everchat_event
        begin select raise(abort, 'everchat_event is append only'); end`,
   `create trigger everchat_event_no_delete before delete on everchat_event when exists (select 1 from everchat_chat where id = old.chat)

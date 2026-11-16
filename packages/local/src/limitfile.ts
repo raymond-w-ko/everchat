@@ -2,7 +2,8 @@
 // ===========
 // The layer of the output limit (limit.ts) for a local chat: it writes the
 // whole text of a long result to a file, so that a program can read or
-// search it with `shell` and `read`.
+// search it with `shell` and `read`. It shortens a result by the core's rule
+// (`view`), as the core's layer with no file does.
 //
 // The file is a copy, not state. It is in a private directory under the
 // system's temporary directory. When it is gone (after a reboot, for
@@ -12,7 +13,7 @@ import { Effect, Layer } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { bytes, Limit, LIMIT, shorten } from "@everchat/core/limit"
+import { Limit, LIMIT, view } from "@everchat/core/limit"
 import { Store } from "@everchat/core/store"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
@@ -57,17 +58,13 @@ export const limitLayer = (options: Options = {}) =>
 
       const show = Effect.fn("Limit.show")(function*(call: number, text: string) {
         if (text.length <= limit) {
-          return { text, shown: bytes(text) }
+          return view(call, text, limit)
         }
         const written = yield* put(call, text)
         if (!written) {
           yield* diagnostic(Effect.logWarning(`the whole result of call ${call} could not be written to ${file(call)}`))
         }
-        const where = written
-          ? "The whole result is in the file " + file(call) + ", and result(" + call + ") gives it to a program."
-          : "result(" + call + ") gives the whole result to a program."
-        const short = shorten(text, limit, where)
-        return { text: short, shown: bytes(short) }
+        return view(call, text, limit, written ? file(call) : undefined)
       })
 
       return Limit.of({ show, file, put })

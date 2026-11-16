@@ -5,6 +5,25 @@
 // SQL. The rules that the store keeps are in `store.ts`; the tables are in
 // `schema.ts`, and the file, its driver and its pragmas in `database.ts`.
 //
+// Each call of the store ends, done or with `StoreError` and its `op`,
+// within the limit `store` (`Database.Limits`, 5,000 ms when it is not
+// given), which each layer over a file takes as its last argument: the
+// driver's wait on a locked file is the timer (database.ts says what it
+// bounds and what it does not, statement by statement). A transaction is
+// one call: it waits at its `BEGIN IMMEDIATE`, and one that fails there
+// has written nothing. A layer of the store, when it is built, first opens
+// the file (database.ts: its three waits, within 3 × `store` on a file not
+// yet in WAL mode, within `store` on one in WAL mode); then the store's
+// launch (`open`, below) is a transaction of its own, which waits at its
+// `BEGIN IMMEDIATE` within `store` and fails with `StoreError` (`launch`).
+// So `storeLayer` is built within 4 × `store` on a file not yet in WAL
+// mode, within 2 × `store` on one in WAL mode; `chatsLayer` within the
+// open's bound, and each launch of `Chats.store` within `store`. These
+// bounds are sums of the waits on the file; the time of the scheduler, of a
+// process's start and of the statements themselves is on top. An open that
+// fails writes no launch; database.ts says what the file holds then (on a
+// new file whose change to WAL fails: the schema and the mark).
+//
 // The tenant boundary (docs/schema.html, section 1). The store is bound to
 // one chat: the reads and the writes are built for it, once (`reading(sql,
 // bound)`, `make`), and each statement on a table of a chat has that chat in
@@ -39,6 +58,7 @@ import {
   type Launch,
   type LaunchInput,
   LaunchLive,
+  type Keyed,
   type Message,
   type NewCall,
   type NewDiagnostic,
@@ -55,6 +75,7 @@ import {
   Pick,
   Reads,
   type Reading,
+  SENDER_KEY,
   Store,
   StoreError,
   type Turn,
@@ -452,6 +473,36 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     return (yield* decodeMessages(rows)).map((row): Message => ({ ...row, more: row.more === 1 }))
   }, failed("messagesAfter"))
 
+  // The message of a key, on one state of the database: its first page by
+  // its key (the index (chat, sender_key)), its pages from there up to the
+  // first that does not continue (`more` 0), and its `accepted` event (the
+  // index (chat, msg)). Each statement names the chat. A second row for the
+  // key, a message with no last page, and no `accepted` event (or two) are
+  // a defect: a statement that lost its chat's `=` could still give the
+  // right row first, by the order of the file, and pass.
+  const keyed = Effect.fn("Store.keyed")(function*(key: string) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const firsts = yield* sql<{ i: number }>`select i from everchat_msg where chat = ${id} and sender_key = ${key}`
+      if (firsts.length === 0) return Option.none<Keyed>()
+      const { i: first } = yield* only(firsts)
+      const { last } = yield* only(
+        yield* sql<{ last: number | null }>`select min(i) as last from everchat_msg where chat = ${id} and i >= ${first} and more = 0`
+      )
+      if (last === null) {
+        return yield* Effect.die(new Error(`the store expected the last page of the message ${first}, and found none`))
+      }
+      const pages = (yield* decodeMessages(yield* sql`
+        select m.i, k.name as kind, m.text, m.size, m.more, m.line, m.turn, m.call, m.launch, m.created
+        from everchat_msg m join everchat_kind k on k.id = m.kind
+        where m.chat = ${id} and m.i >= ${first} and m.i <= ${last}
+        order by m.i`)).map((row): Message => ({ ...row, more: row.more === 1 }))
+      const { n } = yield* only(
+        yield* sql<{ n: number }>`select n from everchat_event where chat = ${id} and type = 'accepted' and msg = ${first}`
+      )
+      return Option.some<Keyed>({ messages: pages, accepted: n })
+    }))
+  }, failed("keyed"))
+
   const imagesOf = Effect.fn("Store.imagesOf")(function*(i: number) {
     const rows = yield* sql<{ image: number }>`select image from everchat_msg_image where chat = ${id} and msg = ${i} order by n`
     return rows.map((row) => row.image)
@@ -618,6 +669,7 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     messages,
     messagesAfter,
     imagesOf,
+    keyed,
     node,
     nodes,
     nodesIn,
@@ -789,7 +841,20 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
   // The log
   // -------
 
-  const append = Effect.fn("Store.append")(function*(messages: ReadonlyArray<NewMessage>) {
+  // The sender's key goes on the row of the first message, in its insert
+  // (the table refuses an update). Its form is checked here, before any
+  // write: a check in the table would need a pattern, which SQLite and
+  // MariaDB write in two ways (docs/schema.html, everchat_msg). A key that
+  // the chat has already is refused by the index (chat, sender_key), and
+  // the transaction takes back what it wrote.
+  const append = Effect.fn("Store.append")(function*(messages: ReadonlyArray<NewMessage>, given?: string | null) {
+    const key = given ?? null
+    if (key !== null && !SENDER_KEY.test(key)) {
+      return yield* Effect.fail(new Error("the sender's key is not 1 to 128 bytes of visible ASCII"))
+    }
+    if (key !== null && messages.length === 0) {
+      return yield* Effect.fail(new Error("the sender's key has no message"))
+    }
     return yield* sql.withTransaction(Effect.gen(function*() {
       const created = yield* now
       const first = yield* nextMessage(sql, chat)
@@ -808,7 +873,7 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
           launch: launch.id,
           created
         }
-        yield* sql`insert into everchat_msg ${sql.insert({ chat, ...row })}`
+        yield* sql`insert into everchat_msg ${sql.insert({ chat, ...row, sender_key: k === 0 ? key : null })}`
         // A message's images: its own coordinate `n`, from 0, in their order.
         for (const [n, image] of (message.images ?? []).entries()) {
           yield* sql`insert into everchat_msg_image ${sql.insert({ chat, msg: row.i, n, image })}`
@@ -1099,11 +1164,11 @@ export const readsLayerNoDatabase = Layer.effect(Reads, Effect.flatMap(SqlClient
 // The reads over the database in the file `filename`, which must be there.
 // It fails when the file's mark is not this program's (schema.ts): a read of
 // tables that this program does not know gives wrong answers.
-export const readsLayer = (filename: string) =>
+export const readsLayer = (filename: string, limits: Database.Limits = {}) =>
   Layer.effect(
     Reads,
     Effect.gen(function*() {
-      const database = yield* Layer.build(Database.readonly(filename)).pipe(failed("open"))
+      const database = yield* Layer.build(Database.readonly(filename, limits))
       const have = yield* Database.version.pipe(Effect.provide(database), failed("open"))
       if (have !== Database.VERSION) {
         return yield* new DatabaseVersion({ have, want: Database.VERSION, file: filename })
@@ -1118,8 +1183,8 @@ export const storeLayerNoDatabase = (options: Options) =>
   Layer.effect(Store, Effect.flatMap(SqlClient.SqlClient, (sql) => open(sql, bind(sql, options.pick), options.launch)))
 
 // The store over the database in the file `filename`.
-export const storeLayer = (filename: string, options: Options) =>
-  storeLayerNoDatabase(options).pipe(Layer.provide(Database.layer(filename)))
+export const storeLayer = (filename: string, options: Options, limits: Database.Limits = {}) =>
+  storeLayerNoDatabase(options).pipe(Layer.provide(Database.layer(filename, limits)))
 
 // The chats of a deployment
 // -------------------------
@@ -1145,4 +1210,5 @@ const chatsOf = (sql: SqlClient.SqlClient) =>
 export const chatsLayerNoDatabase = Layer.effect(Chats, Effect.map(SqlClient.SqlClient, chatsOf))
 
 // The tag over the database in the file `filename`, made when it is empty.
-export const chatsLayer = (filename: string) => chatsLayerNoDatabase.pipe(Layer.provide(Database.layer(filename)))
+export const chatsLayer = (filename: string, limits: Database.Limits = {}) =>
+  chatsLayerNoDatabase.pipe(Layer.provide(Database.layer(filename, limits)))

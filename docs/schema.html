@@ -93,7 +93,7 @@ a { color: var(--accent); }
   <li><strong>Changed:</strong> the partial indexes became forms that run on both: a generated column <code>live</code> for the live launch, and plain indexes with <code>chat</code> in front.</li>
   <li><strong>Changed:</strong> no migrator. The local file gets its schema made whole, with a mark, and a file of another schema is refused (section 1).</li>
   <li><strong>Went:</strong> the rule "One home, one database, one chat" (the design puts many chats in one database); the migrator and its table <code>effect_sql_migrations</code>; the tables <code>agent</code> and <code>agent_msg</code>, which no code uses, and whose cycle of references with <code>turn</code> has no proved form on MariaDB (<code>everchat_turn.agent</code> stays a plain column until agents come); the table <code>credential</code>, which is later work (below); and the table of the originals of images, which belong to the client [Q35, Q44].</li>
-  <li><strong>Later work, not in this schema:</strong> the lease and the epoch of a deployment (they come with the server package), a row for the deployment, idempotency keys, wake-ups, grants, and credentials (the sign-in tokens of a ChatGPT plan).</li>
+  <li><strong>Later work, not in this schema:</strong> the lease and the epoch of a deployment (they come with the server package), a row for the deployment, wake-ups, grants, and credentials (the sign-in tokens of a ChatGPT plan).</li>
 </ul>
 
 <nav>
@@ -145,7 +145,7 @@ a { color: var(--accent); }
   <li><strong>Two DDL texts.</strong> SQLite and MariaDB cannot run one DDL text: <code>strict</code>, the types, <code>without rowid</code>, the triggers, the table options and the time function of the view differ. Section 8 holds the SQLite text, whole and in order. The tables of sections 4 to 7 give each column's SQLite type and its MariaDB type; <code>not null</code>, the defaults, the checks and the keys are the same in both. The MariaDB text is <code>.sql</code> files in the form of <code>skeema</code>, one for each table, and they come with the <code>mariadb</code> package. Each MariaDB table states its own character set [Q46]; the research gives the options <code>engine = InnoDB default charset = utf8mb4 collate = &lt;one collation&gt; row_format = dynamic</code> (<code>docs/research/mariadb.md</code>, "What fits"), and the collation is not settled here.</li>
   <li><strong>The schema is made whole, never migrated</strong> [Q55].
     <ul>
-      <li>The local file: on an empty file (no table of ours), EverChat runs the whole DDL of section 8 and sets the mark <code>pragma user_version</code> to the schema's number, in one transaction. A file with this schema's mark opens as it is. Any other file (another mark, or tables with no mark) is refused, with a message that tells the person to move the file aside; nothing deletes a person's file. A change of the schema means a new file and a new mark. This schema's mark is 5.</li>
+      <li>The local file: on an empty file (no table of ours), EverChat runs the whole DDL of section 8 and sets the mark <code>pragma user_version</code> to the schema's number, in one transaction. A file with this schema's mark opens as it is. Any other file (another mark, or tables with no mark) is refused, with a message that tells the person to move the file aside; nothing deletes a person's file. A change of the schema means a new file and a new mark. This schema's mark is 6.</li>
       <li>MariaDB: an administrator applies the <code>.sql</code> files with <code>skeema</code>. The server build has no migrator and never changes the schema. At each start it compares each table's definition with its files, and stops with an error that names a difference.</li>
     </ul></li>
   <li><strong>Pragmas</strong> at open: <code>journal_mode = wal</code> (the driver sets it), <code>synchronous = full</code>, <code>foreign_keys = on</code> (SQLite checks no reference without it, and it is set on each connection), and on each connection that writes <code>recursive_triggers = on</code> (a REPLACE deletes a row, and without this pragma SQLite runs no delete trigger for it). The driver waits up to 5 s on a locked file and starts each write with <code>BEGIN IMMEDIATE</code>.</li>
@@ -155,7 +155,7 @@ a { color: var(--accent); }
 
 <h2 id="code">2. What the code has</h2>
 
-<p>True at this commit. The code (<code>packages/sqlite/src/schema.ts</code>) has this page's schema, the statements of section 8 in their order, and its mark 5; <code>packages/sqlite/src/database.ts</code> sets the block's two pragmas, <code>foreign_keys</code> and <code>recursive_triggers</code>, on the connection that writes. A file can hold the chats of many tenants. The tag of the deployment, <code>Chats</code> (<code>packages/core/src/store.ts</code>, built in <code>packages/sqlite/src/sqlite.ts</code>), makes a chat of a tenant (and the tenant's row when it is not there, with a select and an insert, never a REPLACE), and finds a chat only by its tenant and its UUID: the one statement that finds a chat is <code>where tenant = ? and uuid = ?</code>. It gives the <code>Store</code> of one chat, which takes the chat with a launch row and ends that launch when its scope closes, and the chat's reads. A UUID that no chat has, a chat of another tenant and a text that is no UUID get one answer, the error <code>NoChat</code>, with no field. The local layers have one tenant and one chat in the file: the first launch makes, in its transaction, the row of <code>everchat_tenant</code> (the 16 bytes of a new UUIDv4) and the chat's row, and a later launch makes none; then they find the chat and take it on the same path as the tag. Each store is bound to its one chat: each of its statements on a table of a chat names that chat, and each statement on <code>everchat_chat</code> names the tenant. The program makes each <code>n</code>, from 1 in each chat, and a table's own coordinates from 0 (a message's <code>i</code>, a turn's item, a message's image); the store gives a row's <code>n</code> as its id, and the chat's UUID as text. The store's member <code>addEvent</code> writes an event's row of <code>everchat_event</code> with the chat's <code>seq</code> plus 1, and sets <code>seq</code> to it. The turn loop (<code>packages/core/src/turn.ts</code>) calls it in the transaction of each event of section 9, one transaction for each event, and a listener gets a chat's events in the order of their numbers. The test of every member with two tenants is <code>packages/sqlite/src/tenant.test.ts</code>. Still to come: a read of the events, with the local host, and the lease and the epoch of a deployment. Each later bead keeps this section true.</p>
+<p>True at this commit. The code (<code>packages/sqlite/src/schema.ts</code>) has this page's schema, the statements of section 8 in their order, and its mark 6; <code>packages/sqlite/src/database.ts</code> sets the block's two pragmas, <code>foreign_keys</code> and <code>recursive_triggers</code>, on the connection that writes. A file can hold the chats of many tenants. The tag of the deployment, <code>Chats</code> (<code>packages/core/src/store.ts</code>, built in <code>packages/sqlite/src/sqlite.ts</code>), makes a chat of a tenant (and the tenant's row when it is not there, with a select and an insert, never a REPLACE), and finds a chat only by its tenant and its UUID: the one statement that finds a chat is <code>where tenant = ? and uuid = ?</code>. It gives the <code>Store</code> of one chat, which takes the chat with a launch row and ends that launch when its scope closes, and the chat's reads. A UUID that no chat has, a chat of another tenant and a text that is no UUID get one answer, the error <code>NoChat</code>, with no field. The local layers have one tenant and one chat in the file: the first launch makes, in its transaction, the row of <code>everchat_tenant</code> (the 16 bytes of a new UUIDv4) and the chat's row, and a later launch makes none; then they find the chat and take it on the same path as the tag. Each store is bound to its one chat: each of its statements on a table of a chat names that chat, and each statement on <code>everchat_chat</code> names the tenant. The program makes each <code>n</code>, from 1 in each chat, and a table's own coordinates from 0 (a message's <code>i</code>, a turn's item, a message's image); the store gives a row's <code>n</code> as its id, and the chat's UUID as text. The store's member <code>addEvent</code> writes an event's row of <code>everchat_event</code> with the chat's <code>seq</code> plus 1, and sets <code>seq</code> to it. The turn loop (<code>packages/core/src/turn.ts</code>) calls it in the transaction of each event of section 9, one transaction for each event, and a listener gets a chat's events in the order of their numbers. A message of a person can carry the key of its sender: the store's member <code>append</code> takes it for the first page of what it writes, checks its form, and writes it in the message's insert; the index <code>everchat_msg_sender_key</code> refuses a key that the chat has; and the read <code>keyed</code> gives the message of a key in the chat, its pages and the number of its <code>accepted</code> event, or none (each of its statements names the chat). The turn loop does not give a key yet. The test of every member with two tenants is <code>packages/sqlite/src/tenant.test.ts</code>. Still to come: a read of the events, with the local host, and the lease and the epoch of a deployment. Each later bead keeps this section true.</p>
 
 <h2 id="map">3. The tables at a glance</h2>
 
@@ -295,11 +295,14 @@ a { color: var(--accent); }
 <tr><td><code>line</code></td><td><code>text</code></td><td><code>text</code></td><td>Its own summary line, when the writer gives one</td></tr>
 <tr><td><code>turn</code></td><td><code>integer</code></td><td><code>bigint</code></td><td>The turn that wrote it, or that it started</td></tr>
 <tr><td><code>call</code></td><td><code>integer</code></td><td><code>bigint</code></td><td>tool and echo: the program they belong to</td></tr>
+<tr><td><code>sender_key</code></td><td><code>text</code></td><td><code>varchar(128) character set ascii collate ascii_bin</code></td><td>The key of the message's sender (the host's <code>Idempotency-Key</code>, made by the first sender), on the row of the message's first page only; null for a message with no key and on each page after the first. 1 to 128 bytes of visible ASCII (0x21 to 0x7E). It is compared by its bytes on both, so two keys that differ in letter case are two keys. Not <code>key</code>, a reserved word on MariaDB</td></tr>
 <tr><td><code>launch</code></td><td><code>integer</code></td><td><code>bigint</code></td><td></td></tr>
 <tr><td><code>created</code></td><td><code>integer</code></td><td><code>bigint</code></td><td></td></tr>
 </tbody></table></div>
 <ul>
   <li>Key: <code>(chat, i)</code>. References: <code>(chat, turn)</code>, <code>(chat, call)</code>, <code>(chat, launch)</code>, all in the chat (they cascade); <code>kind</code> to <code>everchat_kind</code> (does not).</li>
+  <li>Index: <code>everchat_msg_sender_key</code>, unique on <code>(chat, sender_key)</code>. A unique index takes many nulls, so any count of messages has no key. A key is of its chat: the same key in another chat, of the same tenant or of another, is another message. A second message with a key that the chat has is refused by the index, and its transaction takes back the whole message. It is the wall between two processes; the turn loop reads first, under its own lock.</li>
+  <li>The key is written in the insert of the transaction that logs the message: the table refuses an update. Its form is held in the store's code (<code>append</code>), not in a check: a check is the same on SQLite and on MariaDB (section 1, "Two DDL texts"), and a check of the bytes 0x21 to 0x7E needs a pattern that the two write in two ways (<code>glob</code>, <code>regexp</code>). A key of another form is refused, and nothing is written. The host checks it first.</li>
   <li>SQLite triggers: <code>everchat_msg_no_update</code> and <code>everchat_msg_no_delete</code> (a delete passes only when the chat is gone).</li>
 </ul>
 </div>
@@ -627,6 +630,7 @@ a { color: var(--accent); }
 </tbody></table></div>
 <ul>
   <li>Key: <code>(chat, n)</code>. Check: <code>(msg is null) = (msg_last is null)</code>, and <code>msg_last &gt;= msg</code>. References: <code>(chat, turn)</code> to <code>everchat_turn</code>, <code>(chat, call)</code> to <code>everchat_call</code>, <code>(chat, msg)</code> and <code>(chat, msg_last)</code> to <code>everchat_msg (chat, i)</code> (they cascade).</li>
+  <li>Index: <code>everchat_event_msg (chat, msg)</code>, for the <code>accepted</code> event of a key's message (its row whose <code>msg</code> is the message's first page). Without it, SQLite's plan of that read is <code>SEARCH everchat_event USING INDEX sqlite_autoindex_everchat_event_1 (chat=?)</code>: it reads each event of the chat. With it, <code>(chat=? AND msg=?)</code>.</li>
   <li>SQLite triggers: <code>everchat_event_no_update</code> and <code>everchat_event_no_delete</code>.</li>
 </ul>
 <p>One process writes a chat, so a number for each chat has no contention, and it follows the order of the commits; one <code>AUTO_INCREMENT</code> number for all chats can commit out of order and lose an event (<code>docs/research/mysql.md</code>, "E. Event numbers", E1).</p>
@@ -801,22 +805,24 @@ create trigger everchat_call_no_move before update of chat, n on everchat_call
 
 -- The log: every message of the chat, for ever.
 create table everchat_msg (
-  chat    integer not null references everchat_chat (id) on delete cascade,
-  i       integer not null,
-  kind    integer not null references everchat_kind (id),
-  text    text    not null,
-  size    integer not null,
-  more    integer not null default 0 check (more in (0, 1)),
-  line    text,
-  turn    integer,
-  call    integer,
-  launch  integer not null,
-  created integer not null,
+  chat       integer not null references everchat_chat (id) on delete cascade,
+  i          integer not null,
+  kind       integer not null references everchat_kind (id),
+  text       text    not null,
+  size       integer not null,
+  more       integer not null default 0 check (more in (0, 1)),
+  line       text,
+  turn       integer,
+  call       integer,
+  sender_key text,
+  launch     integer not null,
+  created    integer not null,
   primary key (chat, i),
   foreign key (chat, turn) references everchat_turn (chat, n) on delete cascade,
   foreign key (chat, call) references everchat_call (chat, n) on delete cascade,
   foreign key (chat, launch) references everchat_launch (chat, n) on delete cascade
 ) strict;
+create unique index everchat_msg_sender_key on everchat_msg (chat, sender_key);
 create trigger everchat_msg_no_update before update on everchat_msg
   begin select raise(abort, 'everchat_msg is append only'); end;
 create trigger everchat_msg_no_delete before delete on everchat_msg when exists (select 1 from everchat_chat where id = old.chat)
@@ -939,6 +945,7 @@ create table everchat_event (
   foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade,
   foreign key (chat, msg_last) references everchat_msg (chat, i) on delete cascade
 ) strict;
+create index everchat_event_msg on everchat_event (chat, msg);
 create trigger everchat_event_no_update before update on everchat_event
   begin select raise(abort, 'everchat_event is append only'); end;
 create trigger everchat_event_no_delete before delete on everchat_event when exists (select 1 from everchat_chat where id = old.chat)

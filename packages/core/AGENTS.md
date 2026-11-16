@@ -15,10 +15,11 @@ The root `AGENTS.md` holds the rules for every file.
   four tests named after a module of the core are in other packages:
   `sandbox.test.ts` in `codemode` (the engine of `thread.ts`),
   `store.test.ts` in `sqlite` (the store in `sqlite.ts`), and in `local`
-  `functions.test.ts` (most of it the local functions) and `limit.test.ts`
-  (most of it the files of `limitfile.ts`). The tests of the core reach the
-  SQLite store and the shared test code by the names of their packages,
-  as development dependencies of the core (`@everchat/sqlite/bun`,
+  `functions.test.ts` (the local functions; the core's functions and the
+  hosted set are tested in the core's own `functions.test.ts`) and
+  `limit.test.ts` (most of it the files of `limitfile.ts`). The tests of the
+  core reach the SQLite store and the shared test code by the names of their
+  packages, as development dependencies of the core (`@everchat/sqlite/bun`,
   `@everchat/local/testing`).
 
 ## Code mode is the only primary tool
@@ -34,7 +35,11 @@ How it is built (`packages/core/src/sandbox.ts`,
   its declaration, its arguments' schema, and its code to `core` in
   `packages/core/src/functions.ts`. To add a local one (the shell, the files,
   the work directory), add them in `packages/local/src/localfunctions.ts`.
-  Either way, give it its place in `DECLARATIONS`, and add a test.
+  Either way, give it its place in `DECLARATIONS`, and add a test. A function
+  that a host's chat has (one that needs only the memory and the store) also
+  gets its place in `HOSTED` in `packages/core/src/functions.ts`:
+  `hostedLayer` builds the functions of a host's chat from it, in its order,
+  and that order is part of the prompt cache's key of a host's chat.
 
 ## One system prompt for every kind of request
 

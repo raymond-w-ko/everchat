@@ -18,9 +18,12 @@
 // and a test can give other functions.
 //
 // This file is the core's part: the service, and the functions that need
-// only the memory and the store (`zoom`, `date`). The functions that need
-// the shell, the files or the work directory, and the layer of the whole
-// list, are in localfunctions.ts.
+// only the memory and the store (`zoom`, `date`, `result`). They are the
+// whole list of a chat that has no machine, a host's chat (`HOSTED`,
+// `hostedLayer`; docs/host.md, "The functions of a host's chat: the hosted
+// set"). The functions that need the shell, the files or the work
+// directory, and the layer of a local chat's list, are in
+// `packages/local/src/localfunctions.ts`.
 //
 // A program's arguments cross a boundary (they come out of the sandbox as
 // JSON), so each function decodes them with a schema. An argument that the
@@ -32,7 +35,7 @@
 // Not here yet: the functions for agents (to start one, to tell one
 // something), and `zoom` of an agent's chat.
 
-import { Context, DateTime, Effect, Schema } from "effect"
+import { Context, DateTime, Effect, Layer, Schema } from "effect"
 import type { Declaration } from "./head.ts"
 import { Memory } from "./memory.ts"
 import { Store, type StoreError } from "./store.ts"
@@ -54,6 +57,15 @@ export const DATE = {
   signature: "(id: number): Promise<string>",
   description: "The date and time of message id."
 } as const satisfies Declaration
+
+export const RESULT = {
+  name: "result",
+  signature: "(id: number): Promise<string>",
+  description: "The whole result of an earlier program or function, by the number that a shortened result names."
+} as const satisfies Declaration
+
+// The declarations of a host's chat, in the head's order.
+export const HOSTED = [ZOOM, DATE, RESULT] as const satisfies ReadonlyArray<Declaration>
 
 // Errors and types
 // ----------------
@@ -133,6 +145,7 @@ export const make = (entries: ReadonlyArray<Entry>) => {
 
 const zoomArgs = decoder(ZOOM, Schema.Tuple([Schema.Union([Schema.Int, Schema.String]), maybe(Schema.Int), maybe(Schema.Int)]))
 const dateArgs = decoder(DATE, Schema.Tuple([Schema.Int]))
+const resultArgs = decoder(RESULT, Schema.Tuple([Schema.Int]))
 
 // The functions that need only the memory and the store.
 export const core = Effect.gen(function*() {
@@ -163,5 +176,31 @@ export const core = Effect.gen(function*() {
     })
   }
 
-  return { zoom, date }
+  // A call's whole output, from the store. It reads and writes no file.
+  const result = {
+    declaration: RESULT,
+    run: Effect.fnUntraced(function*(args) {
+      const [id] = yield* resultArgs(args)
+      const call = yield* stored(store.call(id))
+      if (call._tag === "None") {
+        return yield* new FunctionError({ message: "No call " + id + "." })
+      }
+      const output = call.value.output
+      if (output === null) {
+        return yield* new FunctionError({ message: "Call " + id + " still runs: it has no result yet." })
+      }
+      return output
+    })
+  } satisfies Entry
+
+  return { zoom, date, result }
 })
+
+// The functions of a host's chat: `HOSTED`, in its order.
+export const hostedLayer: Layer.Layer<Functions, never, Store | Memory> = Layer.effect(
+  Functions,
+  Effect.gen(function*() {
+    const entries = yield* core
+    return make(HOSTED.map((one) => entries[one.name]))
+  })
+)

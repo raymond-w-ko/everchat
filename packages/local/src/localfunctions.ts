@@ -1,9 +1,11 @@
 // Local functions
 // ===============
 // The functions that need this machine: the shell, the files, and the work
-// directory (`shell`, `read`, `write`, `edit`), and `result`, which writes
-// a result's file again (limitfile.ts). With the core's own (functions.ts),
-// they make the list of a local chat, and its layer of `Functions`.
+// directory (`shell`, `read`, `write`, `edit`). With the core's own
+// (functions.ts: `zoom`, `date`, `result`), they make the list of a local
+// chat, and its layer of `Functions`. A local chat's `result` is the core's,
+// and then it writes the result's file again when the file is gone
+// (limitfile.ts).
 //
 // The order of the list is the order in which the head shows the
 // declarations, so it is part of the prompt cache's key (head.ts).
@@ -11,7 +13,7 @@
 import { Effect, Layer, Schema } from "effect"
 import * as fs from "node:fs"
 import * as Files from "./files.ts"
-import { core, DATE, type Declaration, decoder, type Entry, FunctionError, Functions, make, maybe, stored, ZOOM } from "@everchat/core/functions"
+import { core, DATE, type Declaration, decoder, type Entry, FunctionError, Functions, make, maybe, RESULT, ZOOM } from "@everchat/core/functions"
 import { Limit } from "@everchat/core/limit"
 import { Memory } from "@everchat/core/memory"
 import { SECONDS, Shell } from "./shell.ts"
@@ -44,12 +46,6 @@ export const EDIT = {
   description: "Replaces text in files: the edits in order, each on its file as the edits before it left it. `old` must match exactly, whitespace too, and only once, unless `all` is true, which replaces every match. If one edit fails, no file is changed. Gives a unified diff of each file."
 } as const satisfies Declaration
 
-export const RESULT = {
-  name: "result",
-  signature: "(id: number): Promise<string>",
-  description: "The whole result of an earlier program or function, by the number that a shortened result names."
-} as const satisfies Declaration
-
 // The declarations of a local chat's functions, in the head's order.
 export const DECLARATIONS = [SHELL, READ, WRITE, EDIT, ZOOM, DATE, RESULT] as const satisfies ReadonlyArray<Declaration>
 
@@ -63,7 +59,6 @@ const editArgs = decoder(
   EDIT,
   Schema.Tuple([Schema.Array(Schema.Struct({ path: Schema.String, old: Schema.String, new: Schema.String, all: maybe(Schema.Boolean) }))])
 )
-const resultArgs = decoder(RESULT, Schema.Tuple([Schema.Int]))
 
 // Layer
 // -----
@@ -80,7 +75,7 @@ export const functionsLayer = (options: Options = {}): Layer.Layer<Functions, ne
       const store = yield* Store
       const shell = yield* Shell
       const limit = yield* Limit
-      const { zoom, date } = yield* core
+      const { zoom, date, result } = yield* core
       const cwd = options.cwd ?? process.cwd()
 
       const filed = <A>(effect: Effect.Effect<A, Files.FileError>) =>
@@ -128,17 +123,12 @@ export const functionsLayer = (options: Options = {}): Layer.Layer<Functions, ne
         result: {
           declaration: RESULT,
           run: Effect.fnUntraced(function*(args) {
-            const [id] = yield* resultArgs(args)
-            const call = yield* stored(store.call(id))
-            if (call._tag === "None") {
-              return yield* new FunctionError({ message: "No call " + id + "." })
-            }
-            const output = call.value.output
-            if (output === null) {
-              return yield* new FunctionError({ message: "Call " + id + " still runs: it has no result yet." })
-            }
-            // The file is a copy that the system may delete.
-            if (!fs.existsSync(limit.file(id))) {
+            const output = yield* result.run(args)
+            // The core's `result` decoded the id. The file is a copy that
+            // the system may delete.
+            const id = args[0] as number
+            const at = limit.file(id)
+            if (at !== "" && !fs.existsSync(at)) {
               yield* limit.put(id, output)
             }
             return output

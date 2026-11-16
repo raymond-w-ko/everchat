@@ -5,12 +5,13 @@ import { expect, test } from "bun:test"
 import { Database as Sqlite } from "bun:sqlite"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
 import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { newFile, options, PICK, rows, withChats, withStore, write } from "../tests/help.ts"
 import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
-import { chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
+import { chatsLayer, chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
 import { Chats, DatabaseVersion, LaunchLive, type NewEvent, NoChat, type Part, Reads, Store, StoreError } from "@everchat/core/store"
 
 const launches = (file: string) =>
@@ -1254,4 +1255,787 @@ test("the chat's seq is 0 for a new chat, with no event to read, and then the co
   expect(count!.n).toBe(10)
   expect(written).toEqual({ seq: 10, last: 10 })
   expect(reads).toBe(10)
+})
+
+// The key of a message's sender
+// ------------------------------
+
+// A message of the person as the turn loop logs it: its pages with the key
+// on the first, and its `accepted` event, in one transaction. Its
+// `accepted` number.
+const keyedSay = (store: typeof Store.Service, texts: ReadonlyArray<string>, key: string | null) =>
+  store.transaction(Effect.gen(function*() {
+    const said = yield* store.append(texts.map((text, k) => ({ kind: "user" as const, text, more: k < texts.length - 1 })), key)
+    return yield* store.addEvent({ type: "accepted", msg: said[0]!.i, msgLast: said[said.length - 1]!.i })
+  }))
+
+// The counts of the chat's messages and events, and its seq.
+const counts = (file: string) =>
+  rows<{ messages: number; events: number; seq: number }>(
+    file,
+    "select (select count(*) from everchat_msg) as messages, (select count(*) from everchat_event) as events, (select seq from everchat_chat) as seq"
+  )[0]
+
+test("keyed: a message of three pages with a key gives its pages and its accepted number; the key is on its first row only", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* story(store, 1)
+    const accepted = yield* keyedSay(store, ["page one", "page two", "page three"], "key-3-pages")
+    yield* keyedSay(store, ["after it"], null)
+    return { accepted, keyed: yield* store.keyed("key-3-pages"), pages: yield* store.messages(3, 6) }
+  }))
+  expect(got.accepted).toBe(6)
+  expect(got.keyed).toEqual(Option.some({ messages: got.pages, accepted: 6 }))
+  expect(got.pages.map((page) => [page.i, page.text, page.more])).toEqual([[3, "page one", true], [4, "page two", true], [5, "page three", false]])
+  expect(rows(file, "select i, sender_key from everchat_msg where i >= 3 order by i")).toEqual([
+    { i: 3, sender_key: "key-3-pages" },
+    { i: 4, sender_key: null },
+    { i: 5, sender_key: null },
+    { i: 6, sender_key: null }
+  ])
+})
+
+test("keyed: a message with no key has null, and the key of no message gives none, on the store and on the reads", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* keyedSay(store, ["no key"], null)
+    yield* keyedSay(store, ["a key"], "key-one")
+    return { unknown: yield* store.keyed("key-none"), cased: yield* store.keyed("KEY-ONE"), one: yield* store.keyed("key-one") }
+  }))
+  expect(got.unknown).toEqual(Option.none())
+  expect(got.cased).toEqual(Option.none())
+  expect(Option.map(got.one, (one) => [one.messages.map((page) => page.text), one.accepted])).toEqual(Option.some([["a key"], 2]))
+  expect(rows(file, "select i, sender_key from everchat_msg order by i")).toEqual([{ i: 0, sender_key: null }, { i: 1, sender_key: "key-one" }])
+  const reads = await withReads(file, Effect.gen(function*() {
+    const reads = yield* Reads
+    return { one: yield* reads.keyed("key-one"), unknown: yield* reads.keyed("key-none") }
+  }))
+  expect(reads.unknown).toEqual(Option.none())
+  expect(Option.map(reads.one, (one) => one.accepted)).toEqual(Option.some(2))
+})
+
+test("keyed: the same key twice in one chat: the second write fails with StoreError, and the counts of messages and events are as before it", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* keyedSay(store, ["first", "its second page"], "key-twice")
+    const before = { count: yield* store.count, seq: (yield* store.chat).seq }
+    const error = yield* Effect.flip(keyedSay(store, ["second", "its second page"], "key-twice"))
+    const alone = yield* Effect.flip(store.append([{ kind: "user", text: "alone" }], "key-twice"))
+    return { before, error, alone, count: yield* store.count, seq: (yield* store.chat).seq, keyed: yield* store.keyed("key-twice") }
+  }))
+  expect(got.error).toBeInstanceOf(StoreError)
+  expect(got.alone).toBeInstanceOf(StoreError)
+  expect(got.alone.op).toBe("append")
+  expect(String((got.alone.cause as { reason: { cause: unknown } }).reason.cause)).toContain("UNIQUE constraint failed: everchat_msg.chat, everchat_msg.sender_key")
+  expect({ count: got.count, seq: got.seq }).toEqual(got.before)
+  expect(counts(file)).toEqual({ messages: 2, events: 1, seq: 1 })
+  expect(Option.map(got.keyed, (one) => [one.messages.map((page) => page.text), one.accepted])).toEqual(Option.some([["first", "its second page"], 1]))
+})
+
+test("keyed: two keys that differ in letter case are two messages", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* keyedSay(store, ["small"], "key-case")
+    yield* keyedSay(store, ["large"], "KEY-CASE")
+    yield* keyedSay(store, ["mixed"], "Key-Case")
+    return yield* Effect.forEach(["key-case", "KEY-CASE", "Key-Case"], (key) => store.keyed(key))
+  }))
+  expect(got.map((one) => Option.map(one, (it) => [it.messages[0]!.text, it.accepted]))).toEqual([
+    Option.some(["small", 1]),
+    Option.some(["large", 2]),
+    Option.some(["mixed", 3])
+  ])
+})
+
+test("keyed: a key of 129 bytes, an empty one, one with a space, one with a byte under 0x21 or over 0x7E, and a key with no message are refused, and nothing is written; 1 and 128 bytes from ! to ~ pass", async () => {
+  const file = newFile()
+  const bad = ["k".repeat(129), "", "key one", "key\tone", "key\x7fone", "kéy", "key\u{1F600}", "\x20", "key\none"]
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const refused = yield* Effect.forEach(bad, (key) => Effect.flip(keyedSay(store, ["refused", "page two"], key)))
+    const empty = yield* Effect.flip(store.append([], "key-of-nothing"))
+    const after = { count: yield* store.count, seq: (yield* store.chat).seq }
+    yield* keyedSay(store, ["edges"], "!".repeat(64) + "~".repeat(64))
+    yield* keyedSay(store, ["one byte"], "~")
+    yield* keyedSay(store, ["the range"], Array.from({ length: 94 }, (_, k) => String.fromCharCode(0x21 + k)).join(""))
+    return { refused, empty, after, keys: yield* Effect.forEach(["!".repeat(64) + "~".repeat(64), "~"], (key) => store.keyed(key)) }
+  }))
+  expect(got.refused.map((error) => [error instanceof StoreError, error.op])).toEqual(bad.map(() => [true, "append"]))
+  expect(got.refused.map((error) => String(error.cause))).toEqual(bad.map(() => "Error: the sender's key is not 1 to 128 bytes of visible ASCII"))
+  expect([got.empty instanceof StoreError, String(got.empty.cause)]).toEqual([true, "Error: the sender's key has no message"])
+  expect(got.after).toEqual({ count: 0, seq: 0 })
+  expect(got.keys.map(Option.isSome)).toEqual([true, true])
+  expect(rows(file, "select i, length(sender_key) as bytes from everchat_msg order by i")).toEqual([{ i: 0, bytes: 128 }, { i: 1, bytes: 1 }, { i: 2, bytes: 94 }])
+})
+
+test("keyed: an update of a message's key is refused by the table", async () => {
+  const file = newFile()
+  await withStore(file, Store.use((store) => keyedSay(store, ["a key"], "key-fixed")))
+  expect(() => write(file, "update everchat_msg set sender_key = 'key-other' where i = 0")).toThrow("everchat_msg is append only")
+  expect(() => write(file, "update everchat_msg set sender_key = null where i = 0")).toThrow("everchat_msg is append only")
+  expect(rows(file, "select sender_key from everchat_msg")).toEqual([{ sender_key: "key-fixed" }])
+})
+
+// The limit store
+// ---------------
+// Each call of the store ends, done or with `StoreError`, within the limit
+// `store` (database.ts): on SQLite, the driver's wait on a locked file. The
+// cases give a small limit; a second connection of the test, on the test's
+// own file, holds the lock or a read.
+
+const LIMIT = 200
+const limited = (file: string) => storeLayer(file, options(), { store: LIMIT })
+
+// The test's own connections, which `traced` (below) does not record.
+const ours = new WeakSet<Sqlite>()
+
+// A second connection that holds the file's write lock, with a write of its
+// own that it has not committed.
+const holdLock = (file: string) => {
+  const other = new Sqlite(file)
+  ours.add(other)
+  other.run("begin immediate")
+  other.run("update everchat_chat set goal = 'held'")
+  return other
+}
+
+// The time of `effect`, in milliseconds, and its error or its value.
+const timedError = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function*() {
+    const start = performance.now()
+    const error = yield* Effect.flip(effect)
+    return { error, ms: performance.now() - start }
+  })
+const timedValue = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function*() {
+    const start = performance.now()
+    const value = yield* effect
+    return { value, ms: performance.now() - start }
+  })
+
+// The bounds of database.ts are sums of the waits on the file; the time of
+// the scheduler, of a process's start and of the statements themselves is
+// on top. So a case gives a wait `SLACK` ms over its bound, and a wait that
+// fails `CLOCK` ms under `store` (the tolerance of a clock, and of two
+// processes' clocks).
+const SLACK = 1000
+const CLOCK = 2
+
+// A call that waited for the lock: `StoreError` with its `op`, after
+// `store` and before `store` + `SLACK`.
+const waitedLimit = (got: { readonly error: unknown; readonly ms: number }, op: string) => {
+  expect(got.error).toBeInstanceOf(StoreError)
+  expect((got.error as StoreError).op).toBe(op)
+  expect(got.ms).toBeGreaterThanOrEqual(LIMIT - CLOCK)
+  expect(got.ms).toBeLessThan(LIMIT + SLACK)
+}
+
+test("the limit store: under a write lock that another connection holds, a write waits for store, fails with StoreError and writes nothing", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const other = holdLock(file)
+    const write = yield* timedError(store.setGoal("mine"))
+    const append = yield* timedError(store.append([{ kind: "user", text: "mine" }]))
+    other.run("rollback")
+    other.close()
+    return { write, append, goal: (yield* store.chat).goal, count: yield* store.count }
+  }).pipe(Effect.provide(limited(file))))
+  waitedLimit(got.write, "setGoal")
+  waitedLimit(got.append, "append")
+  expect(got.goal).toBeNull()
+  expect(got.count).toBe(0)
+  expect(rows(file, "select count(*) as n from everchat_msg")).toEqual([{ n: 0 }])
+})
+
+test("the limit store: a transaction waits at its start (BEGIN IMMEDIATE): under a held lock its body never runs, and it fails with StoreError after store", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    let ran = 0
+    const body = Effect.gen(function*() {
+      ran += 1
+      yield* store.setGoal("in the transaction")
+      yield* store.append([{ kind: "user", text: "in the transaction" }])
+    })
+    const other = holdLock(file)
+    const failed = yield* timedError(store.transaction(body))
+    other.run("rollback")
+    other.close()
+    return { failed, ran, goal: (yield* store.chat).goal, count: yield* store.count }
+  }).pipe(Effect.provide(limited(file))))
+  waitedLimit(got.failed, "transaction")
+  expect(got.ran).toBe(0)
+  expect(got.goal).toBeNull()
+  expect(got.count).toBe(0)
+})
+
+test("the limit store: when the lock is free again, the next call of the same store runs at once: a write, a transaction and a snapshot", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const other = holdLock(file)
+    const failed = yield* timedError(store.setGoal("mine"))
+    other.run("rollback")
+    other.close()
+    const write = yield* timedValue(store.setGoal("next"))
+    const transaction = yield* timedValue(store.transaction(store.append([{ kind: "user", text: "next" }])))
+    const snapshot = yield* timedValue(store.snapshot(store.chat))
+    return { failed, times: [write.ms, transaction.ms, snapshot.ms], goal: snapshot.value.goal, count: yield* store.count }
+  }).pipe(Effect.provide(limited(file))))
+  waitedLimit(got.failed, "setGoal")
+  for (const ms of got.times) expect(ms).toBeLessThan(LIMIT)
+  expect(got.goal).toBe("next")
+  expect(got.count).toBe(1)
+})
+
+test("the limit store: each layer over a file refuses a store of 0 at its start, with StoreError (open)", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  const refused = await Promise.all([
+    Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(storeLayer(file, options(), { store: 0 }))))),
+    Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(chatsLayer(file, { store: 0 }))))),
+    Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(readsLayer(file, { store: 0 })))))
+  ])
+  for (const error of refused) {
+    expect(error).toBeInstanceOf(StoreError)
+    expect(error._tag === "StoreError" ? [error.op, String(error.cause)] : null).toEqual(["open", "RangeError: the limit store is a whole number of milliseconds from 1 to 2147483647, not 0"])
+  }
+})
+
+// The other waits of a call (database.ts, the table of waits). Each ends
+// within store, but the open's (below, within 3 × store) and the wait for
+// the one connection (the last case).
+
+test("the limit store: the reads' connection waits for no writer: under a held write lock it opens, reads and takes a snapshot at once, and sees the last commit", async () => {
+  const file = newFile()
+  await withStore(file, Store.use((store) => store.setGoal("committed")))
+  const other = holdLock(file)
+  try {
+    const got = await Effect.runPromise(timedValue(Effect.gen(function*() {
+      const reads = yield* Reads
+      return [(yield* reads.chat).goal, (yield* reads.snapshot(reads.chat)).goal, yield* reads.count]
+    })).pipe(Effect.provide(readsLayer(file, { store: LIMIT }))))
+    expect(got.value).toEqual(["committed", "committed", 0])
+    expect(got.ms).toBeLessThan(LIMIT)
+    // The writer commits: the next read sees it, at once.
+    other.run("commit")
+    const after = await Effect.runPromise(timedValue(Reads.use((reads) => reads.chat)).pipe(Effect.provide(readsLayer(file, { store: LIMIT }))))
+    expect(after.value.goal).toBe("held")
+    expect(after.ms).toBeLessThan(LIMIT)
+  } finally {
+    other.close()
+  }
+})
+
+test("the limit store: on the store's own connection a snapshot waits for the lock as a write does, and a read outside it does not", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const other = holdLock(file)
+    const snapshot = yield* timedError(store.snapshot(store.chat))
+    const read = yield* timedValue(store.chat)
+    other.run("rollback")
+    other.close()
+    return { snapshot, read }
+  }).pipe(Effect.provide(limited(file))))
+  waitedLimit(got.snapshot, "snapshot")
+  expect(got.read.value.goal).toBeNull()
+  expect(got.read.ms).toBeLessThan(LIMIT)
+})
+
+test("the limit store: a commit waits for no reader: while another connection holds a read, a write of the store commits at once, and the reader keeps its state", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const reader = new Sqlite(file, { readonly: true })
+    reader.run("begin")
+    const before = reader.query("select goal from everchat_chat").all()
+    const write = yield* timedValue(store.transaction(Effect.gen(function*() {
+      yield* store.setGoal("written")
+      yield* store.append([{ kind: "user", text: "written" }])
+    })))
+    const during = reader.query("select goal from everchat_chat").all()
+    reader.run("commit")
+    const after = reader.query("select goal from everchat_chat").all()
+    reader.close()
+    return { before, write: write.ms, during, after }
+  }).pipe(Effect.provide(limited(file))))
+  expect(got.write).toBeLessThan(LIMIT)
+  expect(got.before).toEqual([{ goal: null }])
+  expect(got.during).toEqual([{ goal: null }])
+  expect(got.after).toEqual([{ goal: "written" }])
+})
+
+test("the limit store: the open of a store waits for the lock: under a held write lock it fails with StoreError (open) after store, and opens when the lock is free", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  const other = holdLock(file)
+  const got = await Effect.runPromise(timedError(Effect.void.pipe(Effect.provide(limited(file)))))
+  other.run("rollback")
+  other.close()
+  waitedLimit(got, "open")
+  expect(launches(file).length).toBe(1)
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(limited(file))))
+  expect(launches(file).length).toBe(2)
+})
+
+// The open's waits (database.ts, the table of waits). On a file that is not
+// yet in WAL mode three statements of the open can each wait on the file
+// for store, one after the other: the check's BEGIN IMMEDIATE, its COMMIT
+// (in a rollback journal a commit waits for a reader) and the change to
+// WAL. The cases below name the statement that waits: `traced` gives each
+// statement that the store's connections ran, with its time.
+
+// A file of the store, with one launch, put back in a rollback journal
+// (DELETE mode), as another tool can leave it.
+const rollbackFile = async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  write(file, "pragma journal_mode = delete")
+  return file
+}
+
+// A connection of the test that holds a read of `file` until `end`: a
+// shared lock in a rollback journal, a snapshot in WAL mode.
+const holdRead = (file: string) => {
+  const reader = new Sqlite(file, { readonly: true })
+  ours.add(reader)
+  reader.run("begin")
+  reader.query("select count(*) as n from everchat_chat").all()
+  return {
+    end: () => {
+      reader.run("commit")
+      reader.close()
+    }
+  }
+}
+
+// The time now, in milliseconds since 1970, on the clock that the test's
+// process and a holder's share.
+const now = () => performance.timeOrigin + performance.now()
+
+// A statement that a connection of the store ran: its text, its time in
+// milliseconds, whether it passed, and its start and end (`now`).
+interface Ran {
+  readonly sql: string
+  readonly ms: number
+  readonly ok: boolean
+  readonly start: number
+  readonly end: number
+}
+
+// The trace that runs now, and the statements that `traced` has wrapped.
+let tracing: {
+  readonly ran: Array<Ran>
+  readonly before: Map<string, () => void>
+  readonly after: Map<string, () => void>
+} | undefined
+const wrapped = new WeakSet<object>()
+
+// What a trace does around the statements of the store: `before[sql]` runs
+// once, right before the first run of the statement `sql` (so a holder is
+// told that the statement starts); `after[sql]` runs once, right after the
+// first run of `sql` that passed (so a test's lock starts between two
+// statements of the open).
+interface Hooks {
+  readonly before?: Readonly<Record<string, () => void>>
+  readonly after?: Readonly<Record<string, () => void>>
+}
+
+// Runs `body`, and gives its value and the statements that the store's
+// connections ran while it ran. The driver prepares each statement with
+// Bun's `query`, and runs it with `all` or `values`.
+const traced = async <A>(hooks: Hooks, body: () => Promise<A>) => {
+  const native = Sqlite.prototype.query
+  const trace = { ran: new Array<Ran>(), before: new Map(Object.entries(hooks.before ?? {})), after: new Map(Object.entries(hooks.after ?? {})) }
+  Sqlite.prototype.query = function(this: Sqlite, sql: string) {
+    const statement = native.call(this, sql)
+    if (!ours.has(this) && !wrapped.has(statement)) {
+      wrapped.add(statement)
+      const methods = statement as unknown as Record<"all" | "values", (...args: Array<unknown>) => unknown>
+      for (const name of ["all", "values"] as const) {
+        const run = methods[name]
+        methods[name] = function(this: unknown, ...args: Array<unknown>) {
+          const first = tracing?.before.get(sql)
+          if (first !== undefined) {
+            tracing?.before.delete(sql)
+            first()
+          }
+          const start = now()
+          let ok = false
+          try {
+            const result = run.apply(this, args)
+            ok = true
+            return result
+          } finally {
+            const end = now()
+            const trace = tracing
+            if (trace !== undefined) {
+              trace.ran.push({ sql, ms: end - start, ok, start, end })
+              const then = ok ? trace.after.get(sql) : undefined
+              if (then !== undefined) {
+                trace.after.delete(sql)
+                then()
+              }
+            }
+          }
+        }
+      }
+    }
+    return statement
+  } as typeof native
+  tracing = trace
+  try {
+    return { value: await body(), ran: trace.ran }
+  } finally {
+    tracing = undefined
+    Sqlite.prototype.query = native
+  }
+}
+
+// The first run of the statement `sql` in `ran`.
+const first = (ran: ReadonlyArray<Ran>, sql: string) => {
+  const found = ran.find((statement) => statement.sql === sql)
+  expect(found).toBeDefined()
+  return found as Ran
+}
+
+// The statements of the open that wait on the file (database.ts).
+const BEGIN = "BEGIN IMMEDIATE"
+const COMMIT = "COMMIT"
+const WAL = "pragma journal_mode = wal"
+
+// A statement that waited for a holder's lock and then passed: it started
+// before the holder let the lock go (`released`, on the holder's clock) and
+// ended after it, within store and `SLACK`. One that did not wait: it
+// passed within `NO_WAIT` ms. One that waited and failed: after store
+// (less `CLOCK`), before store and `SLACK`.
+const NO_WAIT = 50
+const waitedAndPassed = (statement: Ran, released: number | undefined) => {
+  expect(released).toBeDefined()
+  expect(statement.ok).toBe(true)
+  expect(statement.start).toBeLessThan(released as number)
+  expect(statement.end).toBeGreaterThanOrEqual((released as number) - CLOCK)
+  expect(statement.ms).toBeLessThan(LIMIT + SLACK)
+}
+const noWait = (statement: Ran) => {
+  expect(statement.ok).toBe(true)
+  expect(statement.ms).toBeLessThan(NO_WAIT)
+}
+const waitedAndFailed = (statement: Ran) => {
+  expect(statement.ok).toBe(false)
+  expect(statement.ms).toBeGreaterThanOrEqual(LIMIT - CLOCK)
+  expect(statement.ms).toBeLessThan(LIMIT + SLACK)
+}
+
+// The program of another process that holds locks on a file: a write
+// reservation (BEGIN IMMEDIATE) and a read, each when its time is given
+// (HOLD_WRITE, HOLD_READ). It holds each lock until the test tells it that
+// the statement that is to wait for it starts (the word: a file `write` or
+// `read` in HOLD_DIR), and then for its time, counted from the word; so the
+// wait is there for the statement to make, whatever the time of the
+// holder's own start. It says when it lets each lock go, on the clock that
+// the test shares (`<lock> released <time>`), and then it ends. With no
+// word in 10 s it lets the lock go and says `<lock> untold`. A lock of the
+// test's own process could not end while the open waits: SQLite's wait
+// holds the process's thread.
+const HOLDER = `
+const { Database } = require("bun:sqlite")
+const fs = require("node:fs")
+const file = process.env.HOLD_FILE
+const now = () => performance.timeOrigin + performance.now()
+const hold = (name, ms, take) => {
+  if (ms === "") return
+  const db = new Database(file)
+  take(db)
+  const word = process.env.HOLD_DIR + "/" + name
+  const start = now()
+  const poll = setInterval(() => {
+    const told = fs.existsSync(word)
+    if (!told && now() - start < 10000) return
+    clearInterval(poll)
+    setTimeout(() => {
+      const at = now()
+      db.run("rollback")
+      db.close()
+      console.log(told ? name + " released " + at : name + " untold")
+    }, told ? Number(ms) : 0)
+  }, 1)
+}
+hold("write", process.env.HOLD_WRITE, (db) => db.run("begin immediate"))
+hold("read", process.env.HOLD_READ, (db) => { db.run("begin"); db.query("select count(*) as n from everchat_chat").all() })
+console.log("held")
+`
+
+// The locks of a holder, and when it let each go (`now`).
+type Lock = "write" | "read"
+type Released = Partial<Record<Lock, number>>
+
+// Starts the holder on `file`, and waits until it holds its locks. `tell`
+// gives it the word of a lock (from the hook `before` of a statement).
+// `end` waits for its end (it ends it if it still runs after 2 s), and
+// gives when it let each lock go.
+const holdElsewhere = async (file: string, hold: Readonly<Partial<Record<Lock, number>>>) => {
+  const words = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-hold-"))
+  const child = Bun.spawn([process.execPath, "-e", HOLDER], {
+    env: { ...process.env, HOLD_FILE: file, HOLD_DIR: words, HOLD_WRITE: String(hold.write ?? ""), HOLD_READ: String(hold.read ?? "") },
+    stdout: "pipe",
+    stderr: "inherit"
+  })
+  const reader = child.stdout.getReader()
+  let said = ""
+  const read = async (until: (text: string) => boolean) => {
+    while (!until(said)) {
+      const { done, value } = await reader.read()
+      if (done) break
+      said += new TextDecoder().decode(value)
+    }
+  }
+  await read((text) => text.includes("\n"))
+  if (said !== "held\n") {
+    child.kill()
+    await child.exited
+    throw new Error(`the holder said ${JSON.stringify(said)}, not that it holds`)
+  }
+  const tell = (lock: Lock) => fs.writeFileSync(path.join(words, lock), "")
+  const end = async (): Promise<Released> => {
+    const timer = setTimeout(() => child.kill(), 2000)
+    await read(() => false)
+    await child.exited
+    clearTimeout(timer)
+    fs.rmSync(words, { recursive: true, force: true })
+    const released: Record<string, number> = {}
+    for (const line of said.split("\n")) {
+      const [lock, word, at] = line.split(" ")
+      if (word === "released") released[lock as string] = Number(at)
+    }
+    return released
+  }
+  return { tell, end }
+}
+
+// Runs `body` with a holder on `file`; gives its value and when the holder
+// let each lock go. The holder is gone when it returns.
+const withHolder = async <A>(
+  file: string,
+  hold: Readonly<Partial<Record<Lock, number>>>,
+  body: (tell: (lock: Lock) => void) => Promise<A>
+) => {
+  const other = await holdElsewhere(file, hold)
+  const value = await body(other.tell).catch(async (error: unknown) => {
+    await other.end()
+    throw error
+  })
+  return { value, released: await other.end() }
+}
+
+// The open of the store over `file`, timed, and its error.
+const failedOpen = (file: string) => Effect.runPromise(timedError(Effect.void.pipe(Effect.provide(limited(file)))))
+
+// The bytes of `file`, and of its journal and its WAL when it has them.
+const bytes = (file: string) =>
+  ["", "-journal", "-wal"].map((suffix) => (fs.existsSync(file + suffix) ? Array.from(fs.readFileSync(file + suffix)) : null))
+
+// The schema of `file`: each object of `sqlite_master`, by its name.
+const objects = (file: string) => rows(file, "select type, name, tbl_name, sql from sqlite_master order by name")
+
+test("the limit store: the open's commit of its check, on a file in a rollback journal that another connection reads, waits at the COMMIT: StoreError (open) after store, the change to WAL never runs, and the file is as it was", async () => {
+  const file = await rollbackFile()
+  const before = bytes(file)
+  const reader = holdRead(file)
+  const got = await traced({}, () => failedOpen(file)).finally(reader.end)
+  waitedLimit(got.value, "open")
+  noWait(first(got.ran, BEGIN))
+  waitedAndFailed(first(got.ran, COMMIT))
+  expect(got.ran.filter((statement) => statement.sql === WAL)).toEqual([])
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "delete" }])
+  expect(launches(file).length).toBe(1)
+  // A file that had its schema keeps its bytes.
+  expect(bytes(file)).toEqual(before)
+})
+
+test("the limit store: the open's change to WAL, of a file in a rollback journal that a connection starts to read right after the check's commit, waits at pragma journal_mode = wal: StoreError (open) after store, and the file is as it was", async () => {
+  const file = await rollbackFile()
+  const before = bytes(file)
+  let reader: { readonly end: () => void } | undefined
+  const got = await traced({ after: { [COMMIT]: () => reader = holdRead(file) } }, () => failedOpen(file)).finally(() => reader?.end())
+  expect(reader).toBeDefined()
+  waitedLimit(got.value, "open")
+  noWait(first(got.ran, BEGIN))
+  noWait(first(got.ran, COMMIT))
+  waitedAndFailed(first(got.ran, WAL))
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "delete" }])
+  expect(launches(file).length).toBe(1)
+  // A file that had its schema keeps its bytes.
+  expect(bytes(file)).toEqual(before)
+})
+
+test("the limit store: the first open of a new file, whose change to WAL waits for a reader that starts right after the check's commit: StoreError (open) after store; the file keeps the schema and the mark of this version, in a rollback journal, with no launch and no message; the next open writes no schema and changes it to WAL", async () => {
+  const file = newFile()
+  expect(fs.existsSync(file)).toBe(false)
+  let reader: { readonly end: () => void } | undefined
+  const got = await traced({ after: { [COMMIT]: () => reader = holdRead(file) } }, () => failedOpen(file)).finally(() => reader?.end())
+  expect(reader).toBeDefined()
+  waitedLimit(got.value, "open")
+  noWait(first(got.ran, BEGIN))
+  expect(got.ran.filter((statement) => statement.sql.startsWith("create ")).length).toBeGreaterThan(0)
+  // The commit writes the whole schema, so its time is the disk's: it
+  // passes, and no other connection has the file open yet, so it has
+  // nothing to wait for.
+  expect(first(got.ran, COMMIT).ok).toBe(true)
+  expect(first(got.ran, COMMIT).ms).toBeLessThan(LIMIT)
+  waitedAndFailed(first(got.ran, WAL))
+  // What the failed open left: the schema and the mark, committed by the
+  // check, in the journal mode of a new file; no row of a launch or a chat.
+  const made = newFile()
+  await Effect.runPromise(Effect.void.pipe(Effect.provide(Database.layer(made))))
+  expect(rows(file, "pragma user_version")).toEqual([{ user_version: VERSION }])
+  expect(objects(file)).toEqual(objects(made))
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "delete" }])
+  expect(launches(file)).toEqual([])
+  expect(rows(file, "select count(*) as n from everchat_chat")).toEqual([{ n: 0 }])
+  expect(rows(file, "select count(*) as n from everchat_msg")).toEqual([{ n: 0 }])
+  // The reader is gone: the next open finds the mark, writes no schema, and
+  // changes the file to WAL; its launch is the file's first.
+  const again = await traced({}, () => Effect.runPromise(timedValue(Effect.void.pipe(Effect.provide(limited(file))))))
+  expect(again.ran.filter((statement) => statement.sql.startsWith("create ") || statement.sql.startsWith("pragma user_version ="))).toEqual([])
+  expect(first(again.ran, WAL).ok).toBe(true)
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "wal" }])
+  expect(objects(file)).toEqual(objects(made))
+  expect(launches(file).length).toBe(1)
+})
+
+test("the limit store: the whole open, on a file in a rollback journal, waits two times in a row: at its BEGIN IMMEDIATE for another process's write of 100 ms, then at its COMMIT for a reader; it ends with StoreError (open) within 3 × store", async () => {
+  const file = await rollbackFile()
+  const reader = holdRead(file)
+  try {
+    const { value: got, released } = await withHolder(
+      file,
+      { write: 100 },
+      (tell) => traced({ before: { [BEGIN]: () => tell("write") } }, () => failedOpen(file))
+    )
+    waitedAndPassed(first(got.ran, BEGIN), released.write)
+    waitedAndFailed(first(got.ran, COMMIT))
+    expect(got.ran.filter((statement) => statement.sql === WAL)).toEqual([])
+    waitedLimit(got.value, "open")
+    // Two waits.
+    expect(got.value.ms).toBeLessThan(2 * LIMIT + SLACK)
+  } finally {
+    reader.end()
+  }
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "delete" }])
+  expect(launches(file).length).toBe(1)
+})
+
+test("the limit store: the whole open, on a file in a rollback journal, waits three times in a row: at its BEGIN IMMEDIATE for another process's write of 100 ms, at its COMMIT for that process's read of 100 ms, then at the change to WAL for a reader; it ends with StoreError (open) within 3 × store", async () => {
+  const file = await rollbackFile()
+  let reader: { readonly end: () => void } | undefined
+  const { value: got, released } = await withHolder(
+    file,
+    { write: 100, read: 100 },
+    (tell) =>
+      traced({
+        before: { [BEGIN]: () => tell("write"), [COMMIT]: () => tell("read") },
+        after: { [COMMIT]: () => reader = holdRead(file) }
+      }, () => failedOpen(file)).finally(() => reader?.end())
+  )
+  waitedAndPassed(first(got.ran, BEGIN), released.write)
+  waitedAndPassed(first(got.ran, COMMIT), released.read)
+  waitedAndFailed(first(got.ran, WAL))
+  waitedLimit(got.value, "open")
+  // Three waits.
+  expect(got.value.ms).toBeLessThan(3 * LIMIT + SLACK)
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "delete" }])
+  expect(launches(file).length).toBe(1)
+})
+
+test("the limit store: on a file in WAL mode the open waits only at its BEGIN IMMEDIATE: it waits for another process's write of 100 ms, and then its COMMIT and its change to WAL wait for no reader and no writer", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  const reader = holdRead(file)
+  let writer: Sqlite | undefined
+  try {
+    const { value: got, released } = await withHolder(
+      file,
+      { write: 100 },
+      (tell) =>
+        traced({
+          before: { [BEGIN]: () => tell("write") },
+          after: {
+            [COMMIT]: () => {
+              writer = holdLock(file)
+            }
+          }
+        }, () => Effect.runPromise(timedValue(Effect.void.pipe(Effect.provide(Database.layer(file, { store: LIMIT }))))))
+    )
+    expect(writer).toBeDefined()
+    waitedAndPassed(first(got.ran, BEGIN), released.write)
+    noWait(first(got.ran, COMMIT))
+    noWait(first(got.ran, WAL))
+    // One wait.
+    expect(got.value.ms).toBeLessThan(LIMIT + SLACK)
+  } finally {
+    writer?.run("rollback")
+    writer?.close()
+    reader.end()
+  }
+  expect(rows(file, "pragma journal_mode")).toEqual([{ journal_mode: "wal" }])
+})
+
+test("the limit store: the store's launch, after the open, is a call of its own: on a file in WAL mode the layer waits at the open's BEGIN IMMEDIATE for another process's write of 100 ms, then at the launch's BEGIN IMMEDIATE for a write that starts after the change to WAL, and ends with StoreError (launch) within 2 × store", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  let writer: Sqlite | undefined
+  try {
+    const { value: got, released } = await withHolder(
+      file,
+      { write: 100 },
+      (tell) =>
+        traced({
+          before: { [BEGIN]: () => tell("write") },
+          after: {
+            [WAL]: () => {
+              writer = holdLock(file)
+            }
+          }
+        }, () => failedOpen(file))
+    )
+    expect(writer).toBeDefined()
+    const begins = got.ran.filter((statement) => statement.sql === BEGIN)
+    expect(begins.length).toBe(2)
+    waitedAndPassed(begins[0] as Ran, released.write)
+    noWait(first(got.ran, WAL))
+    waitedAndFailed(begins[1] as Ran)
+    waitedLimit(got.value, "launch")
+    // Two waits.
+    expect(got.value.ms).toBeLessThan(2 * LIMIT + SLACK)
+  } finally {
+    writer?.run("rollback")
+    writer?.close()
+  }
+  expect(launches(file).length).toBe(1)
+})
+
+// The one wait of a call that store does not bound: the store has one connection,
+// and a call waits for it while another call of the same process holds
+// it, here a transaction of 600 ms. The holder's own time bounds that
+// wait, not the store's timer (database.ts).
+test("the limit store: a call waits for the connection while a transaction of the same process holds it, past store, and then runs", async () => {
+  const file = newFile()
+  const got = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const holder = yield* Effect.forkChild(store.transaction(Effect.sleep("600 millis")))
+    yield* Effect.sleep("20 millis")
+    const write = yield* timedValue(store.setGoal("after the holder"))
+    yield* Fiber.join(holder)
+    return { write: write.ms, goal: (yield* store.chat).goal }
+  }).pipe(Effect.provide(limited(file))))
+  expect(got.write).toBeGreaterThan(LIMIT)
+  expect(got.write).toBeLessThan(1500)
+  expect(got.goal).toBe("after the holder")
 })

@@ -6,7 +6,7 @@ import { Effect, Layer } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options } from "../tests/help.ts"
-import { capped, Limit, LIMIT, shorten } from "@everchat/core/limit"
+import { capped, Limit, LIMIT, noFileLayer, shorten } from "@everchat/core/limit"
 import { limitLayer } from "./limitfile.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
@@ -113,4 +113,51 @@ test("with no directory given, the files are under the system's temporary direct
     const uuid = (yield* Store.use((store) => store.chat)).uuid
     expect(limit.file(12).endsWith(path.join("everchat-" + process.getuid!(), uuid, "12.txt"))).toBe(true)
   }), { dir: undefined as unknown as string })
+})
+
+test("the layer with no file shows a result as the file's layer does when it cannot write, and makes no file", async () => {
+  const file = newFile()
+  const home = path.dirname(file)
+  const dir = path.join(home, "open")
+  fs.mkdirSync(dir, { mode: 0o777 })
+  fs.chmodSync(dir, 0o777)
+  const long = Array.from({ length: 2000 }, (_, k) => "line " + k).join("\n")
+  // The file's layer, with a directory that it does not use.
+  const filed = await withLimit(file, Effect.gen(function*() {
+    const limit = yield* Limit
+    return [yield* limit.show(3, "héllo"), yield* limit.show(3, long)]
+  }), { limit: 1000, dir })
+  const before = fs.readdirSync(home).sort()
+  const bare = await Effect.runPromise(Effect.gen(function*() {
+    const limit = yield* Limit
+    return {
+      short: yield* limit.show(3, "héllo"),
+      at: yield* limit.show(3, "x".repeat(1000)),
+      long: yield* limit.show(3, long),
+      file: limit.file(3),
+      put: yield* limit.put(3, long)
+    }
+  }).pipe(Effect.provide(noFileLayer({ limit: 1000 }))))
+  // Within the limit: whole. One over it: shortened, by the same rule and
+  // to the same text as the file's layer gives.
+  expect(bare.short).toEqual({ text: "héllo", shown: 6 })
+  expect(bare.short).toEqual(filed[0]!)
+  expect(bare.at.text).toBe("x".repeat(1000))
+  expect(bare.long).toEqual(filed[1]!)
+  expect(bare.long.text.length).toBeLessThanOrEqual(1000)
+  expect(bare.long.text).toContain("result(3) gives the whole result to a program.")
+  expect(bare.long.text).not.toContain("file")
+  expect(bare.long.shown).toBe(Buffer.byteLength(bare.long.text))
+  // It writes nothing: no path, put is false, and the home is as it was.
+  expect(bare.file).toBe("")
+  expect(bare.put).toBe(false)
+  expect(fs.readdirSync(home).sort()).toEqual(before)
+  expect(fs.readdirSync(dir)).toEqual([])
+})
+
+test("the layer with no file takes the default limit when given none", async () => {
+  const text = "z".repeat(LIMIT + 1)
+  const seen = await Effect.runPromise(Limit.use((limit) => limit.show(5, text)).pipe(Effect.provide(noFileLayer())))
+  expect(seen.text).toBe(shorten(text, LIMIT, "result(5) gives the whole result to a program."))
+  expect((await Effect.runPromise(Limit.use((limit) => limit.show(5, "z".repeat(LIMIT))).pipe(Effect.provide(noFileLayer())))).text).toBe("z".repeat(LIMIT))
 })

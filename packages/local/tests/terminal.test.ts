@@ -535,6 +535,8 @@ const fakeTurns = (
         say: () => Effect.die("not used"),
         stop: () => Effect.void,
         idle: Effect.void,
+        busy: Effect.succeed(false),
+        worked: Effect.succeed(0),
         events: Stream.fromPubSub(hub),
         subscribe: Effect.gen(function*() {
           yield* Effect.orDie(before(store, made.publish))

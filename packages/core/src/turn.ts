@@ -10,7 +10,14 @@
 // What a person's message does (`say`)
 //
 // - It is logged at once, with its free nodes: it is then accepted.
-// - If no turn runs, a turn starts in the same transaction.
+// - If no turn runs, a turn starts in the same transaction, and its fiber
+//   in the same step that cannot be interrupted.
+// - With its sender's key (the host's `Idempotency-Key`), it is logged one
+//   time: a key that the chat has already gives that first message, its
+//   `accepted` number, and nothing else (`Sent`, `repeat`). Its text is not
+//   compared. The key is read under the loop's `lock`, so two messages of
+//   one key in one process log one; the store's index is the wall between
+//   two processes (store.ts, `append`).
 // - If a turn runs, the message steers it: the turn takes it in after the
 //   results of its present step. A message that comes too late for the turn
 //   starts the next turn.
@@ -79,7 +86,7 @@
 //
 // Not here yet: agents, hooks, and images.
 
-import { Context, Effect, Fiber, Layer, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
+import { Clock, Context, Effect, Fiber, Layer, Option, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
 import { type Declaration, head as makeHead, TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
@@ -162,18 +169,56 @@ export const decodeHead = Schema.decodeUnknownEffect(KeptHead)
 export const item = (kept: Kept): Item =>
   kept.kind === "turn" ? { kind: "turn", output: kept.output } : kept.kind === "user" ? { kind: "user", blocks: kept.blocks } : { kind: "back", results: kept.results }
 
+// What `say` gives: the message's pages, the number of its `accepted`
+// event, and whether its key was the key of a message logged before (then
+// both are that message's, and nothing was written).
+export interface Sent {
+  readonly messages: ReadonlyArray<Message>
+  readonly accepted: number
+  readonly repeat: boolean
+}
+
+// The most characters (UTF-16 units) of a turn's `why` that the loop
+// keeps: a longer one is cut, never inside a pair of surrogates.
+export const WHY = 2000
+
+// A `why` as the loop keeps it: well-formed, and at most WHY characters.
+export const whyOf = (given: string): string => {
+  const why = given.toWellFormed()
+  if (why.length <= WHY) return why
+  // A well-formed text has a high surrogate only before its low one.
+  const code = why.charCodeAt(WHY - 1)
+  return why.slice(0, code >= 0xd800 && code <= 0xdbff ? WHY - 1 : WHY)
+}
+
+// The largest capacity of the hub: a bounded hub allocates its whole capacity when it is made.
+const LARGEST = 65_536
+
 export interface Options {
   readonly declarations: ReadonlyArray<Declaration> // the functions of the chat, for the head (the sandbox's, in the same order)
   readonly rules?: string | null | undefined // the person's own instructions, for the head
+  // The hub's capacity in events, for a listener that may fall behind: with
+  // it, a full hub drops its oldest event (`PubSub.sliding`), so a turn
+  // never waits for a listener; with none, the hub keeps every event. A
+  // whole number from 1 to 65,536; another value is a defect of the
+  // layer.
+  readonly hub?: number | undefined
 }
 
 export class Turns extends Context.Service<Turns, {
   // The person says something. It returns when the message is in the log.
-  say(text: string): Effect.Effect<Array<Message>, StoreError>
+  // `key`: its sender's key (the head comment).
+  say(text: string, key?: string | null): Effect.Effect<Sent, StoreError>
   // The person stops the turn that runs.
   stop(why?: string): Effect.Effect<void>
   // Waits until no turn runs.
   readonly idle: Effect.Effect<void>
+  // True while a turn runs (a request, a call, its end), with no wait.
+  readonly busy: Effect.Effect<boolean>
+  // When the loop was last busy, in milliseconds of Effect's `Clock`: now
+  // while a turn runs, else when the last one ended, else when the layer
+  // started.
+  readonly worked: Effect.Effect<number>
   // What happens, as it happens.
   readonly events: Stream.Stream<TurnEvent>
   // The same, for a listener that must miss nothing from a known moment on:
@@ -191,26 +236,46 @@ export class Turns extends Context.Service<Turns, {
         const limit = yield* Limit
         const scope = yield* Effect.scope
         const lock = yield* Semaphore.make(1)
-        const hub = yield* PubSub.unbounded<TurnEvent>()
+        const capacity = options.hub
+        if (capacity !== undefined && !(Number.isInteger(capacity) && capacity >= 1 && capacity <= LARGEST)) {
+          return yield* Effect.die(new RangeError("The option `hub` of the turn loop must be a whole number from 1 to " + LARGEST + ", not " + String(capacity) + "."))
+        }
+        const hub = yield* (capacity === undefined ? PubSub.unbounded<TurnEvent>() : PubSub.sliding<TurnEvent>(capacity))
         const emit = (event: TurnEvent) => Effect.asVoid(PubSub.publish(hub, event))
         const order = yield* Semaphore.make(1)
         const session = (yield* store.chat).uuid
 
         // The turn that runs, its fiber, and why the person stopped it.
         let running: { turn: number; fiber: Fiber.Fiber<void> | null; stop: string | null } | null = null
+        // True while a stopped turn's end is written, after `running` is
+        // null.
+        let ending = false
+        const clock = yield* Clock.Clock
+        // When the last turn ended; the layer's start before any.
+        let rested = clock.currentTimeMillisUnsafe()
+        // No turn runs from now on.
+        const rest = () => {
+          running = null
+          rested = clock.currentTimeMillisUnsafe()
+        }
 
         const broken = (op: string) => (cause: unknown) => new StoreError({ op, cause })
 
         // An event's write and its publish, under `order`, with no
         // interruption between the commit and the publish (the head comment).
         // `write` commits the rows, and gives its result and the events, in
-        // the order of their numbers.
-        const record = <A>(write: Effect.Effect<readonly [A, ReadonlyArray<TurnEvent>], StoreError>): Effect.Effect<A, StoreError> =>
+        // the order of their numbers. `next` runs after the publish, in the
+        // same step that nothing interrupts.
+        const record = <A>(
+          write: Effect.Effect<readonly [A, ReadonlyArray<TurnEvent>], StoreError>,
+          next: (result: A) => Effect.Effect<void> = () => Effect.void
+        ): Effect.Effect<A, StoreError> =>
           order.withPermits(1)(Effect.uninterruptible(Effect.gen(function*() {
             const [result, events] = yield* write
             for (const event of events) {
               yield* emit(event)
             }
+            yield* next(result)
             return result
           })))
 
@@ -279,10 +344,11 @@ export class Turns extends Context.Service<Turns, {
         })
 
         // A turn ends. One that did not end well leaves a note in the log.
-        // `why` is made well-formed once, so that the event holds the text
-        // that the row holds (the store makes it well-formed too).
+        // `why` is made well-formed and cut to WHY characters once
+        // (`whyOf`), so that the row, the event and the note hold the same
+        // text (the store makes it well-formed too).
         const end = Effect.fnUntraced(function*(turn: Turn, status: "done" | "stopped" | "failed", given: string | null) {
-          const why = given === null ? null : given.toWellFormed()
+          const why = given === null ? null : whyOf(given)
           const note = status === "failed"
             ? "No reply: " + (why ?? "it failed").replace(/\.$/, "") + ". Send a message to try again."
             : status === "stopped"
@@ -448,7 +514,7 @@ export class Turns extends Context.Service<Turns, {
                 // A message that came too late for the turn starts the next one.
                 const next: Message | undefined = status === "done" ? (yield* waiting)[0] : undefined
                 if (next === undefined) {
-                  running = null
+                  rest()
                   return null
                 }
                 // Its turn and its `start`, in one transaction. The draft
@@ -461,7 +527,8 @@ export class Turns extends Context.Service<Turns, {
             Effect.onInterrupt(() =>
               Effect.gen(function*() {
                 const stopped = running
-                running = null
+                ending = true
+                rest()
                 // The program's own stop leaves the turn running, for the next launch.
                 if (stopped === null || stopped.stop === null) {
                   return
@@ -470,11 +537,17 @@ export class Turns extends Context.Service<Turns, {
                 if (turn !== undefined) {
                   yield* end(turn, "stopped", stopped.stop)
                 }
-              }).pipe(Effect.ignore)
+              }).pipe(
+                Effect.ignore,
+                Effect.ensuring(Effect.sync(() => {
+                  ending = false
+                  rested = clock.currentTimeMillisUnsafe()
+                }))
+              )
             ),
             Effect.catchCause((cause) =>
               Effect.gen(function*() {
-                running = null
+                rest()
                 yield* diagnostic(Effect.logError("the turn loop stopped", cause))
               })
             )
@@ -489,13 +562,24 @@ export class Turns extends Context.Service<Turns, {
             }
           })
 
-        const say = (text: string) =>
+        const say = (text: string, key?: string | null) =>
           lock.withPermits(1)(Effect.gen(function*() {
+            // A key that the chat has: its first message, and nothing more.
+            // The store gives none for a key of another form, and refuses it
+            // below.
+            if (key !== undefined && key !== null) {
+              const known = Option.getOrNull(yield* store.keyed(key))
+              if (known !== null) {
+                return { messages: known.messages, accepted: known.accepted, repeat: true } satisfies Sent
+              }
+            }
             const idle = running === null
-            // Its pages, their `accepted`, and, when no turn runs, the clear
-            // of the draft (the draft was this message) and a turn with its
-            // `start`, in one transaction.
-            const [written, turn] = yield* record(Effect.map(
+            // Its pages with its key, their `accepted`, and, when no turn
+            // runs, the clear of the draft (the draft was this message) and a
+            // turn with its `start`, in one transaction. The turn's fiber
+            // starts in the same step: no interruption of `say` leaves a
+            // turn running in the log with no fiber.
+            const [written, , accepted] = yield* record(Effect.map(
               memory.pushWith([{ kind: "user", text }], (written) =>
                 Effect.gen(function*() {
                   const first = written[0]
@@ -509,17 +593,14 @@ export class Turns extends Context.Service<Turns, {
                   }
                   yield* store.setDraft(null)
                   return [accepted, yield* begin(first.i)] as const
-                })),
+                }), key),
               ([written, [accepted, begun]]) =>
                 [
-                  [written, begun?.turn ?? null] as const,
+                  [written, begun?.turn ?? null, accepted] as const,
                   [{ type: "accepted", n: accepted, messages: written }, ...(begun === null ? [] : [started(begun)])]
                 ] as const
-            ))
-            if (turn !== null) {
-              yield* launch(turn)
-            }
-            return written
+            ), ([, turn]) => (turn === null ? Effect.void : launch(turn)))
+            return { messages: written, accepted, repeat: false } satisfies Sent
           }))
 
         const stop = (why = "Stopped.") =>
@@ -534,6 +615,9 @@ export class Turns extends Context.Service<Turns, {
         const idle: Effect.Effect<void> = Effect.suspend(() =>
           running === null || running.fiber === null ? Effect.void : Effect.andThen(Fiber.await(running.fiber), idle)
         )
+
+        const busy = Effect.sync(() => running !== null || ending)
+        const worked = Effect.sync(() => (running !== null || ending ? clock.currentTimeMillisUnsafe() : rested))
 
         // A restart: close the calls that still run, then go on with the
         // turn that still runs.
@@ -559,7 +643,7 @@ export class Turns extends Context.Service<Turns, {
           yield* launch(cut)
         }
 
-        return Turns.of({ say, stop, idle, events: Stream.fromPubSub(hub), subscribe: PubSub.subscribe(hub) })
+        return Turns.of({ say, stop, idle, busy, worked, events: Stream.fromPubSub(hub), subscribe: PubSub.subscribe(hub) })
       })
     )
 }

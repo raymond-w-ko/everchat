@@ -9,7 +9,7 @@ import * as path from "node:path"
 import { newFile, rows, write } from "../tests/help.ts"
 import * as Database from "./database.ts"
 import { schema, VERSION } from "./schema.ts"
-import { DatabaseVersion, Kind, KINDS } from "@everchat/core/store"
+import { DatabaseVersion, Kind, KINDS, StoreError } from "@everchat/core/store"
 
 const withDatabase = <A, E>(file: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   Effect.runPromise(effect.pipe(Effect.provide(Database.layer(file))))
@@ -68,7 +68,9 @@ const INDEXES = [
   "everchat_call_running",
   "everchat_call_vendor",
   "everchat_chat_tenant",
+  "everchat_event_msg",
   "everchat_launch_live",
+  "everchat_msg_sender_key",
   "everchat_turn_running"
 ]
 
@@ -107,15 +109,15 @@ const oldFile = async (mark: number) => {
   return file
 }
 
-test("a new file gets the whole schema of the page, and the mark: 17 tables, 25 triggers, 6 indexes, 1 view, each table strict", async () => {
+test("a new file gets the whole schema of the page, and the mark: 17 tables, 25 triggers, 8 indexes, 1 view, each table strict", async () => {
   const file = newFile()
   await withDatabase(file, Effect.void)
   expect(names(file, "table")).toEqual(TABLES)
   expect(names(file, "trigger")).toEqual(TRIGGERS)
   expect(names(file, "index")).toEqual(INDEXES)
   expect(names(file, "view")).toEqual(["everchat_msg_read"])
-  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([17, 25, 6])
-  expect(VERSION).toBe(5)
+  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([17, 25, 8])
+  expect(VERSION).toBe(6)
   expect(rows(file, "pragma user_version")).toEqual([{ user_version: VERSION }])
   const strict = rows<{ name: string; strict: number }>(file, "select name, strict from pragma_table_list where schema = 'main' and type = 'table'")
     .filter((row) => !row.name.startsWith("sqlite_"))
@@ -207,6 +209,17 @@ test("a file with tables and no mark, as Effect's migrator left it, is refused, 
   expect(state(file)).toEqual(before)
 })
 
+test("a file of mark 5, the schema before the sender's key, is refused, and not changed; a new file has mark 6", async () => {
+  const file = newFile()
+  await withDatabase(file, Effect.void)
+  expect(rows(file, "pragma user_version")).toEqual([{ user_version: 6 }])
+  write(file, "pragma user_version = 5")
+  const bytes = fs.readFileSync(file)
+  const refused = await refusal(file)
+  expect(refused._tag === "DatabaseVersion" ? [refused.have, refused.want] : null).toEqual([5, 6])
+  expect(fs.readFileSync(file).equals(bytes)).toBe(true)
+})
+
 test("a file with another mark is refused, and not changed", async () => {
   for (const mark of [VERSION - 1, VERSION + 1]) {
     const file = newFile()
@@ -280,6 +293,23 @@ test("the kinds in the table are the kinds in the code", async () => {
   expect(table.map((row) => row.name)).toEqual([...Kind.literals])
   // The kind counts toward a node's 512 bytes, so every kind has 4 letters.
   expect(table.every((row) => row.name.length === 4)).toBe(true)
+})
+
+// The page's block (docs/schema.html, section 8, `<pre id="ddl-sqlite">`)
+// and the code's statements: the same statements in the same order, white
+// space apart, once the two pragmas at the head of the block are left out
+// (they hold for a connection, and database.ts sets them).
+test("the DDL of the page is the code's schema, statement for statement and in its order", () => {
+  const page = fs.readFileSync(path.join(import.meta.dir, "..", "..", "..", "docs", "schema.html"), "utf8")
+  const block = page.match(/<pre id="ddl-sqlite"><code>([\s\S]*?)<\/code><\/pre>/)?.[1]
+  expect(block).toBeDefined()
+  const squeeze = (text: string) => text.replace(/\s+/g, " ").trim()
+  const statements = block!
+    .replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&quot;", '"').replaceAll("&amp;", "&")
+    .split("\n").filter((line) => !line.startsWith("--")).join("\n")
+    .split(/;\s*$/m).map(squeeze).filter((statement) => statement !== "")
+  expect(statements.slice(0, 2)).toEqual(["pragma foreign_keys = on", "pragma recursive_triggers = on"])
+  expect(statements.slice(2)).toEqual(schema.map(squeeze))
 })
 
 // The tenant of the rows below, and the chat's UUID: 16 bytes each. Then a
@@ -357,6 +387,7 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a delete of a kind", `delete from everchat_kind where id = 6`, "everchat_kind is append only"],
 
   ["a change of a message", `update everchat_msg set text = 'other' where i = 0`, "msg is append only"],
+  ["a sender's key set on a message after its insert", `update everchat_msg set sender_key = 'key-late' where i = 0`, "msg is append only"],
   ["a delete of a message", `delete from everchat_msg where i = 0`, "msg is append only"],
   ["a message of a kind that is not there", `insert into everchat_msg (chat, i, kind, text, size, launch, created) values (1, 1, 99, 'x', 1, 1, 1)`, "FOREIGN KEY"],
   ["a message of a launch that is not there", `insert into everchat_msg (chat, i, kind, text, size, launch, created) values (1, 1, 1, 'x', 1, 99, 1)`, "FOREIGN KEY"],
@@ -457,6 +488,41 @@ test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves t
   expect(rows(file, "select id from everchat_chat order by id")).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
   expect(rows(file, "select msg, n, image from everchat_msg_image order by n")).toEqual([{ msg: 0, n: 0, image: 2 }, { msg: 0, n: 1, image: 1 }])
   expect(rows(file, "select count(*) as n from everchat_event")).toEqual([{ n: 1 }])
+})
+
+// The key of a message's sender (docs/schema.html, everchat_msg): unique in
+// its chat, by its bytes; many messages have none; the same key in another
+// chat, of another tenant (chat 2) or of the same one (chat 3), is another
+// message; and the table refuses its update.
+test("the sender's key: unique in its chat by its bytes, null on many rows, the same key in another chat is another message, and no update sets it", async () => {
+  const file = newFile()
+  const got = await withDatabase(file, Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    for (const statement of BASE) yield* sql.unsafe(statement)
+    yield* sql.unsafe(`insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (3, 1, 30, 'h', '/', '0', 'v', 1)`)
+    const message = (chat: number, i: number, key: string | null) =>
+      sql`insert into everchat_msg (chat, i, kind, text, size, sender_key, launch, created) values (${chat}, ${i}, 1, 'x', 1, ${key}, 1, 1)`
+    yield* message(1, 1, null)
+    yield* message(1, 2, null)
+    yield* message(1, 3, "key-1")
+    yield* message(1, 4, "KEY-1")
+    yield* message(2, 0, "key-1")
+    yield* message(3, 0, "key-1")
+    const again = yield* Effect.flip(message(1, 5, "key-1"))
+    const update = yield* Effect.flip(sql`update everchat_msg set sender_key = null where chat = 1 and i = 3`)
+    return { again: String(again.reason.cause), update: String(update.reason.cause) }
+  }))
+  expect(got.again).toContain("UNIQUE constraint failed: everchat_msg.chat, everchat_msg.sender_key")
+  expect(got.update).toContain("everchat_msg is append only")
+  expect(rows(file, "select chat, i, sender_key from everchat_msg order by chat, i")).toEqual([
+    { chat: 1, i: 0, sender_key: null },
+    { chat: 1, i: 1, sender_key: null },
+    { chat: 1, i: 2, sender_key: null },
+    { chat: 1, i: 3, sender_key: "key-1" },
+    { chat: 1, i: 4, sender_key: "KEY-1" },
+    { chat: 2, i: 0, sender_key: "key-1" },
+    { chat: 3, i: 0, sender_key: "key-1" }
+  ])
 })
 
 // A REPLACE (docs/schema.html, section 1, the tenant boundary): it is no
@@ -651,4 +717,40 @@ test("the readable query shows a kind as a word and a time as text", async () =>
   expect(rows(file, "select chat, i, kind, at, text from everchat_msg_read")).toEqual([
     { chat: 1, i: 0, kind: "asst", at: "2023-11-14 22:13:20", text: "hi" }
   ])
+})
+
+// The limit store (database.ts): the driver's wait on a locked file.
+
+const busy = (layer: ReturnType<typeof Database.layer>) =>
+  Effect.runPromise(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    return (yield* sql<{ timeout: number }>`pragma busy_timeout`)[0]?.timeout
+  }).pipe(Effect.provide(layer)))
+
+test("the limit store: with none the driver waits 5,000 ms on a locked file; a store that is given is the wait, on the database and on its reads' connection", async () => {
+  const file = newFile()
+  expect(await busy(Database.layer(file))).toBe(5000)
+  expect(Database.STORE).toBe(5000)
+  expect(await busy(Database.layer(file, { store: 200 }))).toBe(200)
+  expect(await busy(Database.readonly(file))).toBe(5000)
+  expect(await busy(Database.readonly(file, { store: 200 }))).toBe(200)
+  // The edges of the range pass.
+  expect(await busy(Database.layer(file, { store: 1 }))).toBe(1)
+  expect(await busy(Database.layer(file, { store: 2 ** 31 - 1 }))).toBe(2 ** 31 - 1)
+})
+
+test("the limit store: 0, 1.5 and 2**31 are refused at the layer's start with StoreError (open), before the file is opened", async () => {
+  for (const store of [0, 1.5, 2 ** 31, -1, Number.NaN]) {
+    const file = newFile()
+    for (const layer of [Database.layer(file, { store }), Database.readonly(file, { store })]) {
+      const error = await Effect.runPromise(Effect.flip(Effect.void.pipe(Effect.provide(layer))))
+      expect(error).toBeInstanceOf(StoreError)
+      expect(error._tag === "StoreError" ? [error.op, String(error.cause)] : null).toEqual([
+        "open",
+        `RangeError: the limit store is a whole number of milliseconds from 1 to 2147483647, not ${store}`
+      ])
+    }
+    // Nothing was made.
+    expect(fs.existsSync(file)).toBe(false)
+  }
 })

@@ -4,9 +4,10 @@
 import { expect, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { compactor, newFile, options, PICK, rows } from "../tests/help.ts"
-import { type Caller, Functions } from "@everchat/core/functions"
+import { type Caller, Functions, hostedLayer } from "@everchat/core/functions"
 import { Limit } from "@everchat/core/limit"
 import { limitLayer } from "./limitfile.ts"
 import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
@@ -131,4 +132,27 @@ test("result gives a call's whole result, and writes its file again when the fil
     expect(yield* fails("result", open)).toBe("Call " + open + " still runs: it has no result yet.")
     expect(yield* fails("result", 99)).toBe("No call 99.")
   }))
+})
+
+test("a host's result, the core's, gives the output and makes no file in any directory", async () => {
+  const file = newFile()
+  const home = path.dirname(file)
+  const store = storeLayer(file, options())
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
+  const uuid = await Effect.runPromise(Effect.gen(function*() {
+    const store = yield* Store
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const done = yield* store.startCall({ turn: turn.id, vendorId: "call_1", fn: "run", input: "" })
+    const open = yield* store.startCall({ turn: turn.id, vendorId: "call_2", fn: "run", input: "" })
+    const whole = "a long result\n".repeat(5000)
+    yield* store.endCall(done, { status: "done", output: whole, shown: 1000 })
+    expect(yield* call("result", done)).toBe(whole)
+    expect(yield* fails("result", open)).toBe("Call " + open + " still runs: it has no result yet.")
+    expect(yield* fails("result", 99)).toBe("No call 99.")
+    return (yield* store.chat).uuid
+  }).pipe(Effect.provide(hostedLayer.pipe(Layer.provideMerge(memory)))))
+  // The home holds the database's files only, and the chat has no
+  // directory of results (limitfile.ts).
+  expect(fs.readdirSync(home).filter((name) => !name.startsWith(path.basename(file)))).toEqual([])
+  expect(fs.existsSync(path.join(os.tmpdir(), "everchat-" + process.getuid!(), uuid))).toBe(false)
 })
