@@ -111,10 +111,22 @@ Where the research recommends something else, this document holds:
   ran the same on Bun, Node and `workerd`; a `node:test` file runs on Bun and on Node.
   Evidence: `docs/research/packages.md`, "K3" and "K5"; `docs/research/portability.md`,
   "Facts".
-- **From `~/src/pi` we use `pi-codemode` and `pi-schema`. For MCP we use the official
-  SDK.** [Q45] Reason: `pi-schema` checks JSON Schema from outside, which `pi-codemode`
+- **From `~/src/pi` we use `pi-schema`, and EverChat adopts the code of `pi-codemode`
+  (below). For MCP we use the official SDK.** [Q45]
+  Reason: `pi-schema` checks JSON Schema from outside, which `pi-codemode`
   does not; `pi-mcp` speaks only an old version of the protocol. Evidence:
   `docs/research/function-sources.md`, "`pi` (the checkout `/home/rko/src/pi`)".
+- **The library's code becomes EverChat's. EverChat adopts the code of `pi-codemode` (MIT,
+  version 1.5.2) inside the package `codemode`, first with no change of behavior, and keeps
+  its notice of license; `pi-schema` stays a library. Then the thread engine counts polls,
+  as the inline engine and the remote engine do, so that the compute budget has one unit on
+  each runtime and bounds what a program computes. A contribution to upstream can come
+  when the code is proved.** [owner, 2026-11-16] Reason: EverChat already has its own code
+  around the library, and the library stopped the work three times (no count of polls for
+  the thread engine; no point after the boot of the worker; limits that it does not
+  check); it is about 3,050 lines with one dependency (`quickjs-wasi`, which stays pinned).
+  The costs: each change of the sandbox gets one review from each vendor, and corrections
+  of upstream are merged by hand. Evidence: the mails ec-wisp-m5t1u and ec-wisp-2ck75.
 
 ## The database
 
@@ -261,6 +273,17 @@ Where the research recommends something else, this document holds:
   function that a service runs. The numbers are measured before they are fixed. Evidence:
   `docs/research/functions.md`, "What fits, what does not";
   `docs/research/portability.md`, "Limits".
+- **The deadline of a program is a setting: 10 minutes in the hosted use, none in the local
+  use unless a person sets one. A program that reaches it is stopped, and its result tells
+  the model the limit, and how long functions were at work in that time: one text for all
+  uses, with no word about the use. The deadline is the bound on what a program computes
+  while a function is at work, until the thread engine counts polls (below).** [owner,
+  2026-11-16] Reason: the deadline counts all the time of a program, so a slow network can
+  cause the stop (one call to the provider fails after 30 s; many in sequence do not), and
+  the two numbers let the model tell that cause from its own compute; the compute budget as
+  built does not count compute while a function is at work (`GLOSSARY.md`, "compute
+  budget"; `packages/codemode/src/thread.ts:42-48`); a local build can be long. Evidence:
+  the mails ec-wisp-m5t1u and ec-wisp-2ck75; the comments of ec-sceh of 2026-11-15.
 - **The engine is QuickJS on all builds. On Cloudflare, programs run in a separate Worker.
   `effect` stays at 4.1.2.** [Q38] Reason: in the trial, a program that computes inside
   the chat's Durable Object stopped all objects for 7.8 s; one engine makes the model's
@@ -324,6 +347,11 @@ tested early. Evidence: `docs/research/packages.md`, "What fits, what does not".
    starts after 1 and 2. [Q56]
 
 The Cloudflare smoke test and the core's checks on Node come after 2. [Q56]
+
+The adoption of the code of `pi-codemode` into `codemode`, with no change of behavior, is
+work of step 1. [owner, 2026-11-16]
+
+The count of polls of the thread engine comes after the adoption. [owner, 2026-11-16]
 
 ## Later
 
