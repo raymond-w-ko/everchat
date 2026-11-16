@@ -231,6 +231,26 @@ instead.
 | table prefix | noun | The text `everchat_` at the start of each name that is unique in a schema: each table, the view, each index and each trigger. Foreign keys have no names. Fixed in all builds and written out in each statement. Not the prefix of a request. |
 | schema check | noun | At each start of the server build, the comparison of each of its tables in the database with its `.sql` files: the columns, the keys, the foreign keys. A table that is missing or different stops the start, with an error that names the difference. |
 
+## The host
+
+| Term | Part of speech | Meaning |
+| --- | --- | --- |
+| channel | noun | The host's place for one chat that it serves. It holds the chat's holders and its clients, each client with its `given`. It also holds the listener's `last`, the loaded chat if there is one, the lock of its loads and messages, and the give lock. A channel exists while it has a holder. So it stays after an unload while a client is connected or a message waits. |
+| registry | noun | The host's map from a chat to its channel. It has one lock of its own. Only two steps change it: a hold and a let go. A hold finds or makes the channel and adds a holder. A let go removes a holder, and takes the channel out when no holder is left. |
+| holder | noun | What keeps a channel in the registry: a connected client, a message that comes in, or the loaded chat. |
+| give | noun | One step of the host, under the channel's give lock, that an interruption cannot split. It puts one event or one piece into the buffers of the channel's clients that joined. A client gets an event only when its `given` is below the event's number, and its `given` then becomes that number. A client that has not joined gets only the gives of its own first read. |
+| give lock | noun | The lock of a channel, with one permit, under which each give and each join runs. One give or one join runs at a time. |
+| join | noun | The step at the end of a client's first read, under the give lock. From then on, the client gets the gives of the listener, and of the reads at a load, after a loss, and at an unload. A client joins only when the two parts of its check are true. First, its `given` is `last` or more, or the channel has no `last`. Second, its buffer has room for one entry of `entry` bytes. A channel has no `last` before the chat's first load. |
+| longest silence | noun | The longest time in which the host sends no byte to a client that waits, on any way. Bun's idle limit is at least twice it. |
+| fit | noun | The one function of the host that makes the JSON of an event or a piece, and measures it. It drops a piece that is longer than `entry` bytes. For a longer `call` or `end`, it gives only the start of its `program` or its `why`, and adds the field `"cut": true`. It never changes an `accepted` or a `message`. When one of them is longer than `entry` bytes, the host does not give it, and the read ends with `internal`. Every path that gives an event or a piece uses it. |
+| page of a read | noun | A part of a read from the store: at most 1,000 events, or at most `page` bytes. The host gives a read one page at a time. It is not a page of the log. |
+| loss | noun | Events and pieces that the hub of the turn loop dropped. The listener sees a loss as an event whose number is not `last` plus one. Then it reads the lost events from the store. A lost piece stays lost. |
+| stack | noun | Everything above a chat's store that a loaded chat needs: the diagnostics, the memory, the wire, the sandbox, the functions, and the turn loop. The host gets it as a function of the store. |
+| start value | noun | A random value, new at each start of a local server, at the start of the path of each of its routes for the person. The inspector has one, and so does the page of `everchat serve`. The inspector's code calls it its token. It is not an access token. |
+| hosted set | noun | The functions of a chat that needs no machine: `zoom`, `date`, and `result`. A chat of the host has these functions only: no `shell` and no file functions. |
+| sum for the common case | noun | A total of time that `docs/host.md` adds up from its limits: for a lock, a place, a stopped load, or a longest silence. It is a number of the design, not a promise. |
+| accepted risk | noun | A case that passes a sum or a rule of `docs/host.md`, which the lead keeps. Its text gives its conditions, why it is rare, how it fails safe or recovers, and what would fix it. |
+
 ## Functions from outside, and approval
 
 | Term | Part of speech | Meaning |
@@ -276,6 +296,7 @@ instead.
 | block (for a part of a text) | paragraph | A block is one piece of a view in a request. |
 | chunk, token (for a piece of what streams) | piece | A token is what a vendor counts. |
 | token (for what a connection shows) | access token | A token is what a vendor counts. |
+| token (for the start value of a local server) | start value | The inspector's code calls it its token. It is not an access token. |
 | agent, tenant chat (for the chat of a tenant) | hosted chat | An agent is a helper that EverChat starts. |
 | outside component, frontend (for the tenants' service) | backend | One name for one thing. A browser page is a client. |
 | prefix (for `everchat_`) | table prefix | The prefix is the first bytes of a request. |
