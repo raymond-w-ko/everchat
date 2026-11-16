@@ -172,7 +172,11 @@ test("the reader of the standard output goes away: the program ends at once with
   expect(new TextDecoder().decode((await reader.read()).value)).toBe("› one\n")
   await reader.cancel()
   gone.resolve()
+  // "At once", by the test's clock: from the reader's going to the exit.
+  // The start of the program comes before, so a slow start is not counted.
+  const went = performance.now()
   expect(await proc.exited).toBe(1)
+  expect(performance.now() - went).toBeLessThan(5000)
   expect(await new Response(proc.stderr).text()).toBe("everchat: the standard output cannot be written to: its reader went away\n")
   expect(launches(at.file).map((one) => [one.ended !== null, one.why])).toEqual([[true, "error"]])
   expect(messages(at.file).slice(0, 2).map((one) => one.text)).toEqual(["one", "An answer that nobody reads."])

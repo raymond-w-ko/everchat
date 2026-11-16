@@ -9,6 +9,10 @@ process.on("exit", () => {
 const controller = new AbortController();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let workerExited = false;
+// EverChat's change (not upstream's): when the script made its first tool call, so that the test bounds
+// the stop from there, not from the process's start (worker-lifetime.test.ts says why). Not a number
+// until `ready` runs.
+let readyMs = Number.NaN;
 const sandbox = new CodemodeSandbox({
 	memoryLimitBytes: 256 * 1024 * 1024,
 	onWorkerStarted: (exited) => {
@@ -20,6 +24,7 @@ const sandbox = new CodemodeSandbox({
 		{
 			name: "ready",
 			execute: () => {
+				readyMs = performance.now() - started; // EverChat's change: see `readyMs` above.
 				if (how !== "timeout") {
 					timer = setTimeout(() => {
 						if (how === "abort") controller.abort();
@@ -43,6 +48,7 @@ try {
 			kind: result.error.kind,
 			elapsedMs: performance.now() - started,
 			workerExited,
+			readyMs, // EverChat's change: see `readyMs` above.
 		}),
 	);
 } finally {

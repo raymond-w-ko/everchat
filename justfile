@@ -1,3 +1,12 @@
+# The default time limit of each test case and hook, in milliseconds, for
+# each recipe that runs `bun test`. It is there to end a case that hangs; it
+# is no bound of speed. Bun's own default, 5 s, was too short on a loaded
+# machine: cases that take 1 to 3 s on an idle one passed 5 s. A case that
+# proves a time keeps its own `expect` or its own limit (the third argument
+# of `test`), which wins over this one. A caller's own `--timeout`, given
+# after the recipe's name, comes after this one and wins too.
+test_timeout := "20000"
+
 # List the recipes.
 default:
     @just --list
@@ -5,7 +14,7 @@ default:
 # Run the tests of the new code, each file in its own process. The tests of
 # the old code are not part of this run (bunfig.toml): `cd ref && just test`.
 test *args:
-    bun test --isolate {{args}}
+    bun test --isolate --timeout {{test_timeout}} {{args}}
 
 # Check the types, one program for each package: the core alone, with no Bun
 # and no Node types (its guard); the core's tests, with the Bun types; the
@@ -50,7 +59,7 @@ build:
 
 # Build the executable, and run the tests of the whole program on it.
 test-build: build
-    EVERCHAT_BIN=./everchat bun test --isolate packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts
+    EVERCHAT_BIN=./everchat bun test --isolate --timeout {{test_timeout}} packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts
 
 # The full check: the types, the tests from source, and the tests of the
 # whole program on the executable.
@@ -59,4 +68,4 @@ full: check test test-build
 # The scoped check, for the files of one change: the types, and the test
 # files given.
 scoped +tests: check
-    bun test --isolate {{tests}}
+    bun test --isolate --timeout {{test_timeout}} {{tests}}

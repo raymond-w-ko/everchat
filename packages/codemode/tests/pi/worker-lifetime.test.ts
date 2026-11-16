@@ -214,20 +214,45 @@ const runtimes = [
 describe.each(runtimes)("$name process lifetime", ({ name, command, available }) => {
 	// #10748: verify both prompt cancellation and, on Node, prompt process exit with a real worker.
 	// Bun 1.4.0's pending terminate() keeps the process alive even after unref(), independently of codemode.
+	// EverChat's change (not upstream's): what each row proves, with bounds that hold on a loaded machine.
+	// (a) A stop settles `execute` within 1 s, with no wait for the worker's exit. Abort and close count
+	// from the script's first tool call (`readyMs`): the fixture starts their stop from `ready`, and the start
+	// of the process and the worker before that call is the machine's speed, so it is not in the bound; if
+	// `ready` is never called, `readyMs` is not a number, and the bound fails. The deadline counts from the
+	// start of `execute`, as upstream's bound does: it is armed there, before the worker boots, so its result
+	// comes about 300 ms after the start whatever the boot costs, and `ready` may come after it or never.
+	// (b) On Node, the worker does not hold the process after the stop: it exits within 1 s of the result.
+	// (c) On Bun, the process ends when the worker's built-in (`indexOf`, which no interrupt stops) returns,
+	// and nothing else holds it: the child must end within its time limit. That built-in took 13 s on an
+	// idle machine and up to 66 s at a load of 70, so the Bun rows have 120 s, not upstream's 20 s.
 	it.skipIf(!available).each(["abort", "timeout", "close"] as const)(
 		name === "Node" ? "exits promptly after %s with a real worker" : "settles %s promptly with a real worker",
 		async (how) => {
 			const fixture = fileURLToPath(new URL("./fixtures/worker-process-exit.ts", import.meta.url));
-			const { stdout } = await promisify(execFile)(command, [fixture, how], { timeout: 20000 });
+			// EverChat's change: Bun's child lives until the worker's non-interruptible indexOf returns: 13 s
+			// idle, 66 s under load. Upstream gives each runtime 20 s.
+			const { stdout } = await promisify(execFile)(command, [fixture, how], { timeout: name === "Bun" ? 120000 : 20000 });
 			const lines = stdout.trim().split(/\r?\n/);
 			expect(lines).toHaveLength(2);
-			const result = JSON.parse(lines[0]!) as { type: string; kind: string; elapsedMs: number };
+			const result = JSON.parse(lines[0]!) as { type: string; kind: string; elapsedMs: number; readyMs: number };
 			const exit = JSON.parse(lines[1]!) as { type: string; elapsedMs: number };
 			expect(result).toMatchObject({ type: "result", kind: how === "timeout" ? "timeout" : "aborted" });
 			expect(exit.type).toBe("exit");
-			expect(result.elapsedMs).toBeLessThan(1000);
+			if (how === "timeout") {
+				// Upstream's line again: the deadline is armed when `execute` starts, before the boot, so the bound
+				// holds under load (302 to 324 ms in 20 runs at a load of 33 to 48, `ready` not called in 11).
+				expect(result.elapsedMs).toBeLessThan(1000);
+			} else {
+				// EverChat's change: abort and close count from the script's first tool call (upstream: from the
+				// process's start). Under load the start of the process and the worker alone passed 1 s (16 of 120
+				// runs). JSON writes NaN as null, and `elapsedMs - null` is `elapsedMs`: so the case fails unless
+				// `ready` gave a number.
+				expect(typeof result.readyMs).toBe("number");
+				expect(result.elapsedMs - result.readyMs).toBeLessThan(1000);
+			}
 			if (name === "Node") expect(exit.elapsedMs - result.elapsedMs).toBeLessThan(1000);
 		},
-		25000,
+		// EverChat's change: the Bun rows' child has 120 s (above); upstream gives each row 25 s.
+		name === "Bun" ? 125000 : 25000,
 	);
 });
