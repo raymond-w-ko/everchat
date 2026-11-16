@@ -46,7 +46,7 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 ## Layout
 
 The new code is a Bun workspace (`"workspaces"` in the root `package.json`)
-with five packages, each in `packages/<name>/` with its own `package.json`.
+with six packages, each in `packages/<name>/` with its own `package.json`.
 A package's entries are the keys of its `exports` (see "Be modular").
 Each package's own matter, its entries too, is in its `AGENTS.md`:
 
@@ -55,6 +55,7 @@ Each package's own matter, its entries too, is in its `AGENTS.md`:
 - `packages/sqlite/AGENTS.md`: `@everchat/sqlite`, the store on SQLite.
 - `packages/codemode/AGENTS.md`: `@everchat/codemode`, the engines of the sandbox.
 - `packages/local/AGENTS.md`: `@everchat/local`, the rest, the local build.
+- `packages/server/AGENTS.md`: `@everchat/server`, the host of many chats over HTTP and WebSocket.
 - `packages/<name>/src/x.test.ts`: the tests of one module sit next to it
   (`x.ts`), in its package. A test goes with the code that it tests.
 

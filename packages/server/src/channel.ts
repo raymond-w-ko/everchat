@@ -1,0 +1,431 @@
+// The registry and the channel
+// ============================
+// The host's place for one chat, and the give (docs/host.md, section 2,
+// "The channel and the loaded chat" and "The give"; section 8, "A slow
+// client"; lead, ec-3xoc2). No load, no store and no route here: the first
+// read, the join's caller, the load and the unload build on it.
+//
+// The registry finds the channel of a chat by its tenant and its UUID, both
+// (a map of maps: two tenants never share a channel, also for the same UUID
+// text). It has one lock, and two steps change it, each one step under that
+// lock that an interruption cannot split, and neither reads a store: `hold`
+// finds the channel or makes it, and adds a holder; `letGo` removes a
+// holder, and takes the channel out when none is left. Callers use `held`,
+// which holds now and lets go when its scope closes, so no path can lose a
+// holder.
+//
+// A channel holds its tenant and UUID, the count of its holders, its
+// clients, `last` (`null` before the first load), a place for the loaded
+// chat (`loaded`, of a type that the caller picks), the lock and the give
+// lock (each a semaphore of one permit).
+//
+// A client has a buffer of fitted JSON texts with two bounds, `buffer`
+// entries and `bufferBytes` bytes; its `given`; and whether it joined. Its
+// reader takes entries one at a time (`take`), which frees their room, and
+// sees its end with the reason. `waitForPage` waits until the buffer has
+// room for a page (`page` entries and `pageBytes` bytes): a first read's
+// step 1.
+//
+// Each change of the clients and of their buffers runs under the give lock,
+// as one step that an interruption cannot split (`Effect.uninterruptible`),
+// and never waits on a client:
+//
+// - `addClient(given)` and `removeClient(client, reason)`. A chat has at
+//   most `chatClients` clients and the registry's channels together at most
+//   `hostClients`: one count, shared. Past either, `ClientRefused` (`busy`).
+//   A client's end gives its place back.
+// - `give(entry)`, a numbered event: into the buffer of each client that
+//   joined and whose `given` is below the event's number; it sets that
+//   client's `given`, and sets `last`.
+// - `givePiece(entry)`: into the buffer of each client that joined; it
+//   moves no number.
+// - `tell(client, text)`: one of the host's own frames, for one client,
+//   joined or not; it counts in both bounds and moves no number.
+// - `giveTo(client, entries)`: a page of a client's own first read, into
+//   that client's buffer. It checks the room here: a page that does not fit
+//   whole is not put, no part of it, and the client stays (`noRoom`).
+// - `join(client)`: the client joins when its `given` is `last` or more (or
+//   the channel has no `last`), and its buffer has room for one entry of
+//   `entry` bytes and for one entry in count. Else it does not join.
+//
+// A give, a piece and a frame never wait: a client with no room for its
+// entry ends as `slow` in the same step. Its buffer is freed, it leaves the
+// channel's clients, and its reader sees the end. A client that has not
+// joined gets no give and no piece.
+//
+// JavaScript runs one fiber at a time, but a step of Effect can yield to
+// another fiber between its parts; the give lock keeps two gives (and a
+// give and a page) from mixing, and `uninterruptible` keeps an interruption
+// from stopping a give between two clients.
+
+import { Deferred, Effect, Exit, Schema, type Scope, Semaphore } from "effect"
+import { type Entry, utf8 } from "./fit.ts"
+
+// The reasons of a client's end, which the routes map to their codes.
+export const REASONS = ["slow", "token", "busy", "stop", "internal"] as const
+export type Reason = (typeof REASONS)[number]
+
+// The limits that the registry uses, as the host's `Limits` names them.
+export interface ChannelLimits {
+  readonly buffer: number
+  readonly bufferBytes: number
+  readonly entry: number
+  readonly page: number
+  readonly pageBytes: number
+  readonly chatClients: number
+  readonly hostClients: number
+}
+
+// A client past the bound of its chat (`chat`) or of the host (`host`).
+export class ClientRefused extends Schema.TaggedError<ClientRefused>()("ClientRefused", {
+  reason: Schema.Literal("busy"),
+  bound: Schema.Literals(["chat", "host"])
+}) {}
+
+// What a client's reader takes: the next text of its buffer, or its end,
+// with the reason (`null`: removed with none, as when it went away).
+export type Taken =
+  | { readonly _tag: "Text"; readonly text: string; readonly bytes: number }
+  | { readonly _tag: "End"; readonly reason: Reason | null }
+
+// A change that the waiters of a client wait for.
+class Signal {
+  private waiters: Array<Deferred.Deferred<void>> = []
+  wake() {
+    const waiters = this.waiters
+    this.waiters = []
+    for (const waiter of waiters) Deferred.doneUnsafe(waiter, Exit.void)
+  }
+  // The value of `check`, once it gives one (not `undefined`). When it gives
+  // none, the waiter is made and put into the list in the same synchronous
+  // body as the check: Effect's fiber loop can yield between two steps, and
+  // a `wake` in that gap would find no waiter, and the reader would wait for
+  // good with a text, with room or after its end. The check and the
+  // registration are not interruptible; the wait is, and a waiter that
+  // leaves the wait (woken, or interrupted) is taken out of the list. After
+  // a wake, the check runs again.
+  until<A>(check: () => A | undefined): Effect.Effect<A> {
+    const step = Effect.uninterruptibleMask((restore) =>
+      Effect.suspend((): Effect.Effect<A | undefined> => {
+        const found = check()
+        if (found !== undefined) return Effect.succeed(found)
+        const waiter = Deferred.makeUnsafe<void>()
+        this.waiters.push(waiter)
+        return restore(Deferred.await(waiter)).pipe(
+          Effect.ensuring(Effect.sync(() => this.remove(waiter))),
+          Effect.as(undefined)
+        )
+      })
+    )
+    const loop: Effect.Effect<A> = Effect.flatMap(step, (found) => (found === undefined ? loop : Effect.succeed(found)))
+    return loop
+  }
+  // The waiters in the list now.
+  get size(): number {
+    return this.waiters.length
+  }
+  private remove(waiter: Deferred.Deferred<void>) {
+    const at = this.waiters.indexOf(waiter)
+    if (at >= 0) this.waiters.splice(at, 1)
+  }
+}
+
+export class Client {
+  private texts: Array<{ readonly text: string; readonly bytes: number }> = []
+  private head = 0
+  private used = 0
+  private finished: { readonly reason: Reason | null } | null = null
+  private isJoined = false
+  private number: number
+  private readonly changed = new Signal()
+
+  constructor(given: number, private readonly limits: ChannelLimits) {
+    this.number = given
+  }
+
+  // The highest event number put into the buffer: at the start, the
+  // client's `after` or its snapshot's `seq`.
+  get given(): number {
+    return this.number
+  }
+  get joined(): boolean {
+    return this.isJoined
+  }
+  // The end and its reason, or `null` while it is a client.
+  get ended(): { readonly reason: Reason | null } | null {
+    return this.finished
+  }
+  // The texts in the buffer, and their bytes.
+  get size(): { readonly entries: number; readonly bytes: number } {
+    return { entries: this.texts.length - this.head, bytes: this.used }
+  }
+
+  // Room for `entries` more texts of `bytes` bytes in all.
+  hasRoom(entries: number, bytes: number): boolean {
+    return this.texts.length - this.head + entries <= this.limits.buffer && this.used + bytes <= this.limits.bufferBytes
+  }
+
+  // The next text, when there is one, or the end; else it waits.
+  get take(): Effect.Effect<Taken> {
+    return this.changed.until((): Taken | undefined => {
+      if (this.head < this.texts.length) {
+        const taken = this.texts[this.head] as { readonly text: string; readonly bytes: number }
+        this.texts[this.head] = undefined as never
+        this.head += 1
+        if (this.head > 1024 && this.head * 2 > this.texts.length) {
+          this.texts = this.texts.slice(this.head)
+          this.head = 0
+        }
+        this.used -= taken.bytes
+        this.changed.wake()
+        return { _tag: "Text", ...taken }
+      }
+      if (this.finished !== null) return { _tag: "End", reason: this.finished.reason }
+      return undefined
+    })
+  }
+
+  // Waits until the buffer has room for a page (`page` entries and
+  // `pageBytes` bytes): `true`; or the client's end: `false`.
+  get waitForPage(): Effect.Effect<boolean> {
+    return this.changed.until((): boolean | undefined => {
+      if (this.finished !== null) return false
+      if (this.hasRoom(this.limits.page, this.limits.pageBytes)) return true
+      return undefined
+    })
+  }
+
+  // The parts below run only in a step of the channel, under its give lock.
+
+  /** @internal */
+  put(text: string, bytes: number) {
+    this.texts.push({ text, bytes })
+    this.used += bytes
+    this.changed.wake()
+  }
+  /** @internal */
+  setGiven(n: number) {
+    this.number = n
+  }
+  /** @internal */
+  setJoined() {
+    this.isJoined = true
+  }
+  /** @internal */
+  finish(reason: Reason | null) {
+    this.finished = { reason }
+    this.texts = []
+    this.head = 0
+    this.used = 0
+    this.changed.wake()
+  }
+}
+
+// The count of the clients of the host, which all channels of a registry
+// share.
+interface HostCount {
+  clients: number
+}
+
+export class Channel<L = unknown> {
+  private holding = 0
+  private readonly members = new Set<Client>()
+  private latest: number | null = null
+  // The loaded chat, or none.
+  loaded: L | undefined = undefined
+  // The lock for the load, the unload and each message in.
+  readonly lock: Semaphore.Semaphore = Semaphore.makeUnsafe(1)
+  // The give lock.
+  readonly giveLock: Semaphore.Semaphore = Semaphore.makeUnsafe(1)
+
+  constructor(
+    readonly tenant: string,
+    readonly uuid: string,
+    private readonly limits: ChannelLimits,
+    private readonly host: HostCount
+  ) {}
+
+  get holders(): number {
+    return this.holding
+  }
+  // The highest event number given to the clients that joined, or `null`
+  // before the first load.
+  get last(): number | null {
+    return this.latest
+  }
+  get clients(): ReadonlyArray<Client> {
+    return [...this.members]
+  }
+
+  /** @internal */
+  addHolder() {
+    this.holding += 1
+  }
+  /** @internal */
+  removeHolder(): number {
+    this.holding -= 1
+    return this.holding
+  }
+
+  // One step under the give lock that an interruption cannot split.
+  private step<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> {
+    return Semaphore.withPermit(this.giveLock, Effect.uninterruptible(effect))
+  }
+
+  // The end of `client`: it leaves the clients, its buffer is freed, and its
+  // place in both counts is given back. Under the give lock.
+  private end(client: Client, reason: Reason | null) {
+    if (!this.members.delete(client)) return
+    this.host.clients -= 1
+    client.finish(reason)
+  }
+
+  // Puts `text` into `client`'s buffer, or ends it as `slow`.
+  private putOrEnd(client: Client, text: string, bytes: number): boolean {
+    if (!client.hasRoom(1, bytes)) {
+      this.end(client, "slow")
+      return false
+    }
+    client.put(text, bytes)
+    return true
+  }
+
+  // A new client of the chat, whose `given` is `given`.
+  addClient(given: number): Effect.Effect<Client, ClientRefused> {
+    return this.step(Effect.suspend(() => {
+      if (this.members.size >= this.limits.chatClients) return Effect.fail(new ClientRefused({ reason: "busy", bound: "chat" }))
+      if (this.host.clients >= this.limits.hostClients) return Effect.fail(new ClientRefused({ reason: "busy", bound: "host" }))
+      const client = new Client(given, this.limits)
+      this.members.add(client)
+      this.host.clients += 1
+      return Effect.succeed(client)
+    }))
+  }
+
+  // Ends `client` with `reason` (`null`: it went away). Its reader sees the
+  // end; a client that ended already stays as it is.
+  removeClient(client: Client, reason: Reason | null = null): Effect.Effect<void> {
+    return this.step(Effect.sync(() => this.end(client, reason)))
+  }
+
+  // The give of a numbered event (above).
+  give(entry: Entry): Effect.Effect<void> {
+    const n = entry.n
+    if (n === null) return Effect.die(new Error("a give takes a numbered event; a piece is givePiece's"))
+    return this.step(Effect.suspend(() =>
+      Effect.andThen(
+        Effect.forEach(this.clients, (client) =>
+          Effect.sync(() => {
+            if (!client.joined || client.given >= n) return
+            if (this.putOrEnd(client, entry.json, entry.bytes)) client.setGiven(n)
+          }), { discard: true }),
+        Effect.sync(() => {
+          if (this.latest === null || n > this.latest) this.latest = n
+        })
+      )
+    ))
+  }
+
+  // The give of a piece (above).
+  givePiece(entry: Entry): Effect.Effect<void> {
+    return this.step(Effect.suspend(() =>
+      Effect.forEach(this.clients, (client) =>
+        Effect.sync(() => {
+          if (client.joined) this.putOrEnd(client, entry.json, entry.bytes)
+        }), { discard: true })
+    ))
+  }
+
+  // One of the host's own frames for `client`: `told`, or `ended` (it found
+  // no room and ended the client as `slow`, or the client had ended).
+  tell(client: Client, text: string): Effect.Effect<"told" | "ended"> {
+    return this.step(Effect.sync(() => {
+      if (client.ended !== null || !this.members.has(client)) return "ended"
+      return this.putOrEnd(client, text, utf8(text)) ? "told" : "ended"
+    }))
+  }
+
+  // A page of `client`'s own first read: `given`, `noRoom` (nothing put, the
+  // client stays), or `ended` (the client had ended).
+  giveTo(client: Client, entries: ReadonlyArray<Entry>): Effect.Effect<"given" | "noRoom" | "ended"> {
+    return this.step(Effect.sync(() => {
+      if (client.ended !== null || !this.members.has(client)) return "ended"
+      let bytes = 0
+      for (const entry of entries) bytes += entry.bytes
+      if (!client.hasRoom(entries.length, bytes)) return "noRoom"
+      for (const entry of entries) {
+        client.put(entry.json, entry.bytes)
+        if (entry.n !== null && entry.n > client.given) client.setGiven(entry.n)
+      }
+      return "given"
+    }))
+  }
+
+  // The join's check (above): `true` when the client joined.
+  join(client: Client): Effect.Effect<boolean> {
+    return this.step(Effect.sync(() => {
+      if (client.ended !== null || !this.members.has(client)) return false
+      if (client.joined) return true
+      const caught = this.latest === null || client.given >= this.latest
+      if (!caught || !client.hasRoom(1, this.limits.entry)) return false
+      client.setJoined()
+      return true
+    }))
+  }
+}
+
+export interface Registry<L = unknown> {
+  // Finds the channel of the chat, or makes it, and adds a holder.
+  readonly hold: (tenant: string, uuid: string) => Effect.Effect<Channel<L>>
+  // Removes a holder; with none left, takes the channel out.
+  readonly letGo: (channel: Channel<L>) => Effect.Effect<void>
+  // Holds the chat's channel until the scope closes.
+  readonly held: (tenant: string, uuid: string) => Effect.Effect<Channel<L>, never, Scope.Scope>
+  // The channel of the chat, if the registry has it; it adds no holder.
+  readonly find: (tenant: string, uuid: string) => Channel<L> | undefined
+  // The count of channels, and of the clients of the host.
+  readonly size: () => { readonly channels: number; readonly clients: number }
+}
+
+// A new registry with the limits `limits`.
+export const makeRegistry = <L = unknown>(limits: ChannelLimits): Registry<L> => {
+  const tenants = new Map<string, Map<string, Channel<L>>>()
+  const host: HostCount = { clients: 0 }
+  const lock = Semaphore.makeUnsafe(1)
+  const step = <A>(body: () => A) => Semaphore.withPermit(lock, Effect.uninterruptible(Effect.sync(body)))
+  const find = (tenant: string, uuid: string) => tenants.get(tenant)?.get(uuid)
+  const hold = (tenant: string, uuid: string) =>
+    step(() => {
+      let chats = tenants.get(tenant)
+      if (chats === undefined) {
+        chats = new Map()
+        tenants.set(tenant, chats)
+      }
+      let channel = chats.get(uuid)
+      if (channel === undefined) {
+        channel = new Channel<L>(tenant, uuid, limits, host)
+        chats.set(uuid, channel)
+      }
+      channel.addHolder()
+      return channel
+    })
+  const letGo = (channel: Channel<L>) =>
+    step(() => {
+      if (channel.removeHolder() > 0) return
+      const chats = tenants.get(channel.tenant)
+      if (chats?.get(channel.uuid) !== channel) return
+      chats.delete(channel.uuid)
+      if (chats.size === 0) tenants.delete(channel.tenant)
+    })
+  return {
+    hold,
+    letGo,
+    held: (tenant, uuid) => Effect.acquireRelease(hold(tenant, uuid), letGo),
+    find,
+    size: () => {
+      let channels = 0
+      for (const chats of tenants.values()) channels += chats.size
+      return { channels, clients: host.clients }
+    }
+  }
+}

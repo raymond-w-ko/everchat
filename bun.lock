@@ -9,6 +9,7 @@
         "@everchat/core": "workspace:*",
         "@everchat/local": "workspace:*",
         "@everchat/openai": "workspace:*",
+        "@everchat/server": "workspace:*",
         "@everchat/sqlite": "workspace:*",
         "@types/bun": "1.4.4",
         "effect": "4.1.2",
@@ -69,6 +70,20 @@
         "@types/bun": "1.4.4",
       },
     },
+    "packages/server": {
+      "name": "@everchat/server",
+      "version": "0.1.0",
+      "dependencies": {
+        "@everchat/core": "workspace:*",
+        "effect": "4.1.2",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "4.1.2",
+        "@everchat/local": "workspace:*",
+        "@everchat/sqlite": "workspace:*",
+        "@types/bun": "1.4.4",
+      },
+    },
     "packages/sqlite": {
       "name": "@everchat/sqlite",
       "version": "0.1.0",
@@ -98,6 +113,8 @@
     "@everchat/local": ["@everchat/local@workspace:packages/local"],
 
     "@everchat/openai": ["@everchat/openai@workspace:packages/openai"],
+
+    "@everchat/server": ["@everchat/server@workspace:packages/server"],
 
     "@everchat/sqlite": ["@everchat/sqlite@workspace:packages/sqlite"],
 

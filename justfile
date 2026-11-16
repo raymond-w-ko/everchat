@@ -19,11 +19,12 @@ test *args:
 # Check the types, one program for each package: the core alone, with no Bun
 # and no Node types (its guard); the core's tests, with the Bun types; the
 # packages openai, sqlite, codemode and local, their tests too, with the Bun
-# types; the tools, but tools/golden.ts, with the Bun types
-# (tools/tsconfig.json). Then the boundaries of the packages, which the types
-# do not see: their imports and their manifests (tools/graph.ts). Last, that
-# no file of the tree holds a word of the owner's list, which lives outside
-# the repository; with no list on this machine it checks nothing
+# types; the server alone, with no Bun and no Node types (its guard), and the
+# server's tests, with the Bun types; the tools, but tools/golden.ts, with the
+# Bun types (tools/tsconfig.json). Then the boundaries of the packages, which
+# the types do not see: their imports and their manifests (tools/graph.ts).
+# Last, that no file of the tree holds a word of the owner's list, which lives
+# outside the repository; with no list on this machine it checks nothing
 # (tools/words.ts).
 check:
     bunx tsc --noEmit -p packages/core
@@ -32,6 +33,8 @@ check:
     bunx tsc --noEmit -p packages/sqlite
     bunx tsc --noEmit -p packages/codemode
     bunx tsc --noEmit -p packages/local
+    bunx tsc --noEmit -p packages/server
+    bunx tsc --noEmit -p packages/server/tsconfig.test.json
     bunx tsc --noEmit -p tools
     bun tools/graph.ts
     bun tools/words.ts

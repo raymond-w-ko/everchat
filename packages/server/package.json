@@ -1,0 +1,21 @@
+{
+  "name": "@everchat/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/host.ts",
+    "./token": "./src/token.ts",
+    "./backend": "./src/backend.ts"
+  },
+  "dependencies": {
+    "@everchat/core": "workspace:*",
+    "effect": "4.1.2"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.1.2",
+    "@everchat/local": "workspace:*",
+    "@everchat/sqlite": "workspace:*",
+    "@types/bun": "1.4.4"
+  }
+}
