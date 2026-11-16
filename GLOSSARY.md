@@ -17,11 +17,11 @@ instead.
 
 | Term | Part of speech | Meaning |
 | --- | --- | --- |
-| chat | noun | The one exchange between a person and EverChat. It never ends. In the terminal build, one chat is one database in one home. A database can hold many chats, and a tenant has many chats. Inside, a chat has an integer id; outside, a UUID. |
+| chat | noun | The one exchange between a person and EverChat. It never ends. A database can hold many chats, and a tenant has many chats. The local file holds one tenant and one chat: the chat of its home. Inside, a chat has an integer id; outside, a UUID. |
 | person | noun | The human who uses EverChat. The factory calls its one person the operator. In the hosted use, EverChat knows no persons: the backend decides who talks to which chat, and one person can have many chats at one time. |
 | EverChat | noun | The program, and the agent that the person talks to. In the log, its messages have the kind `asst`. |
 | log | noun | All the messages of the chat, in the order they came, kept for ever. Table `msg`. A message in the log never changes and is never deleted. The table named `log` is not the log: it holds the diagnostics. |
-| message | noun | One entry of the log. It has an id (0, 1, 2, ...) that never changes and is never used again. |
+| message | noun | One entry of the log. It has an id in its chat (0, 1, 2, ...) that never changes and is never used again in that chat. Every chat has a message 0. |
 | page | noun | One message of a text that is too long for one message. The text is logged as pages in a row, of at most 30,000 characters each. Each page has its own id. |
 | kind | noun | The type of a message. It says who or what wrote it. The model reads each message as `<kind>: <text>`. See the table below. |
 | thought | noun | The model's reasoning text. It is shown to the person and never logged. The old code calls it `mind`. |
@@ -136,12 +136,13 @@ instead.
 | Term | Part of speech | Meaning |
 | --- | --- | --- |
 | home | noun | The directory of one chat in the local build. The variable `EVERCHAT_HOME` names it. It holds the database, the config file, the hooks file, the skills, and the transcripts. |
-| database | noun | Where the state of a chat lives. In the local build, one SQLite file. In the server build, EverChat's tables in the product's schema on MariaDB, with many tenants and chats. On Cloudflare, the SQLite of the chat's Durable Object. |
+| database | noun | Where the state of many chats and of their tenants lives. In the local build, one SQLite file, which holds one tenant and one chat. In the server build, EverChat's tables in the product's schema on MariaDB, with many tenants and chats. On Cloudflare, the SQLite of the chat's Durable Object. |
 | state | noun | Data that the program writes and needs again later. State lives in the database, and nowhere else. |
 | store | noun | The part of the program that reads and writes the database. No other part uses SQL. The launch that owns the database gets all of it (`Store`). A process that does not own the database gets only its reads (`Reads`), over a connection that cannot write. The store of a loaded chat is bound to that chat when it is made: no query takes a chat id from a caller. |
 | migration | noun | One change of the database's tables, with a number, run by the program. The design has none: on MariaDB an administrator applies the schema with `skeema`, and the program only checks it (schema check); in the local build, a change of the schema means a new SQLite file. |
+| mark | noun | The number of the schema that a local file holds, in its `pragma user_version`. An empty file gets the schema and the mark. A file of another mark, or with tables and no mark, is refused: the program never opens a file of another schema. A change of the schema means a new file and a new mark. |
 | config file | noun | The file of settings that a person writes by hand. The program only reads it. |
-| launch | noun | One start of the program, until it ends or crashes. Table `launch`. At most one launch of a chat is live. In the server build, one launch holds many chats, and the lease decides which launch may write. |
+| launch | noun | One load of a chat by a process, until it ends or the process crashes. Table `launch`: one row for each load. In the local build, a launch is one start of the program. In the server build, one process makes many launches, one for each chat that it loads, and the lease decides which process may write. At most one launch of a chat is live. |
 | run tag | noun | A marker that a launch puts in the environment of each shell it starts. The next launch uses it to find and stop shells that a crash left behind. |
 | crash | noun | The end of a launch without a clean exit. The next launch finds it and records it. |
 | restart | noun | A launch after another launch of the same chat. It reads the database and continues: cut turns continue, and cut calls are closed. |
@@ -206,15 +207,15 @@ instead.
 
 | Term | Part of speech | Meaning |
 | --- | --- | --- |
-| tenant | noun | A separate company that uses a hosted deployment, possibly a competitor of another tenant. It has many chats. Table `tenant`; its key is the tenant's UUIDv4 as `BINARY(16)`, from outside. Only code keeps tenants apart. |
+| tenant | noun | A separate company that uses a hosted deployment, possibly a competitor of another tenant. It has many chats. Table `tenant`; its key is the tenant's UUIDv4, 16 bytes from outside (`BINARY(16)` on MariaDB, a `blob` on SQLite). In a process, only code keeps tenants apart. In the database, a reference from a row of one chat to a row of another is refused, and so is a move of a row to another chat or of a chat to another tenant. |
 | hosted chat | noun | A chat of a tenant. It shares a process with the chats of other tenants. It has no `shell`, no file functions, and no hooks. |
 | deployment | noun | One run of EverChat for many tenants: its config, its database user, its schema, and one active process. A tenant that needs full isolation gets a deployment of its own. |
 | backend | noun | The service of a hosted deployment, outside EverChat, that knows the persons. It makes the chats, has the secret of the deployment, and makes access tokens for browsers. |
 | client | noun | A program that connects to EverChat to use chats: a browser page, or the backend. It gets a snapshot of a chat and then its events. |
 | reference client | noun | The small web page in the repository that uses only the public interface, for development only. It is not a product. |
 | access token | noun | What a connection shows to EverChat. The backend signs it with the secret of the deployment; it names one tenant, its chats, and an end time. Not a token that a vendor counts. |
-| event | noun | What a chat reports to its clients, with the next event number of the chat: a whole message, or the start or the end of a turn. Events have an exact order inside one chat and none between chats. A piece is not an event: it is best effort. |
-| event number | noun | The number of an event in its chat: 1, 2, 3, with no gaps, in the order of the events. A client continues after the last number that it has, on any way. |
+| event | noun | What a chat reports to its clients, with the next event number of the chat: `accepted` (a message of the person is in the log), `start` (a turn starts), `call` (a program starts), `message` (a whole message is in the log), or `end` (a turn ends). Each event has a row of the table `event`. Events have an exact order inside one chat and none between chats. A piece rides the same stream of the turn loop, and it is not an event: it has no number and no row, and it is best effort. |
+| event number | noun | The number of an event in its chat: 1, 2, 3, with no gaps, in the order of the events. The chat's counter (`seq`) holds the last one: an event gets the counter plus 1, and sets the counter to it, in the transaction of what it reports. A client continues after the last number that it has, on any way. |
 | event stream | noun | A `GET` of the events of a chat after a number, which stays open and gives each event when it occurs (Server-Sent Events). It is the HTTP fallback for a WebSocket. |
 | snapshot | noun | What a client gets of a chat when it connects: the chat as it is. Its events follow. |
 | load | verb | To make a chat ready to work in a process: from its database, its recipe and, for a hosted chat, its provider. |
@@ -226,7 +227,7 @@ instead.
 | product | noun | The other program whose schema on MariaDB holds EverChat's tables. |
 | stage | noun | One copy of a product, each with its own schema: `acme_dev`, `acme_qa`. A copy of EverChat's tables into a different stage is refused at the start until an administrator clears it. |
 | schema | noun | The definitions of EverChat's tables: one for all builds. On MariaDB, also the named set of tables of a product, which holds EverChat's tables. |
-| table prefix | noun | The text `everchat_` at the start of each name that is unique in a schema: tables, triggers, foreign keys. Fixed in all builds and written out in each statement. Not the prefix of a request. |
+| table prefix | noun | The text `everchat_` at the start of each name that is unique in a schema: each table, the view, each index and each trigger. Foreign keys have no names. Fixed in all builds and written out in each statement. Not the prefix of a request. |
 | schema check | noun | At each start of the server build, the comparison of each of its tables in the database with its `.sql` files: the columns, the keys, the foreign keys. A table that is missing or different stops the start, with an error that names the difference. |
 
 ## Functions from outside, and approval

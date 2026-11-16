@@ -370,8 +370,10 @@ model access, the one after "OpenAI first, then Anthropic".
 What holds for both:
 
 - The log is the truth of what an interface shows. The turn loop's events
-  say when a message entered the log, and carry what streams. An interface
-  subscribes first, then reads the log, and shows each message once, in
+  say when a message entered the log, and the same stream carries what
+  streams. Each event has a number in its chat; a piece is no event, and has
+  none. An interface still follows the log: it subscribes first, then reads
+  the log, and shows each message once, in
   the order of the ids (`packages/core/src/follow.ts`). Use that module in a new
   interface, and do not show a message from an event alone.
 - No control character of a text reaches the terminal or the standard output
@@ -422,7 +424,8 @@ How it is built, in four parts that each know only the one before:
   `packages/sqlite/src/sqlite.ts`): the store with no launch and no write, over
   a connection that cannot write. So the inspector is a process of its own. It
   runs next to a launch of the chat, or with none, and the chat's process has
-  no server in it. A new query for the inspector goes in
+  no server in it. It reads the file's one chat, and fails on a file with no
+  chat yet: a launch makes it. A new query for the inspector goes in
   `packages/sqlite/src/sqlite.ts`, because no other module uses SQL.
 - The read module (`packages/local/src/inspect.ts`): it turns the reads into
   what the page shows, as plain data. It knows no HTTP. Test it directly.
@@ -803,7 +806,8 @@ All state of a chat lives in its database. One schema serves all builds
 [Q15, Q24]: in the local build, one SQLite file in one home directory that
 the variable `EVERCHAT_HOME` names; in the server build, EverChat's tables in
 the product's schema on MariaDB; on Cloudflare, the SQLite of the chat's
-Durable Object. A database can hold many chats.
+Durable Object. A database can hold many chats; the local file holds one
+tenant and one chat, the chat of its home.
 
 This gives two things:
 
@@ -826,6 +830,13 @@ The schema:
 - Each table has the fixed table prefix `everchat_`, in all builds, written
   out in each statement (`everchat_msg`) [Q46]. No statement builds a name.
   Every name that is unique in a schema gets the prefix.
+- The rows of different chats stay apart [Q5, Q8, Q13]. The store is bound to
+  one chat when it is made, and no member of it takes a chat. Each statement
+  on a table of a chat names its chat, and each statement on `everchat_chat`
+  names the tenant. A reference to a row of a chat carries the chat, so the
+  database refuses a reference to another chat's row, and it refuses a move
+  of a row to another chat. The rule is in `docs/schema.html` (section 1)
+  and at the top of `packages/sqlite/src/sqlite.ts`.
 - Design the schema before the code that uses it. Each table has a written
   purpose, and each schema change is designed and tested.
 - No migration. In the local build, EverChat makes its own schema, and for
