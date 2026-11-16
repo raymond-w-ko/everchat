@@ -13,7 +13,7 @@ import { Effect } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { type Report, listPath, mask, NO_LIST, run } from "./words.ts"
+import { type Report, listPath, mask, NO_LIST, run, type Walk } from "./words.ts"
 
 const made: Array<string> = []
 afterAll(() => {
@@ -73,18 +73,32 @@ const checkout = (tracked: Files, untracked: Files = {}, gone: Array<string> = [
 
 const text = (report: Report) => [...report.out, ...report.err].join("\n")
 
-// The compare's form, written out here: a change of the script's compare
-// does not change what this checks.
-const letters = (one: string) => one.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "")
+// The compare's forms, written out here: a change of the script's compare
+// does not change what this checks. The first: NFKD, lower case, each final
+// sigma as a sigma, then the letters and digits only. The second: the same,
+// with each escape of the set taken out before the letters and digits.
+const lowered = (one: string) => one.normalize("NFKD").toLowerCase().replaceAll("ς", "σ")
+const letters = (one: string) => lowered(one).replace(/[^\p{L}\p{N}]+/gu, "")
+const unescaped = (one: string) =>
+  lowered(one).replace(/\\[nrt]|%(?:20|09|0a|0d)|&nbsp;/g, "").replace(/[^\p{L}\p{N}]+/gu, "")
+
+// The made-up words of the rows of U and Y: a word with an accent, a word
+// with a sigma at its end, a word with `n` at its start, and a word that the
+// end of a path and the line's own text make together.
+const ACCENT = "frümpelin"
+const SIGMA = "θριμοσ"
+const ENDS_N = "nebwick"
+const JOINED = "snerk1aword"
+const ALL_WORDS = [...WORDS, "zub", ACCENT, SIGMA, ENDS_N, JOINED]
 
 // No word of `words` in the output, in any letter case, and with no mark
-// inside it.
-const clean = (report: Report, words: ReadonlyArray<string> = WORDS) => {
+// inside it, in either form of the compare.
+const clean = (report: Report, words: ReadonlyArray<string> = ALL_WORDS) => {
   const lower = text(report).toLowerCase()
-  const flat = letters(text(report))
   for (const word of words) {
     expect(lower).not.toContain(word.toLowerCase())
-    expect(flat).not.toContain(letters(word))
+    expect(letters(text(report))).not.toContain(letters(word))
+    expect(unescaped(text(report))).not.toContain(letters(word))
   }
 }
 
@@ -236,6 +250,71 @@ const LISTS: Array<ListState> = [
     name: "a list's line of marks only",
     make: (dir) => realList(dir, "zorblat\n--- *** ---\n"),
     lines: ["words: line 2 of the list has fewer than 4 letters and digits"]
+  },
+  {
+    // U3 on NFKD: four letters, two of which NFKC would make one (Hangul's
+    // jamo). NFKD keeps the four, so the line is a word, and the list's
+    // other word is found.
+    name: "a list's line of 4 letters that NFKC would make 3: a word",
+    make: (dir) => realList(dir, "zorblat\n\u1100\u1161ab\n")
+  },
+  {
+    // U3: four characters, one of them a mark, which NFKD parts from its
+    // letter and the compare takes out.
+    name: "a list's line of 4 characters with 3 letters and a mark",
+    make: (dir) => realList(dir, "zorblat\nabc\u0301\n"),
+    lines: ["words: line 2 of the list has fewer than 4 letters and digits"]
+  },
+  {
+    name: "a list's path with a link to nothing before .., as an absolute path",
+    make: (dir) => {
+      fs.symlinkSync("not-mounted", path.join(dir, "dead"))
+      return `${dir}/dead/../never.txt`
+    },
+    lines: ["words: the list is behind a link that leads to nothing"]
+  },
+  {
+    name: "a list's path with a link to nothing before .., as a relative path",
+    make: (dir) => {
+      fs.symlinkSync("not-mounted", path.join(dir, "dead"))
+      return `${path.relative(process.cwd(), dir)}/dead/../never.txt`
+    },
+    lines: ["words: the list is behind a link that leads to nothing"]
+  },
+  {
+    // The file system reads `lnk/..` as the parent of the link's target:
+    // the list is there, and is read.
+    name: "a list's path with a link to a directory before ..: the list where the file system finds it",
+    make: (dir) => {
+      fs.mkdirSync(path.join(dir, "real", "sub"), { recursive: true })
+      fs.writeFileSync(path.join(dir, "real", "never.txt"), LIST)
+      fs.symlinkSync(path.join("real", "sub"), path.join(dir, "lnk"))
+      return `${dir}/lnk/../never.txt`
+    }
+  },
+  {
+    name: "a list whose path is under a directory that is a link to nothing",
+    make: (dir) => {
+      fs.symlinkSync("disk-not-mounted", path.join(dir, "ai"))
+      return path.join(dir, "ai", "never.txt")
+    },
+    lines: ["words: the list is behind a link that leads to nothing"]
+  },
+  {
+    name: "a list whose path is under a directory that is a link to nothing, two parts up",
+    make: (dir) => {
+      fs.symlinkSync(path.join(dir, "disk-not-mounted"), path.join(dir, "config"))
+      return path.join(dir, "config", "ai", "never.txt")
+    },
+    lines: ["words: the list is behind a link that leads to nothing"]
+  },
+  {
+    name: "a list whose path is under a directory that is a link to itself",
+    make: (dir) => {
+      fs.symlinkSync("ai", path.join(dir, "ai"))
+      return path.join(dir, "ai", "never.txt")
+    },
+    lines: ["words: the list is behind a link that leads to itself"]
   }
 ]
 
@@ -287,6 +366,281 @@ const formRows = FORMS.map((one): Case => ({
   lines: [`a.md:${one.line}: a word of the list (line ${one.entry})`],
   last: /^words: 1 match of the list in 1 files$/
 }))
+
+// The rows of U, in both modes: a word in the list in one form, and in the
+// text in another. `entry` is the list's line of the word.
+const UNICODE: Array<{ readonly name: string; readonly list: string; readonly text: string; readonly entry: number }> = [
+  { name: "the list composed and the text decomposed", list: `${ACCENT}\n`, text: "fru\u0308mpelin", entry: 1 },
+  { name: "the list decomposed and the text composed", list: "fru\u0308mpelin\n", text: ACCENT, entry: 1 },
+  { name: "the text in full-width letters", list: LIST, text: "\uff5a\uff4f\uff52\uff42\uff4c\uff41\uff54", entry: 1 },
+  { name: "the list with a capital sigma at its end, the text with a small sigma", list: "zorblat\nΘΡΙΜΟΣ\n", text: SIGMA, entry: 2 },
+  { name: "the list with a small sigma at its end, the text with a capital one", list: `${SIGMA}\n`, text: "ΘΡΙΜΟΣ", entry: 1 },
+  { name: "the list with a small sigma at its end, the text with a final one", list: `${SIGMA}\n`, text: "θριμος", entry: 1 },
+  { name: "the list plain, the text with a decomposed accent that has a composed letter", list: LIST, text: "zor\u0301blat", entry: 1 },
+  { name: "the list plain, the text with a decomposed accent that has no composed letter", list: LIST, text: "zorb\u0301lat", entry: 1 },
+  { name: "the list plain, the text with the composed accent", list: LIST, text: "zoŕblat", entry: 1 },
+  { name: "the list with an accent, the text plain", list: `${ACCENT}\n`, text: "frumpelin", entry: 1 }
+]
+
+const unicodeRows = UNICODE.flatMap((one): Array<Case> => [
+  {
+    name: `U: ${one.name}, in the tree check`,
+    tracked: { "a.md": `x\nthe ${one.text} here\n` },
+    list: one.list,
+    code: 1,
+    lines: [`a.md:2: a word of the list (line ${one.entry})`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: `U: ${one.name}, in --message`,
+    untracked: { "msg.txt": `Subject\n\nthe ${one.text}\n` },
+    list: one.list,
+    args: inMessage,
+    code: 1,
+    lines: [`msg.txt:3: a word of the list (line ${one.entry})`],
+    last: /^words: 1 match of the list in the message$/
+  }
+])
+
+// The escapes of V2 between the two words of the phrase (LIST's line 2),
+// each in its own row, in the letter cases that a text writes them in.
+const ESCAPES = ["\\n", "\\r", "\\t", "\\N", "%20", "%09", "%0a", "%0d", "%0A", "%0D", "&nbsp;", "&NBSP;"]
+
+const escapeRows = ESCAPES.map((one): Case => ({
+  name: `V: the phrase with the escape ${JSON.stringify(one)} between its words, at the line where it starts`,
+  tracked: { "a.json": `{\n  "a": 1,\n  "b": "the glim${one}vortan here"\n}\n` },
+  code: 1,
+  lines: ["a.json:3: a word of the list (line 2)"],
+  last: /^words: 1 match of the list in 1 files$/
+}))
+
+// A state of the list in both modes, the tree check and `--message`, with
+// a word in each: the list's fault (`line`), or no list.
+const bothModes = (name: string, make: (dir: string) => string, line?: string): Array<Case> => {
+  const last = line === undefined ? /^words: no list on this machine; nothing checked$/ : FAULT
+  const shared = { list: make, code: line === undefined ? 0 : 1, lines: line === undefined ? [] : [line], last }
+  return [
+    { ...shared, name: `${name}, in the tree check`, tracked: { "a.md": "x zorblat\n" } },
+    { ...shared, name: `${name}, in --message`, untracked: { "msg.txt": "Subject\n\nthe zorblat\n" }, args: inMessage }
+  ]
+}
+
+// W under the POSIX flavor: a `\\` is a letter of a name, so a name that
+// holds one is one part of the path.
+const backslashRows: Array<Case> = [
+  ...bothModes("W: under POSIX, a directory whose name holds a \\, with nothing under it: no list", (dir) => {
+    fs.mkdirSync(path.join(dir, "a\\b"))
+    return `${dir}/a\\b/never.txt`
+  }),
+  ...bothModes("W: under POSIX, a link whose name holds a \\ and that leads to nothing, above the list", (dir) => {
+    fs.symlinkSync("not-mounted", path.join(dir, "a\\b"))
+    return `${dir}/a\\b/never.txt`
+  }, "words: the list is behind a link that leads to nothing")
+]
+
+const followOnRows: Array<Case> = [
+  ...unicodeRows,
+  ...backslashRows,
+  {
+    name: "U: a path with a composed accent that holds a word: reported as path, and written over whole",
+    tracked: { "docs/frümpelin.md": "clean\n" },
+    code: 1,
+    list: `${ACCENT}\n`,
+    lines: [`${"*".repeat([..."docs/frümpelin.md"].length)}:path: a word of the list (line 1)`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    // The file system reads `lnk/..` as the parent of the link's target,
+    // where there is no list; the list that the path's text names is not
+    // read.
+    name: "W: a list's path with a link to a directory before .., with nothing where the file system looks: no list",
+    tracked: { "a.md": "zorblat\n" },
+    list: (dir) => {
+      fs.mkdirSync(path.join(dir, "real", "sub"), { recursive: true })
+      fs.writeFileSync(path.join(dir, "never.txt"), LIST)
+      fs.symlinkSync(path.join("real", "sub"), path.join(dir, "lnk"))
+      return `${dir}/lnk/../never.txt`
+    },
+    code: 0,
+    lines: [],
+    last: /^words: no list on this machine; nothing checked$/
+  },
+  {
+    name: "W: a list's path with .. and no link, with nothing at its end: no list",
+    untracked: { "msg.txt": "zorblat\n" },
+    list: (dir) => {
+      fs.mkdirSync(path.join(dir, "a"))
+      return `${dir}/a/../never.txt`
+    },
+    args: inMessage,
+    code: 0,
+    lines: [],
+    last: /^words: no list on this machine; nothing checked$/
+  },
+  {
+    // Point 2 changed this row: a decomposed path is its own NFKD form, so
+    // its places map back, and the match is written over with its mark.
+    name: "U: a path in a decomposed form that holds a word: reported as path, the word written over",
+    tracked: { "docs/fru\u0308mpelin.md": "clean\n" },
+    list: `${ACCENT}\n`,
+    code: 1,
+    lines: [`docs/${"*".repeat(10)}.md:path: a word of the list (line 1)`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    // NFKC gives this path the same length, so only U5's test of the form
+    // says that its places cannot be mapped back.
+    name: "U: a path in full-width letters that holds a word: reported as path, and written over whole",
+    tracked: { "docs/\uff5a\uff4f\uff52\uff42\uff4c\uff41\uff54.md": "clean\n" },
+    code: 1,
+    lines: [`${"*".repeat("docs/zorblat.md".length)}:path: a word of the list (line 1)`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  ...escapeRows,
+  {
+    name: "V: the phrase with an escape between its words, in --message",
+    untracked: { "msg.txt": "Subject\n\nsee glim%20Vortan\n" },
+    args: inMessage,
+    code: 1,
+    lines: ["msg.txt:3: a word of the list (line 2)"],
+    last: /^words: 1 match of the list in the message$/
+  },
+  {
+    name: "V: a real line break next to an escape: the line is where the match starts",
+    tracked: { "a.json": "x\ny \\n\nthe glim\\n\nvortan\\n\n" },
+    code: 1,
+    lines: ["a.json:3: a word of the list (line 2)"],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "V: a word that only the first form finds, after a backslash as in a path of Windows",
+    tracked: { "a.txt": "x\nC:\\nebwick\\tools\n" },
+    list: `${ENDS_N}\n`,
+    code: 1,
+    lines: ["a.txt:2: a word of the list (line 1)"],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "V: a match that both forms find is one line",
+    tracked: { "a.txt": "x\nglim vortan \\n here\n" },
+    code: 1,
+    lines: ["a.txt:2: a word of the list (line 2)"],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "V: a path that holds the phrase with %20: reported as path, and written over whole",
+    tracked: { "docs/glim%20vortan.md": "clean\n" },
+    code: 1,
+    lines: [`${"*".repeat("docs/glim%20vortan.md".length)}:path: a word of the list (line 2)`],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "V: an escape that is not in the set is not taken out",
+    tracked: { "a.html": "<p>glim&#32;vortan and glim&#160;vortan and glim\\u0020vortan</p>\n" },
+    code: 0,
+    lines: [],
+    last: /^words: 1 files, no word of the list$/
+  },
+  {
+    name: "W: a list under a link to a directory that exists and is empty: no list, and 0",
+    tracked: { "a.md": "zorblat\n" },
+    list: (dir) => {
+      fs.mkdirSync(path.join(dir, "empty"))
+      fs.symlinkSync("empty", path.join(dir, "ai"))
+      return path.join(dir, "ai", "never.txt")
+    },
+    code: 0,
+    lines: [],
+    last: /^words: no list on this machine; nothing checked$/
+  },
+  {
+    name: "W: a list under a directory that exists, with a part between that does not: no list, and 0",
+    untracked: { "msg.txt": "zorblat\n" },
+    list: (dir) => path.join(dir, "config", "ai", "never.txt"),
+    args: inMessage,
+    code: 0,
+    lines: [],
+    last: /^words: no list on this machine; nothing checked$/
+  },
+  {
+    name: "W: a message under a directory that is a link to nothing",
+    setup: (root) => fs.symlinkSync("disk-not-mounted", path.join(root, "drafts")),
+    args: (root) => ["--message", path.join(root, "drafts", "msg.txt")],
+    code: 1,
+    lines: [],
+    last: /^words: the message is behind a link that leads to nothing$/
+  },
+  {
+    name: "X: a file of the tree that cannot be read (mode 000): its line names it",
+    tracked: { "a.md": "clean\n", "docs/locked.md": "zorblat\n" },
+    setup: (root) => fs.chmodSync(path.join(root, "docs", "locked.md"), 0),
+    skip: ROOT_USER,
+    code: 1,
+    lines: [],
+    last: /^words: a file of the tree cannot be read \(EACCES\): docs\/locked\.md$/
+  },
+  {
+    name: "X: a file of the tree that cannot be read, whose path holds a word: no word in the line",
+    tracked: { "docs/the-zorblat.md": "clean\n" },
+    setup: (root) => fs.chmodSync(path.join(root, "docs", "the-zorblat.md"), 0),
+    skip: ROOT_USER,
+    code: 1,
+    lines: [],
+    last: /^words: a file of the tree cannot be read \(EACCES\): docs\/the-\*{7}\.md$/
+  },
+  {
+    name: "X: a file whose name holds a line break: one line for each match",
+    setup: (root) => {
+      fs.writeFileSync(path.join(root, "a\nb.md"), "zorblat\nx\nquexxu\n")
+      fs.writeFileSync(path.join(root, "c\u2028d.md"), "zorblat\n")
+      git(root, "add", "-A")
+    },
+    code: 1,
+    lines: [
+      "a?b.md:1: a word of the list (line 1)",
+      "a?b.md:3: a word of the list (line 3)",
+      "c?d.md:1: a word of the list (line 1)"
+    ],
+    last: /^words: 3 matches of the list in 2 files$/
+  },
+  {
+    name: "X: the path of --message with a line break: one line for each match",
+    untracked: { "m\nx.txt": "Subject\n\nthe zorblat\n" },
+    args: (root) => ["--message", path.join(root, "m\nx.txt")],
+    code: 1,
+    lines: ["m?x.txt:3: a word of the list (line 1)"],
+    last: /^words: 1 match of the list in the message$/
+  },
+  {
+    name: "Y: the end of a path and the line's own text make a word: the path is written over whole",
+    tracked: { "docs/snerk": "x zorblat\n" },
+    list: `zorblat\n${JOINED}\n`,
+    code: 1,
+    lines: ["**********:1: a word of the list (line 1)"],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "Y: one word twice on one line: one line",
+    tracked: { "a.md": "x\nzorblat and Zorblat\n" },
+    code: 1,
+    lines: ["a.md:2: a word of the list (line 1)"],
+    last: /^words: 1 match of the list in 1 files$/
+  },
+  {
+    name: "Y: two lines of the list that match on one line of a file: two lines",
+    tracked: { "a.md": "x\nzorblat and quexxu\n" },
+    code: 1,
+    lines: ["a.md:2: a word of the list (line 1)", "a.md:2: a word of the list (line 3)"],
+    last: /^words: 2 matches of the list in 1 files$/
+  },
+  {
+    name: "Y: one word on two lines: two lines",
+    tracked: { "a.md": "zorblat\nx\nzorblat\n" },
+    code: 1,
+    lines: ["a.md:1: a word of the list (line 1)", "a.md:3: a word of the list (line 1)"],
+    last: /^words: 2 matches of the list in 1 files$/
+  }
+]
 
 const CASES: Array<Case> = [
   {
@@ -557,7 +911,8 @@ const CASES: Array<Case> = [
     code: 1,
     lines: [],
     last: /^words: the message is not a regular file$/
-  }
+  },
+  ...followOnRows
 ]
 
 for (const one of CASES) {
@@ -580,7 +935,203 @@ for (const one of CASES) {
     }
     expect(all.length, all.join("\n")).toBe(one.lines.length + 1)
     expect(all.at(-1)!).toMatch(one.last)
-    clean(report, [...WORDS, "zub"])
+    clean(report)
+  })
+}
+
+// W under the Windows flavor of `node:path`, on any machine: the walk of a
+// list's path that is not there reads with `path.win32` and a file system of
+// the test's own. A drive and a share, each with a directory `work` and in
+// it a link `dead` that leads to nothing; the work directory is `C:\\work`.
+// Each other path is not there. The rows run through `run`, in both modes,
+// with the report as the command gives it.
+const windows = (dirs: ReadonlyArray<string>, dead: ReadonlyArray<string>): Walk => {
+  const missing = () => Object.assign(new Error("not there"), { code: "ENOENT" })
+  const directory = new Set(dirs)
+  const nowhere = new Set(dead)
+  return {
+    path: path.win32,
+    lstatSync: (file) => {
+      if (directory.has(file) || nowhere.has(file)) return {}
+      throw missing()
+    },
+    statSync: (file) => {
+      if (directory.has(file)) return { isDirectory: () => true }
+      throw missing()
+    },
+    realpathSync: (file) => {
+      if (file === ".") return "C:\\work"
+      if (directory.has(file)) return file
+      throw missing()
+    }
+  }
+}
+const DRIVE_AND_SHARE = windows(
+  ["C:\\", "C:\\work", "\\\\server\\share\\", "\\\\server\\share\\work"],
+  ["C:\\work\\dead", "\\\\server\\share\\work\\dead"]
+)
+const BEHIND: Report = {
+  out: [],
+  err: ["words: the list is behind a link that leads to nothing", "words: the list has a fault; nothing checked"],
+  code: 1
+}
+const NONE: Report = { out: [NO_LIST], err: [], code: 0 }
+
+const WINDOWS: ReadonlyArray<{ readonly name: string; readonly list: string; readonly walk: Walk; readonly report: Report }> = [
+  { name: "a drive path", list: "C:\\work\\dead\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a UNC path", list: "\\\\server\\share\\work\\dead\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a drive path with / for each separator", list: "C:/work/dead/never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a UNC path with / for each separator", list: "//server/share/work/dead/never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a drive path with both separators", list: "C:\\work/dead\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a UNC path with both separators", list: "\\\\server/share\\work/dead/never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a relative path", list: "dead\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "a relative path with a drive (C:dead)", list: "C:dead\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: ".. after the link, with \\", list: "C:\\work\\dead\\..\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: ".. after the link, with /", list: "C:/work/dead/../never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: ".. after the link, with both separators", list: "C:\\work/dead\\../never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: ".. after the link, in a UNC path", list: "\\\\server\\share\\work\\dead\\..\\never.txt", walk: DRIVE_AND_SHARE, report: BEHIND },
+  { name: "nothing at the list's path, under a directory that is there", list: "C:\\work\\never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  { name: "nothing at the list's path, under a share's directory that is there", list: "\\\\server\\share\\work\\never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  { name: "a drive root alone, with nothing under it", list: "C:\\never.txt", walk: windows(["C:\\"], []), report: NONE }
+]
+
+for (const one of WINDOWS) {
+  for (const mode of ["the tree check", "--message"] as const) {
+    test(`W: under the Windows flavor, ${one.name}, in ${mode}: ${one.report.code === 0 ? "no list" : "the fault"}`, async () => {
+      const args = mode === "--message" ? ["--message", "C:\\work\\msg.txt"] : []
+      const report = await Effect.runPromise(run(args, temp(), one.list, process.env, one.walk))
+      expect(report).toEqual(one.report)
+    })
+  }
+}
+
+// The walk's roots under the Windows flavor: it reads a drive and a plain
+// share, and refuses each other root, decided on the path's text. A refused
+// root gives its fault with no call of the file system after the first look
+// at the list's path, both with a link to nothing above the list (where the
+// walk, had it run, would have read the link) and with nothing at all. The
+// file system records each call.
+const recorded = (walk: Walk) => {
+  const calls: Array<string> = []
+  const traced: Walk = {
+    path: walk.path,
+    lstatSync: (file) => {
+      calls.push(`lstat ${file}`)
+      return walk.lstatSync(file)
+    },
+    statSync: (file) => {
+      calls.push(`stat ${file}`)
+      return walk.statSync(file)
+    },
+    realpathSync: (file) => {
+      calls.push(`realpath ${file}`)
+      return walk.realpathSync(file)
+    }
+  }
+  return { calls, walk: traced }
+}
+const REFUSED: Report = {
+  out: [],
+  err: ["words: the list is at a path whose root this check does not read", "words: the list has a fault; nothing checked"],
+  code: 1
+}
+// Each refused root, with the root's own directory, a directory `work` in
+// it and a link `dead` there that leads to nothing.
+const SHARE = "\\\\server\\share\\work\\dead\\never.txt"
+const REFUSED_ROOTS: ReadonlyArray<{ readonly name: string; readonly root: string; readonly list: string }> = [
+  {
+    name: "an extended share (made from the plain one)",
+    root: "\\\\?\\UNC\\server\\share\\",
+    list: path.win32.toNamespacedPath(SHARE)
+  },
+  { name: "an extended drive (\\\\?\\C:\\)", root: "\\\\?\\C:\\", list: "\\\\?\\C:\\work\\dead\\never.txt" },
+  { name: "a device drive (\\\\.\\C:\\)", root: "\\\\.\\C:\\", list: "\\\\.\\C:\\work\\dead\\never.txt" },
+  {
+    name: "a volume",
+    root: "\\\\?\\Volume{1b3b1146-4076-11e1-84aa-806e6f6e6963}\\",
+    list: "\\\\?\\Volume{1b3b1146-4076-11e1-84aa-806e6f6e6963}\\work\\dead\\never.txt"
+  },
+  { name: "an extended drive with / (//?/C:/)", root: "//?/C:/", list: "//?/C:/work/dead/never.txt" },
+  { name: "a path from the root of the drive in use (\\work)", root: "\\", list: "\\work\\dead\\never.txt" }
+]
+
+test("the extended share of the rows is the plain share in the namespace form", () => {
+  expect(path.win32.toNamespacedPath(SHARE)).toBe("\\\\?\\UNC\\server\\share\\work\\dead\\never.txt")
+})
+
+for (const one of REFUSED_ROOTS) {
+  const link = windows([one.root, path.win32.join(one.root, "work")], [path.win32.join(one.root, "work", "dead")])
+  for (const [above, walk] of [["a link to nothing above the list", link], ["nothing at all at the path", windows([], [])]] as const) {
+    for (const mode of ["the tree check", "--message"] as const) {
+      test(`W: under the Windows flavor, ${one.name}, ${above}, in ${mode}: refused, with nothing read`, async () => {
+        const args = mode === "--message" ? ["--message", "C:\\work\\msg.txt"] : []
+        const traced = recorded(walk)
+        const report = await Effect.runPromise(run(args, temp(), one.list, process.env, traced.walk))
+        expect(report).toEqual(REFUSED)
+        expect(traced.calls).toEqual([`lstat ${one.list}`])
+      })
+    }
+  }
+}
+
+// The two plain roots, read as before: with `\`, with `/` and both; and a
+// relative path with a drive, which starts at the work directory.
+const PLAIN: ReadonlyArray<{ readonly name: string; readonly list: string; readonly walk: Walk; readonly report: Report }> = [
+  { name: "a drive in small letters (c:/)", list: "c:/work/dead/never.txt", walk: windows(["c:/", "c:\\work"], ["c:\\work\\dead"]), report: BEHIND },
+  { name: "nothing under a drive's directory, with /", list: "C:/work/never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  { name: "nothing under a drive's directory, with both", list: "C:\\work/never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  { name: "nothing under a share's directory, with /", list: "//server/share/work/never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  { name: "nothing under a share's directory, with both", list: "\\\\server/share\\work/never.txt", walk: DRIVE_AND_SHARE, report: NONE },
+  {
+    name: "a relative path with a drive (C:work), from the work directory",
+    list: "C:work\\never.txt",
+    walk: windows(["C:\\", "C:\\work"], ["C:\\work\\work"]),
+    report: BEHIND
+  }
+]
+
+for (const one of PLAIN) {
+  for (const mode of ["the tree check", "--message"] as const) {
+    test(`W: under the Windows flavor, ${one.name}, in ${mode}: ${one.report.code === 0 ? "no list" : "the fault"}`, async () => {
+      const args = mode === "--message" ? ["--message", "C:\\work\\msg.txt"] : []
+      const traced = recorded(one.walk)
+      const report = await Effect.runPromise(run(args, temp(), one.list, process.env, traced.walk))
+      expect(report).toEqual(one.report)
+      expect(traced.calls[0]).toBe(`lstat ${one.list}`)
+      expect(traced.calls.length).toBeGreaterThan(1)
+    })
+  }
+}
+
+// A list that is there is read, whatever its path's form: the walk runs only
+// when nothing is at the path. On POSIX, the extended share's text is the
+// name of a file in the work directory, so the list is there and its words
+// are found.
+for (const mode of ["the tree check", "--message"] as const) {
+  test(`W: under the Windows flavor, a list that is there under an extended share is read, in ${mode}`, async () => {
+    const dir = temp()
+    const name = path.win32.toNamespacedPath("\\\\server\\share\\never.txt")
+    fs.writeFileSync(path.join(dir, name), LIST)
+    const real: Walk = {
+      path: path.win32,
+      lstatSync: (file) => fs.lstatSync(file),
+      statSync: (file) => fs.statSync(file),
+      realpathSync: (file) => fs.realpathSync(file)
+    }
+    const traced = recorded(real)
+    const root = checkout({ "a.md": "a zorblat\n" })
+    const args = mode === "--message" ? ["--message", message("a quexxu\n")] : []
+    const back = process.cwd()
+    process.chdir(dir)
+    try {
+      const report = await Effect.runPromise(run(args, root, name, process.env, traced.walk))
+      expect(report.code).toBe(1)
+      expect(report.err.at(-1)).toBe(`words: 1 match of the list in ${mode === "--message" ? "the message" : "1 files"}`)
+      expect(traced.calls.filter((call) => call.endsWith(name))).toEqual([`lstat ${name}`])
+      clean(report)
+    } finally {
+      process.chdir(back)
+    }
   })
 }
 
