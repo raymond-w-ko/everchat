@@ -114,6 +114,7 @@ test("a turn that failed leaves its note in the output, and the exit code is 1",
   expect(launches(at.file).map((one) => [one.ended !== null, one.why])).toEqual([[true, "exit"]])
 })
 
+// Three starts of the program: alone 2,479 to 5,974 ms (median 3,652, 10 runs, load near 35 on 30 cores).
 test("an empty standard input sends nothing, and a launch writes nothing of the log from before it", async () => {
   const at = place()
   const server = fake(() => text("Hello."))
@@ -122,8 +123,9 @@ test("an empty standard input sends nothing, and a launch writes nothing of the 
   expect(server.bodies.length).toBe(1)
   expect(await run(at, server.address, "again\n")).toEqual({ out: "› again\n\nHello.\n", err: "", code: 0 })
   expect(launches(at.file).length).toBe(3)
-})
+}, 25_000)
 
+// Two starts of the program: alone 1,952 to 3,663 ms (median 2,590, 10 runs, load near 35 on 30 cores).
 test("a signal while a turn runs ends the process, and the next launch goes on with the turn before it reads a line", async () => {
   const at = place()
   let hold = true
@@ -150,7 +152,7 @@ test("a signal while a turn runs ends the process, and the next launch goes on w
   expect(JSON.stringify(server.bodies[1])).not.toContain("and now?")
   // What the program says about its own work is in the table, and not in the output.
   expect(rows(at.file, "select level, source, text from everchat_log")).toContainEqual({ level: "info", source: "turn", text: "turn 1 was cut, and continues" })
-})
+}, 15_000)
 
 test("the reader of the standard output goes away: the program ends at once with the reason, and the log holds what was not written", async () => {
   const at = place()
@@ -203,6 +205,7 @@ test("--log-level sets the lowest level of the diagnostics, and no level puts a 
   expect(await diagnostics("--log-level", "debug")).toContain("info")
 }, 20_000)
 
+// Two starts of the program: alone 2,244 to 3,395 ms (median 3,033, 10 runs, load near 35 on 30 cores).
 test("the home is the directory that EVERCHAT_HOME names, and with none or an empty one it is .everchat in the person's own directory", async () => {
   const server = fake(() => text("Hello."))
   for (const named of [undefined, ""]) {
@@ -214,7 +217,7 @@ test("the home is the directory that EVERCHAT_HOME names, and with none or an em
     // Nothing was made in the work directory.
     expect(fs.readdirSync(at.work)).toEqual([])
   }
-})
+}, 15_000)
 
 test("the program that cannot start says why in one line of the standard error", async () => {
   const at = place()
@@ -226,6 +229,7 @@ test("the program that cannot start says why in one line of the standard error",
   expect(launches(at.file).every((one) => one.ended !== null)).toBe(true)
 })
 
+// Six starts of the program: alone 3,877 to 5,490 ms (median 4,288, 10 runs, load near 35 on 30 cores).
 test("the arguments: the usage, the version, the completions, and a wrong one", async () => {
   const at = place()
   const help = await run(at, "http://127.0.0.1:1", "", ["--help"])
@@ -247,4 +251,4 @@ test("the arguments: the usage, the version, the completions, and a wrong one", 
   expect((await run(at, "http://127.0.0.1:1", "", ["a message"])).code).toBe(2)
   // None of them made a home.
   expect(fs.existsSync(at.home)).toBe(false)
-})
+}, 25_000)
