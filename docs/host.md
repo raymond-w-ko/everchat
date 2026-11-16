@@ -12,8 +12,13 @@ of the settled list (`[Q19]`), "lead, ec-mxcl": the lead's eleven decisions, in 
 bead ec-1h538, "lead, ec-vgn58": the lead's form of the fixes of the page's two
 reviews, by its rule's name (A1 to E), "lead, ec-7bi64": the lead's form of the fixes
 of its two re-reviews, by its rule's name (F1 to K), "lead, ec-12a32": the lead's form
-of the fixes of its two second re-reviews, by its rule's name (L1 to P5), or "lead,
-ec-349x0": the lead's rules after its third re-review, by their names (Q1 to S3). The
+of the fixes of its two second re-reviews, by its rule's name (L1 to P5), "lead,
+ec-349x0": the lead's rules after its third re-review, by their names (Q1 to S3), or
+"lead, ec-9p347": the lead's rulings on the points that the page's reviews left open, by
+their names (T1 to T11), "lead, ec-uoo8x": the lead's fixes of the reviews of those
+rulings, by their names (T5a, T6a), "lead, ec-x0hhp": the lead's rulings on the bound
+of the answers that hold messages, by their names (U1 to U4, U1a), or "lead, ec-hp7pq":
+the lead's ruling on the life of an R5 with a `wait` above 0, by its name (V1). The
 words are those of `GLOSSARY.md`; the new words are listed at the end.
 
 ## Contents
@@ -147,7 +152,9 @@ it; when the listener gives (a live event, the read at a load, the read after a 
 the read at an unload gives, the same step sets `last` to the event's number. A piece
 goes into the buffer of each client that joined, and moves no number. **A client that has
 not joined gets no give but its own first read's**: no give of the listener, of a read
-at a load or after a loss, or of an unload, and no piece (lead, ec-12a32, N2). Each give
+at a load or after a loss, or of an unload, and no piece (lead, ec-12a32, N2). The
+host's own frames to a client are not gives, and a client that has not joined gets them
+too (below, "The host's own frames"; lead, ec-9p347, T7). Each give
 runs under the channel's give lock, as one step that an interruption cannot split
 (`Effect.uninterruptible`, as the turn loop's `record` does,
 `packages/core/src/turn.ts:208-216`; lead, ec-vgn58, A2). A give never waits: a full
@@ -169,20 +176,47 @@ gives it this way and only this way (lead, ec-vgn58, A1):
      step that does not wait, and gives the place back. No place is held across a wait
      on a client.
 
-  Nothing but its own first read gives to a client that has not joined, so the room of
-  step 1 is still there at the give of step 2. The client is ended as `slow` when its
-  buffer has no room for a page 30 s after the last page was given to it, or after it
-  became a client (section 8, "A slow client"; lead, ec-7bi64, G2). When the read is at
-  the store's end (a call of the store gives fewer events than it asked for: section 8,
-  "Pages"), the client **joins**, under the give lock, in the same step as a check: when
-  its `given` is `last` or more, it joins; else it reads the events after its `given`
-  again, page by page as above, and checks again. `last` is what the clients that joined
-  were given (above), so a client whose `given` is below it reads on first (lead,
-  ec-12a32, N3). So no event comes between the client's read and the gives that reach
-  the clients that joined: every numbered event up to `last` is in the store, because the
-  turn loop publishes an event only after its commit (`packages/core/src/turn.ts:208-216`).
-  Before the chat's first load the channel has no `last`, and a client joins at once at
-  the store's end.
+  No give but its own first read's reaches a client that has not joined, but the host's
+  own frames do: a `said` or an `error` can take room between the two steps (below, "The
+  host's own frames"). So the give of step 2 checks the room again, under the give lock,
+  in the same step. A page that no longer fits is not given, and does not end the client:
+  the first read gives its place back, drops the page, and starts again at step 1 (lead,
+  ec-9p347, T7). The client is ended as `slow` when its buffer has no room for a page 30 s
+  after the last page was given to it, or after it became a client (section 8, "A slow
+  client"; lead, ec-7bi64, G2). A page that was dropped does not start the 30 s again:
+  they run from the last page that was given. When the read is at the store's end (a call
+  of the store gives fewer events than it asked for: section 8, "Pages"), the client
+  **joins**, under the give lock, in the same step as a check of two parts (lead,
+  ec-9p347, T9): its `given` is `last` or more, or the channel has no `last`; and its
+  buffer has room for one entry of `entry` bytes. When both hold, it joins. Else it does
+  not join: it reads the events after its `given` again, as above (step 1's wait for room
+  for a page, a read), and checks again. `last` is what the clients that joined were
+  given (above), so a client whose `given` is below it reads on first (lead, ec-12a32,
+  N3). So no event comes between the client's read and the gives that reach the clients
+  that joined: every numbered event up to `last` is in the store, because the turn loop
+  publishes an event only after its commit (`packages/core/src/turn.ts:208-216`). And a
+  client that joins has room for one largest entry at least, so a live entry does not end
+  as `slow` a client that is still draining its last page. A burst after the join can
+  still end it: that is the buffer's bound, as designed. Before the chat's first load the
+  channel has no `last`, and a client with room joins at once at the store's end.
+
+  **The host's own frames** (lead, ec-9p347, T7). The host's own frames to one client
+  (R6's `ready`, `snapshot`, `said`, `error` and `ping`; R4's `: ping`) go through that
+  client's buffer, and count in both of its bounds: each client has one queue and one
+  writer. They are not gives, and a client that has not joined gets them too. `ready` and
+  the snapshot are put before the client's first read starts. The `snapshot` frame is at
+  most `page` bytes (section 4, "The snapshot"), and it is put as a first read puts a page
+  (lead, ec-x0hhp, U2): it waits, with no place and no lock held, until the client's
+  buffer has room for `page` bytes; then it takes a place of `reads`, reads the snapshot
+  and cuts its list (section 3, "Admission", 11; lead, ec-x0hhp, U3), puts the frame into
+  that room under the give lock in one step that does not wait, and gives the place back.
+  A frame that no longer fits, because a `said` or an `error` took room, is dropped, and
+  the snapshot starts again with its wait. The 30 s of `slow` hold for it as for a page:
+  the client is ended as `slow` when its buffer has no room for `page` bytes 30 s after
+  it became a client. So a snapshot never ends a client by its size. A ping is put only
+  into an empty buffer. A `said` or an `error` is put when its `say` is answered; one that
+  finds no room ends the client as `slow`, as a give does. The frame of an end (R4's
+  `close`, R6's close code) is not in the buffer.
 
 A **loaded chat** is the chat's store (`Chats.store`, which writes a launch row), its stack
 built over that store in a scope of its own, and the channel's listener (below). The host
@@ -327,8 +361,9 @@ three things about the end of work. Ownership goes back when the work has ended,
 before (O2, Q1). Each call of the store ends by the store's own timer, within `store`. So
 the work ends after a count of calls that has an end. The totals of time that the page
 gives from these are the sums for the common case, not promises: the lock's and a place's
-below, a stopped load's, and R1's and R5's longest silences (section 3, "Admission", 9).
-The cases that pass a sum are in "Accepted risks", below.
+below, a stopped load's, R1's and R5's longest silences (section 3, "Admission", 9), and
+how long a token serves past its `exp` (section 6; lead, ec-uoo8x, T6a). The cases that
+pass a sum are in "Accepted risks", below.
 
 The numbers (O4), each in the limits table:
 
@@ -390,7 +425,8 @@ names the first two for the beads of the store and the server.
 ### Load again
 
 A load after an unload is the same load. The clients of the channel need no new
-connection: the new listener feeds them, after the read of step 3. So a client sees each
+connection: the new listener feeds the clients that joined, after the read of step 3, and
+the others read on by themselves (lead, ec-9p347, T8). So a client sees each
 event once, in the order of the numbers, across any count of unloads.
 
 ### What a loaded chat holds, and what the process holds
@@ -435,22 +471,39 @@ same JSON shapes (section 4) and the same event numbers. The routes:
 `{chat}` is the chat's UUID, as text. The local command adds R8 to R10 under its start
 value (section 7). No route takes a token in its address, ever (lead, ec-mxcl, decision
 4); no route lists chats; there is no listener for all chats [Q41]; and the host sends to
-no webhook [Q25, Q40]. A client of R4, R5 (while it waits) or R6 is a client of the chat's
-channel (section 2) for as long as it is connected; it loads nothing. R4 and R5 become
-clients when their checks pass; R6 only after a good `auth` (below, "Admission").
+no webhook [Q25, Q40]. **A token's place** (lead, ec-9p347, T3): the host reads a token
+from the header `Authorization` of R1 to R5 and from R6's `auth` frame, and from no other
+place. A header `Authorization` on R6's upgrade is not read: the socket still needs its
+`auth`. A route reads the query parameters that it names and no other: a token in a query
+is not read, grants nothing and is not refused. The host's diagnostics never hold a query
+or the value of a header. R4 and R6 are clients of the chat's channel (section 2) for as
+long as they are connected. An R5 with a `wait` above 0 is a client from its start until
+its answer, or, when it joins to wait, until its wait ends; never across a connection that
+stays open after its answer. Its first read finds events: it answers. Its first read finds
+none and the join's check finds `last` above `after`: it does not join, it reads again,
+and it answers. Else it joins and waits; when its wait ends it is a client no more, and it
+takes its place again to read and answer (below, R5, "The order"; lead, ec-uoo8x, T5a;
+ec-hp7pq, V1). A client loads nothing.
+R4 becomes a client when its checks pass, and so does an R5 with a `wait` above 0, before
+its first read (below, R5; lead, ec-9p347, T5); R6 only after a good `auth` (below,
+"Admission"). An R5 with `wait` 0, or with none, is never a client.
 
 ### The checks of each request, in their order
 
 Each route R1 to R6 runs these checks, in this order, before it reads a body:
 
 1. **The origin.** A request with an `Origin` header whose value is not on the host's list
-   gets `403 forbidden_origin`. A request with no `Origin` passes this check: it is no
-   browser's, and the token is its wall. The local command's list is its own origin only
+   gets `403 forbidden_origin`. A request with no `Origin` passes this check, whoever sent
+   it: a browser too sends no `Origin` on a `GET` to its own origin, and none on a `GET`
+   with no CORS (an image, a script). The token is the wall, because a page cannot put
+   `Authorization` on such a request. A later route that takes no token must not lean on
+   this check (lead, ec-9p347, T1). The local command's list is its own origin only
    (section 7).
 2. **The token** (section 6): the header `Authorization: Bearer <token>`, its signature,
    its claims, its end time. Any failure gets one answer, `401 unauthorized`, that does
    not say why; the reason goes to the host's diagnostics (lead, ec-mxcl, decisions 4 and
-   11). R6 takes its token from its first frame instead (below).
+   11). R6 takes its token from its first frame instead, and reads no header
+   `Authorization` (above, "A token's place"; below).
 3. **The chat.** A chat that the token does not name gets `404 no_chat`, the same answer
    as a chat of another tenant or a UUID that no chat has (`NoChat`,
    `packages/core/src/store.ts:355-362`). A tenant cannot learn that another tenant's chat
@@ -478,10 +531,18 @@ D). Each number is a limit of section 8.
 3. **HTTP requests in flight**: every request that Bun gives to the host, R1 to R10 and a
    request of a path that is no route (R4 until it is a client; R6 until its upgrade, when
    it counts among the sockets of item 2; lead, ec-7bi64, H1): at most 256 for the host. A
-   request holds its place from its first line to the end of its answer; R4, and an R5
-   that waits, to the moment when it is a client. A place counts work, not a connection:
-   it can stay taken after its client has gone, until the request's work has ended (item
-   5; lead, ec-349x0, Q2). A client holds no place. There is no
+   request holds its place from its first line to the end of its answer; R4 to the moment
+   when it is a client. An R5 with a `wait` above 0, which is a client from its start,
+   holds its place from its first line to the end of its answer, but not from its join to
+   the end of its wait: through its first read to the end of its answer when its first
+   read finds events, or when the join's check finds `last` above `after` and it
+   reads again and answers; to its join, when it joins to wait. When its wait ends, it takes
+   its place again to read and answer (R5; lead, ec-9p347, T5; ec-uoo8x, T5a;
+   ec-hp7pq, V1). A place counts work, not a connection: it can stay taken after its
+   client has gone, until the request's work has ended (item 5; lead, ec-349x0, Q2). A
+   client holds no place, except an R5 with a `wait` above 0, from its start to its
+   answer, or, when it joins to wait, to its join (above; lead, ec-9p347, T5; ec-uoo8x,
+   T5a; ec-hp7pq, V1). There is no
    queue: a request past the bound gets `503 busy` with `retry-after: 1` at once, before
    its body is read. (D3)
 4. **Waits.** A body is read in at most 10 s, else `408 timeout`, and the connection
@@ -597,12 +658,18 @@ D). Each number is a limit of section 8.
    less than twice `ping`.
 10. **The deadline of a request** (lead, ec-7bi64, I1, I2). Each request that holds a place
     of item 3 has one deadline for its whole life, from its head to the end of its answer:
-    30 s (the limit `request`). An R5 that waits is a client while it waits and holds no
-    place; its 30 s start when it takes its place again to answer. The 10 s of a body's
-    read, the 10 s of a wait for the channel's lock and the 20 s of the work under it are
-    inside these 30 s, and the first that ends ends the request. At the deadline the host
-    asks the request's work to stop (a read of the store, a function of the backend, the
-    wait for a lock, the work under the lock, the write of the answer: it interrupts it).
+    30 s (the limit `request`). An R5 with a `wait` above 0 that does not join has one
+    deadline from its head to the end of its answer: when its first read finds events, or
+    when the join's check finds `last` above `after` and it reads again and answers, the
+    read again and the answer are inside the same 30 s, with no new deadline (lead,
+    ec-hp7pq, V1). An R5 that waits holds no place while it waits (it is a client then, as
+    from its start); its first 30 s end when it joins to wait, and a new 30 s start when
+    it takes its place again to answer (lead, ec-9p347, T5). The 10 s of a
+    body's read, the 10 s of a wait for the channel's lock and the 20 s of the work under
+    it are inside these 30 s, and the first that ends ends the request. At the deadline the
+    host asks the request's work to stop (a read of the store, a function of the backend,
+    the wait for a lock, the work under the lock, the write of the answer: it interrupts
+    it).
     When that work has ended, and never before, the host gives the place back and lets go
     of the channel (lead, ec-12a32, O2). If no byte of the answer was sent, the answer is
     `503 busy` with `retry-after: 1`; else the connection closes. A part that cannot be
@@ -613,23 +680,33 @@ D). Each number is a limit of section 8.
     that is stopped or a log whose write failed; and a channel's lock `lock` + `store`,
     25 s, after it was taken, or 40 s in those two cases (O4).
 11. **Reads at one time** (lead, ec-7bi64, G4; ec-12a32, M). A client's own first read (R4,
-    R6) and the read of an R5 take a place of `reads`: at most 16 for the host. No place
-    is held across a wait on a client (M2, M5):
+    R6), the read of an R5, and the read of messages (R2, R3, and R6's snapshot; lead,
+    ec-x0hhp, U3) take a place of `reads`: at most 16 for the host. No place is held
+    across a wait on a client (M2, M5):
     - a first read waits for room in its client's buffer first, with no place held; then
       it takes a place, reads one page, fits it, gives it into that room with no wait, and
-      gives the place back (section 2, "The give"). It takes a place again for its next
-      page;
-    - an R5 takes a place for its read and its fit only. Its `wait` holds no place of
+      gives the place back (section 2, "The give"). A page that no longer fits, because
+      the host's own frames took room, is dropped, and the read waits again (lead,
+      ec-9p347, T7). It takes a place again for its next page;
+    - an R5 takes a place for each read and its fit only: its first read, a read again
+      when the join's check finds `last` above `after` (lead, ec-hp7pq, V1), and its read
+      after its wait. Its `wait` holds no place of
       `reads` (it is a client then, and holds no place of item 3 either), and the write of
       its answer holds none: the answer's bytes are then the request's, bounded by its
-      place of item 3 and its deadline (item 10).
+      place of item 3 and its deadline (item 10);
+    - a read of messages takes a place for its read of the store and its cut only (U3):
+      R2 and R3 hold none while they write their answer, which is the request's, as an
+      R5's is; R6's snapshot holds none while it waits for room (section 2, "The host's
+      own frames"; U2).
 
     The wait for a place is first come, first served: a first read takes its turn again
     for each page, behind the reads that wait (M3). The next one waits for its turn at most
-    30 s, then gets `503 busy` with `retry-after: 1` (R4, R5) or is closed with `4503`
-    (R6). So the host holds at most 16 pages for first reads and R5's reads at one time,
-    each of at most `page` bytes, and, for each channel, one page of the listener's own
-    reads (section 8, "Pages").
+    30 s, then gets `503 busy` with `retry-after: 1` (R2 to R5) or is closed with `4503`
+    (R6). So the host holds at most 16 reads at one time (first reads, R5's and the reads
+    of messages), each with one page after its fit or cut and one call of the store before
+    it; for each loaded chat, the same two for the listener's own reads; and one page for
+    each R2, R3 or R5 whose answer is written. Section 8, "Pages", gives the sums of these
+    (lead, ec-9p347, T10).
 
 Every answer has the inspector's headers: `cache-control: no-store`,
 `referrer-policy: no-referrer`, `x-content-type-options: nosniff`
@@ -673,20 +750,32 @@ host's own origin (section 7).
 - Query: `last` (optional): how many of the chat's last messages, from 1 to 200; 50 when
   it is not given.
 - `200`: the snapshot (section 4). It is read in one snapshot of the store, so its
-  messages, its `seq` and its turn are one state of the chat.
+  messages, its `seq` and its turn are one state of the chat. Its JSON is at most `page`
+  bytes, whole: its list keeps the newest of the last `last` messages that fit beside its
+  other fields, and may hold none (section 4, "The snapshot"; lead, ec-x0hhp, U1, U1a). Its
+  read and its cut take a place of `reads` ("Admission", 11; U3).
 - Errors: `400` (a `last` that is not a whole number in its range), `401`, `403`, `404`,
-  `500`, `503 busy` (requests in flight, or the request passed its 30 s with no byte sent:
-  with `retry-after: 1`). Past its 30 s with bytes sent, the connection closes.
+  `500 internal` (the snapshot's other fields alone pass `page`: section 4, "The
+  snapshot"; U1a), `503 busy` (requests in flight, or its read waited 30 s for a place of
+  `reads`, or the request passed its 30 s with no byte sent: with `retry-after: 1`). Past
+  its 30 s with bytes sent, the connection closes.
 
 ### R3: older messages
 
 - Query: `from` and `to`, whole numbers, `0 <= from < to`, `to - from <= 200`.
-- `200`: `{"messages": [<message>, ...]}`: the messages from `from` up to, and not with,
-  `to`, in the order of their ids (`Reading.messages`, `packages/core/src/store.ts:393`).
-  An id that the chat does not have yet gives no message.
-- Errors: `400`, `401`, `403`, `404`, `500`, `503 busy` (requests in flight, or the
-  request passed its 30 s with no byte sent: with `retry-after: 1`). Past its 30 s with
-  bytes sent, the connection closes.
+- `200`: `{"messages": [<message>, ...]}`: the messages from `from` upward, up to and not
+  with `to`, in the order of their ids (`Reading.messages`,
+  `packages/core/src/store.ts:393`). An id that the chat does not have yet gives no
+  message. The answer's JSON is at most
+  `page` bytes: it closes before the message that would pass `page`, as a page of events
+  closes before the entry that would pass it (lead, ec-x0hhp, U1). One message always
+  fits (section 8, "Pages"). Fewer messages than `to - from` is no end of the range: a
+  chat's message ids run with no gap, so the client sees what it lacks and asks again
+  from its last id plus one. Only `{"messages": []}` says that the chat has no message
+  from `from` now. The read and the cut take a place of `reads` ("Admission", 11; U3).
+- Errors: `400`, `401`, `403`, `404`, `500`, `503 busy` (requests in flight, or its read
+  waited 30 s for a place of `reads`, or the request passed its 30 s with no byte sent:
+  with `retry-after: 1`). Past its 30 s with bytes sent, the connection closes.
 
 ### R4: the event stream
 
@@ -728,8 +817,10 @@ host's own origin (section 7).
 
 ### R5: the events, with no stream
 
-- Query: `after` as in R4; `limit`, from 1 to 1000, 100 when it is not given; `wait`, in
-  seconds, from 0 to 25, 0 when it is not given.
+- Query: `after` as in R4; `limit`, from 1 to 1000, 100 when it is not given; `wait`, a
+  whole number of seconds from 0 to 25, in the form that `after` and `limit` take, 0 when
+  it is not given. Another value of `wait` (a fraction, a sign, a text) gets `400` (lead,
+  ec-9p347, T6).
 - `200`: `{"events": [<numbered event>, ...]}`: the chat's numbered events after `after`,
   in the order of their numbers, at most `limit` and at most one page in bytes (section 8,
   "Pages"), each as the fit made it (section 8, "The bytes of one entry"). No piece. Fewer
@@ -738,13 +829,29 @@ host's own origin (section 7).
   `after` now.
 - With no event after `after` and a `wait` above 0, the host waits until an event after
   `after` occurs or `wait` seconds pass, then answers with what is there, possibly
-  `{"events": []}` (lead, ec-mxcl, decision 8). R5 sends no byte before its answer: from
-  its head to its answer it is quiet for `wait` + 2 × (`request` + `store`), 95 s, by the
-  sum for the common case: the longest silence of the host, and Bun's idle limit of
-  190 s is twice it (section 3, "Admission", 9, "The longest silence"; lead, ec-12a32,
-  L).
+  `{"events": []}` (lead, ec-mxcl, decision 8). **The order** (lead, ec-9p347, T5): an R5
+  with a `wait` above 0 becomes a client of the channel before its first read, with its
+  `given` at `after`, as R4 and R6 do (section 3, "The order and the numbers", 2). Then it
+  reads. With events, it answers and is a client no more. With none, its read is at the
+  store's end, and the join's check runs (section 2, "The give"). When the channel's
+  `last` is above `after`, an event came between: the R5 does not join; it reads again
+  (with a place of `reads`, as every read takes one) and answers, in the place and the
+  30 s that it has held from its first line, and it is a client until its answer (lead,
+  ec-hp7pq, V1). Else it
+  joins, and waits for the first numbered event that is given to it, or for `wait`; then
+  it is a client no more, takes its place again, reads the store and answers (lead,
+  ec-uoo8x, T5a). A piece that is given to it is dropped. So an event that is committed
+  after the R5 became a client is never waited
+  out. An R5 with `wait` 0, or with none, is never a client. R5 sends no byte before its
+  answer: from its head to its answer it is quiet for `wait` + 2 × (`request` +
+  `store`), 95 s, by the sum for the common case: the longest silence of the host, and
+  Bun's idle limit of 190 s is twice it (section 3, "Admission", 9, "The longest
+  silence"; lead, ec-12a32, L).
 - Errors: `400`, `401`, `403`, `404`, `500`, `503 busy` (the chat or the host holds as
-  many clients as its limit, for an R5 that waits; or, with `retry-after: 1`, as many
+  many clients as its limit, for an R5 with a `wait` above 0: the limits of clients count
+  it from its start, also when its first read finds events or it reads again (T5; lead,
+  ec-hp7pq, V1); or, with
+  `retry-after: 1`, as many
   requests in flight, or its read waited 30 s for a place of `reads`, or the request
   passed its 30 s with no byte sent). Past its 30 s with bytes sent, the connection
   closes.
@@ -752,31 +859,46 @@ host's own origin (section 7).
 ### R6: the WebSocket
 
 - The upgrade: `GET` with `Upgrade: websocket`. The origin is checked first (above). No
-  token in the address: the token is the first frame. The host answers no frame before it.
-  With 256 sockets that wait for their `auth`, the host refuses the upgrade with
-  `503 busy`, before the upgrade ("Admission", 2).
+  token in the address: the token is the first frame. A header `Authorization` on the
+  upgrade is not read, and the socket still needs its `auth` (lead, ec-9p347, T3). The
+  host answers no frame before it. With 256 sockets that wait for their `auth`, the host
+  refuses the upgrade with `503 busy`, before the upgrade ("Admission", 2).
 - Each frame is one JSON object as text: at most 8 KiB before `ready`, at most 512 KiB
   after it. A binary frame, a frame that is no JSON object, or a frame of an unknown type
   closes the socket with code `4400`. A frame over its size closes it with `1009`.
+- **A frame at the wrong time** (lead, ec-9p347, T2). Before the host sent `ready`, `auth`
+  is the only frame of the client: any other frame, a `say` too, closes the socket with
+  `4400`. After the host took one `auth` frame, a second `auth` closes the socket with
+  `4400`, at any time: a socket never changes its token (a new token is a new socket,
+  section 6). So `4400` is every fault of a frame's form or time, and `4401` speaks of the
+  token only. A client waits for `ready` before its first `say`.
 - The socket is a client of its channel only after a good `auth` ("Admission", 1).
 
 Frames from the client:
 
 | Frame | Fields | When |
 | --- | --- | --- |
-| `auth` | `token` (the access token), `after` (a whole number from 0, or `null`) | first, within 5 s of the upgrade |
-| `say` | `id` (the client's name for the frame: 1 to 64 bytes of visible ASCII), `text`, `key` (optional, section 5) | after `ready` |
+| `auth` | `token` (the access token), `after` (required: a whole number from 0, or `null`; an `auth` without it closes the socket with `4400`, so a client always says whether it wants the snapshot; lead, ec-9p347, T4) | first, within 5 s of the upgrade; one time only |
+| `say` | `id` (the client's name for the frame: 1 to 64 bytes of visible ASCII), `text`, `key` (optional, section 5) | after `ready` only |
 
 Frames from the host:
 
 | Frame | Fields | When |
 | --- | --- | --- |
 | `ready` | none | after a good `auth` |
-| `snapshot` | the snapshot's fields (section 4) | after `ready`, when `auth` had `after: null` |
+| `snapshot` | the snapshot's fields (section 4), at most `page` bytes in all (U1a) | after `ready`, when `auth` had `after: null`, when its buffer has room for `page` bytes (U2) |
 | an event | the event itself (section 4): its `type` is `accepted`, `start`, `call`, `message`, `end`, `text`, `thought` or `program` | after `ready` (and the snapshot) |
 | `said` | `id` (the `say` frame's), `n`, `first`, `last`, `repeat`: as R1's answer | for each `say` that was taken in |
 | `error` | `id` (the `say` frame's), `error`, `message`: as the error JSON | for a `say` that was refused; the socket stays open |
 | `ping` | none | every 15 s with nothing to send |
+
+Each of these frames goes through the socket's buffer and counts in both of its bounds
+(section 2, "The host's own frames"; lead, ec-9p347, T7): `ready` and the snapshot before
+the first read starts, the snapshot when the buffer has room for `page` bytes, with a
+place of `reads` for its read and none for its wait (lead, ec-x0hhp, U2, U3), a `ping`
+only into an empty buffer, and a `said` or an `error` when its `say` is answered; one that
+finds no room ends the socket with `4408`. The close code
+is not in the buffer.
 
 The events come in the order of their numbers, with the pieces among them, as on R4: first
 those after `after` (or after the snapshot's `seq`), then each as it occurs. The types of
@@ -787,13 +909,13 @@ The host closes the socket with:
 
 | Code | Reason text | When |
 | --- | --- | --- |
-| `4401` | `unauthorized` | no `auth` within 5 s; a token that fails; its `exp` passed |
+| `4401` | `unauthorized` | the token only: no `auth` within 5 s; a token that fails; its `exp` passed |
 | `4404` | `no_chat` | the token does not name the chat, or the tenant has no such chat |
-| `4400` | `bad_frame` | a frame that is not one of the client's frames above |
+| `4400` | `bad_frame` | every fault of a frame's form or time: a frame that is not one of the client's frames above; an `auth` without `after`; before `ready`, any frame but the first `auth`, a `say` too; a second `auth`, at any time (T2, T4) |
 | `1009` | `too_large` | a frame over 8 KiB before `ready`, or over 512 KiB after it |
-| `4408` | `slow` | its buffer was full, or its first read found no room for a page 30 s after its last page |
-| `4503` | `busy` | after a good `auth`: the chat or the host holds as many clients as its limit, or its first read waited 30 s for a place of `reads` |
-| `1011` | `internal` | a read met an event written under larger limits, which it cannot give (section 8, "The checks at start", S2; lead, ec-349x0, S2a) |
+| `4408` | `slow` | its buffer was full (a give, or a `said` or an `error` that found no room), or its first read found no room for a page 30 s after its last page, or its snapshot found no room for `page` bytes 30 s after it became a client (U2) |
+| `4503` | `busy` | after a good `auth`: the chat or the host holds as many clients as its limit, or its first read or its snapshot's read waited 30 s for a place of `reads` (U3) |
+| `1011` | `internal` | a read met an event written under larger limits, which it cannot give (section 8, "The checks at start", S2; lead, ec-349x0, S2a), or the snapshot's other fields alone pass `page` (section 4, "The snapshot"; U1a) |
 | `1001` | `stop` | the host stops |
 
 The reason text does not say why a token failed.
@@ -801,20 +923,38 @@ The reason text does not say why a token failed.
 ### The order and the numbers: what a client does to miss nothing
 
 1. Connect, and get the snapshot: R2, or R6 with `after: null`. It has the chat's `seq`.
+   Its messages are the newest that fit in `page` bytes, and may be none: the client reads
+   the ones before them by R3, from `count` and their ids (lead, ec-x0hhp, U1, U1a).
 2. Read the events after `seq`: R4, R5 or the socket. On R4 and R6 the host makes the
-   client a client of the channel first, with its `given` at the client's number. Then
-   the client's own first read gives it the events after its `given` from the store, a
-   page at a time (section 8, "Pages"). Before each page it waits for room for a whole
-   page in that client's buffer, with no place held, so a client that reads gets all the
-   events on one connection, however many bytes they are; a client whose buffer has no
+   client a client of the channel first, with its `given` at the client's number, and so
+   it does for an R5 with a `wait` above 0, which then reads and answers as R5 says (R5,
+   "The order"; lead, ec-9p347, T5). Then on R4 and R6 the client's own first read gives
+   it the events after its `given` from the store, a page at a time (section 8,
+   "Pages"). Before each page it waits for room for a whole page in that client's
+   buffer, with no place held, so a client that reads gets all the events on one
+   connection, however many bytes they are; a client whose buffer has no
    room for a page 30 s after its last page is ended as `slow`. The read holds one page in
-   memory. At the store's end the client
-   joins the listener's gives (section 2, "The give"). Each event comes once, in the order
-   of the numbers. On R5, an answer with fewer events than `limit` is no end: the client
-   asks again after its last number, until an answer is `{"events": []}`.
-3. Keep the highest event number that it got. On any end of a stream or a socket (its
-   token's end, `slow`, a network fault, an unload), connect again with that number as
-   `after`, on any way [Q18].
+   memory. At the store's end the client joins the listener's gives, when its `given` is
+   `last` or more and its buffer has room for one entry of `entry` bytes; else it reads on
+   and checks again (section 2, "The give"; lead, ec-9p347, T9). Each event comes once,
+   in the order of the numbers. On R5, an answer with fewer events than `limit` is no
+   end: the client asks again after its last number, until an answer is
+   `{"events": []}`.
+3. Keep the highest event number that it got. On any end of a stream or a socket, and
+   after an answer of `503 busy` or `500 internal`, connect again with that number as
+   `after`, on any way [Q18], with these waits (lead, ec-9p347, T11). The wire carries no
+   wait but the `retry-after` of an HTTP answer.
+   - After `busy` (a `503 busy`, R4's `close` with reason `busy`, R6's `4503`): wait 1 s
+     before the next connection, twice as long after each `busy` in a row, at most 30 s;
+     a `retry-after` that is longer wins.
+   - After `internal` (a `500 internal`, R4's `close` with reason `internal`, R6's
+     `1011`): show the error to the person, and connect again by itself at most one time
+     in 30 s.
+   - After the other ends (the token's end, `slow`, `stop`, a fault of the network):
+     connect again at once.
+
+   The host does not lean on these waits: a client that connects again at once is
+   bounded by the host's own limits (the places, `reads`, the clients).
 4. Drop an event whose number it has. A piece has no number: a piece that arrives after
    its message's `message` event, or across a new connection, is dropped by the client
    or shown again. Pieces are best effort [Q10, Q17].
@@ -897,15 +1037,35 @@ The three pieces have no number:
 - `seq`: the chat's last event number; 0 with no event (`Chat.seq`,
   `packages/core/src/store.ts:126`).
 - `count`: the id of the chat's next message (`Reading.count`, `packages/core/src/store.ts:392`).
-- `messages`: the last `last` messages (R2's query; 50 when not given; at most 200), in the
-  order of their ids. The first may be a page in the middle of a text: R3 reads the pages
-  before it.
+- `messages`: of the last `last` messages (R2's query; 50 when not given; at most 200; R6's
+  snapshot: the last 50), the longest run that ends at the chat's last message and fits
+  (below), in the order of their ids. It may be empty. Its first message may have a higher
+  id than the last `last` would give, and it may be a page in the middle of a text: R3
+  reads the messages before it, as the client does for those before `last`.
 - `turn`: the turn that runs (`Reading.runningTurns(null)`,
   `packages/core/src/store.ts:417`), or `null`: its id, its pick, its first message and its
   start time. Not its head, which is the whole system prompt.
 
 All five are read in one snapshot of the store (`Reading.snapshot`,
 `packages/core/src/store.ts:372`).
+
+**Its bound** (lead, ec-x0hhp, U1, U1a). The JSON of a snapshot, R2's answer or R6's
+`snapshot` frame whole, is at most `page` bytes. Its list keeps the newest messages that
+fit beside its other fields, and it may hold no message. Its other fields, with each
+number at its longest (16 bytes), the picks' texts empty and `goal` `null`, are 326 bytes
+(344 in R6's frame, with `"type":"snapshot"`); the picks' texts and a goal add to them,
+and have no bound in bytes of their own ("What is not proved here"). One message at its
+largest is 180,196 bytes, so a snapshot with one such message is 180,522 bytes, or 180,540
+as R6's frame. At the defaults that leaves 2,097,152 − 180,540 = 1,916,612 bytes for the
+picks' texts and the goal. The list is empty when the other fields and the newest
+message together pass `page`: with empty picks and no goal, that needs a `page` under
+180,540, near the relations' edge (they give `page` ≥ 180,246), or else a large pick or
+goal. The client then reads every message by R3, where one message always fits (section
+8, "Pages"). When the other fields alone pass
+`page` (a pick or a goal of megabytes), the host cannot give the snapshot: R2 answers
+`500 internal`, and R6 closes with `1011`, as for an event that the host cannot give
+(section 8, "The checks at start", S2). The log line gives the snapshot's size in bytes,
+and no text.
 
 ### An error
 
@@ -996,10 +1156,19 @@ the check's number and no part of the token:
 Then the route's chat must be in `chats` (lower case; else `404 no_chat`), and `Chats`
 must find it for `tenant` (else `404 no_chat`).
 
-The host checks the token at each request and at a socket's start. It ends a stream (R4,
-`close` with reason `token`) or a socket (`4401`) when the token's `exp` passes: a timer of
-the connection, at `exp`. A client then connects again with a new token, after its last
-number.
+The host checks the token at each request's start and at a socket's start (lead,
+ec-9p347, T6). A request with no stream (R1, R2, R3, R5) that started before its token's
+`exp` is answered after it, and a request that starts after it is refused: so a token
+serves past its `exp` by one request's own life only (lead, ec-uoo8x, T6a). That life is
+the request's deadline and the end of its work: by the sums for the common case, 95 s for
+an R5 at the defaults (section 3, "Admission", 9 and 10), and longer in the cases that
+section 2's accepted risks name, as for a place and a lock (section 2, "What the page
+promises, and what it sums"). The page gives no hard number for it. The timer at `exp` is
+for the connections with no end of their own, R4 and R6: the host ends a stream (R4,
+`close` with reason `token`) or a socket (`4401`) when the token's `exp` passes, by a
+timer of the connection, at `exp`. A client then connects
+again with a new token, after its last number. A socket never changes its token: a
+second `auth` closes it with `4400` (section 3, R6; T2).
 
 The host keeps no accounts and knows no persons (`docs/design.md`, "Messages in, events
 out" [Q19, Q33, Q39]): what it knows of who asks is the token's tenant and chats.
@@ -1153,11 +1322,11 @@ events, `text`, `body` and `entry` may rise, not fall ("The checks at start", S1
 | the read of a body | 10 s | `408 timeout`, and the connection closes |
 | a message's wait for its channel's lock | 10 s | `503 busy` with `retry-after: 1`; on a socket, an `error` frame; nothing is logged |
 | `hub`: the turn loop's hub of a loaded chat | 1,024 entries | the oldest entries are dropped; the listener reads the lost numbered events from the store (section 2, Load, step 3) |
-| `buffer`: a client's buffer | 4,096 entries or 8 MiB of JSON, the first reached | the host ends that client's stream (`slow`) or socket (`4408`) |
+| `buffer`: a client's buffer | 4,096 entries or 8 MiB of JSON, the first reached; the host's own frames to the client count in both (section 2, "The host's own frames"; lead, ec-9p347, T7) | the host ends that client's stream (`slow`) or socket (`4408`) |
 | `entry`: the JSON of one event or one piece that the host gives | 1 MiB; the host refuses to start with less than the largest whole event that the limits in use allow, or more than `buffer` in bytes ("The checks at start") | a numbered event is cut (`"cut": true`); a piece is dropped ("The bytes of one entry") |
-| `page`: a page of a read from the store | 1,000 events or 2 MiB of JSON after the fit, the first reached: a page is at most `page` bytes, since it closes before the entry that would pass it; the host refuses to start with less than `entry`, or more than `buffer` in bytes ("The checks at start") | the page ends; the next page is read after it ("Pages") |
-| room for a page in a first read's client's buffer | 30 s after the last page was given to it, or after it became a client: a rate of one page (2 MiB) in 30 s, about 70 KB/s (0.56 Mbit/s), asked of a client that catches up | the host ends that client (`slow`; `4408`); it keeps what it took and connects again from its number |
-| `reads`: first reads and reads of R5 at one time, for the host | 16 ("Admission", 11) | the next waits at most 30 s, then `503 busy` with `retry-after: 1`; `4503` |
+| `page`: a page of a read from the store; the JSON of a snapshot or of R3's answer | 1,000 events or 2 MiB of JSON after the fit, the first reached: a page is at most `page` bytes, since it closes before the entry that would pass it; a snapshot and R3's answer are at most `page` bytes too (lead, ec-x0hhp, U1); the host refuses to start with less than `entry`, or more than `buffer` in bytes ("The checks at start") | the page ends; the next page is read after it ("Pages"); a snapshot keeps its newest messages, and R3 ends before the message that would pass it |
+| room for a page in a first read's client's buffer, or for R6's snapshot (lead, ec-x0hhp, U2) | 30 s after the last page was given to it, or after it became a client: a rate of one page (2 MiB) in 30 s, about 70 KB/s (0.56 Mbit/s), asked of a client that catches up | the host ends that client (`slow`; `4408`); it keeps what it took and connects again from its number |
+| `reads`: first reads, reads of R5, and reads of messages (R2, R3, R6's snapshot) at one time, for the host | 16 ("Admission", 11; lead, ec-x0hhp, U3) | the next waits at most 30 s, then `503 busy` with `retry-after: 1`; `4503` |
 | `request`: the whole life of a request that holds a place | 30 s ("Admission", 10) | the host asks its work to stop; the place and the holder are free when it has ended, by the sum for the common case `request` + `store` (35 s) after the head, or `request` + 4 × `store` (50 s) for a load that is stopped or a log whose write failed (section 2, "Accepted risks"); then `503 busy` with `retry-after: 1`, or the connection closes when bytes were sent |
 | `lock`: the work under a channel's lock for a message in | 20 s (section 2, "The deadline of the work under the lock") | the host asks it to stop; the lock is free when it has ended, by the sum for the common case `lock` + `store` (25 s) after it was taken, or `lock` + 4 × `store` (40 s) for a load that is stopped or a log whose write failed (section 2, "Accepted risks"); `503 busy` with `retry-after: 1`; on a socket, an `error` frame (`busy`) |
 | `store`: one call of the store, a transaction as one call | 5 s, by the store's own timer (section 9, item 9) | the call fails with a typed fault; a write is rolled back, and nothing is published for it |
@@ -1176,16 +1345,19 @@ events, `text`, `body` and `entry` may rise, not fall ("The checks at start", S1
 | an idle loaded chat | 6 minutes with no work | it unloads (section 2) |
 
 **A slow client** (lead, ec-mxcl, decision 9). Each client has a buffer with the bound
-above. A give of the listener puts each event and piece into each client's buffer and
-never waits for one (section 2, "The give"): when a buffer is full, the host ends that
-client's stream or socket, and frees its buffer. The client connects again and reads from
-its last number. A client's own first read is the one give that waits: before each page
-it waits for room for a whole page in that client's buffer, with no place and no lock
-held, so a client that reads gets every event after its number on one connection. When
-its buffer has no room for a page 30 s after the last page was given to it, the host ends
-the client as `slow` (lead, ec-7bi64, G2; ec-12a32, M4): it keeps what it took, and
-connects again from its number. A client's memory is its buffer, and the count of clients
-is bounded.
+above. A give of the listener puts each event and piece into the buffer of each client
+that joined, and never waits for one (section 2, "The give"); the others read on by
+themselves (lead, ec-9p347, T8). When a buffer is full, the host ends that client's
+stream or socket, and frees its buffer. The host's own frames to a client go through the
+same buffer, with one queue and one writer for each client: a `said` or an `error` that
+finds no room ends the client as a give does (lead, ec-9p347, T7). The client connects
+again and reads from its last number. A client's own first read is the one give that
+waits: before each page it waits for room for a whole page in that client's buffer, with
+no place and no lock held, so a client that reads gets every event after its number on
+one connection. When its buffer has no room for a page 30 s after the last page was given
+to it, the host ends the client as `slow` (lead, ec-7bi64, G2; ec-12a32, M4): it keeps
+what it took, and connects again from its number. A client's memory is its buffer, and
+the count of clients is bounded.
 
 ### The bounds between the turn loop and a client
 
@@ -1288,12 +1460,42 @@ ec-12a32, P4).
 the entry that would take it past `page`, so no entry passes it, and its first entry
 always fits, since `entry` ≤ `page`. It also has at most 1,000 entries. This is the room
 that a first read waits for in its client's buffer before each page (section 2, "The
-give"), and the number that the check `page` ≤ `buffer` uses.
+give"), and R6's snapshot before its frame (section 2, "The host's own frames"; lead,
+ec-x0hhp, U2), and the number that the check `page` ≤ `buffer` uses.
 
-So the host holds, for reads: at most 16 pages of first reads and R5's reads at one time
-(`reads`, section 3, "Admission", 11), each at most `page` bytes after its fit and one
-call of the store before it; and, for each channel, one page of the listener's own reads
-(at a load, at an unload, after a loss), which the listener reads one at a time.
+**The messages of an answer** (lead, ec-x0hhp, U1). A snapshot (R2's answer, R6's
+`snapshot` frame) and R3's answer hold messages, not events, and their JSON is at most
+`page` bytes, as a page's is. A snapshot keeps the newest messages that fit, and may hold
+none (section 4, "The snapshot"; U1a). R3 gives the messages from `from` upward and closes
+before the message that would pass `page`. **One message always fits R3's answer**, from
+the page's own sums: one message at its largest is `F` + 6 × 30,000 = 180,196 bytes, and
+R3's answer with it is 15 + 180,196 = 180,211 bytes (`{"messages":[]}` is 15), which is
+less than `message` (180,246) ≤ `entry` ≤ `page` ("The checks at start"). A snapshot
+counts its other fields too, so near the limits' edge its list may be empty (U1a).
+
+**The sums of memory for reads** (lead, ec-9p347, T10). One read holds one page after its
+fit, at most `page` bytes, and one call of the store before its fit, at most 100 × the
+largest of the sums and C (above). At the defaults, with C at most 394,452 bytes, that is
+2,097,152 + 39,445,200 = 41,542,352 bytes (39.6 MiB) for one read. The host holds, for
+reads:
+
+- (a) **the listener's own reads** (at a load, at an unload, after a loss), which the
+  listener of a loaded chat reads one at a time: over the 200 loaded chats,
+  200 × 41,542,352 = 8,308,470,400 bytes (7.74 GiB);
+- (b) **the reads of `reads`**, first reads, R5's and the reads of messages (section 3,
+  "Admission", 11; lead, ec-x0hhp, U3): 16 × 41,542,352 = 664,677,632 bytes (634 MiB). A
+  read of messages holds, in its place, one call of the store before its cut, at most 200
+  messages (R2's `last` and R3's `to - from`; R6's snapshot reads 50), and its cut, at
+  most `page` bytes: 200 × 180,196 = 36,039,200 bytes, and 36,039,200 + 2,097,152 =
+  38,136,352 bytes at the defaults, beside a snapshot's other fields. That is less than
+  the 41,542,352 bytes of a read of events, so (b)'s number does not rise (U4);
+- (c) **the answers of R2, R3 and R5 that are held while they are written**: one page for
+  each request in flight, 256 × 2,097,152 = 536,870,912 bytes (512 MiB) (U4).
+
+(a) and (c) have no limit of their own: they are products of limits (the loaded chats,
+the requests in flight, `page`, and the largest entry), and the worst case needs every
+loaded chat to read events of the largest size at one time. No limit is added for them
+here ("What is not proved here").
 
 ### The checks at start
 
@@ -1365,11 +1567,15 @@ the events written under it.
   unload, after a loss) ends so each client that would get the event. Its log line names
   the event's number and its size in bytes, and no text of it. The chat's rows stay as
   they are. (S2)
-- A client that gets `internal` waits before it connects again, as after `busy`, and a
-  person sees the error. A new connection reads from the client's number and meets the
+- A client that gets `internal` shows the error to the person, and connects again by
+  itself at most one time in 30 s (section 3, "The order and the numbers", rule 3; lead,
+  ec-9p347, T11). A new connection reads from the client's number and meets the
   same event until the limits are set back, so the code is how the client and the
   operator of the deployment learn that the fault is the host's. The two entries
-  `internal` of R4 and `1011` of R6 are for this case only. (S2a)
+  `internal` of R4 and `1011` of R6 are for two cases only: this one, and a snapshot whose
+  other fields alone pass `page`, which R2 answers with `500 internal` and R6 closes with
+  `1011` (section 4, "The snapshot"; lead, ec-x0hhp, U1a). The client's rule 3 after
+  `internal` covers both. (S2a)
 
 ### What is not proved here
 
@@ -1417,6 +1623,10 @@ or a later bead does, as named.
   `program` and the sum of a turn's pieces under it.
 - **`Jwt.verify` refuses `alg: none` and an `alg` other than the key's**: the token's bead
   proves each with a case.
+- **The bytes of a chat's pick and goal** (lead, ec-x0hhp, U1a): the pick's four texts
+  and the goal have no bound in bytes of their own in the store, and a snapshot counts
+  them. No route of the host writes either: a host's chat gets its pick from the
+  backend's `makeChat` or R9's default pick, and no function of a host's chat sets a goal.
 - **Two processes of `everchat serve` on one file**: the refusal of a live launch holds per
   chat (`packages/sqlite/src/sqlite.ts:701-702`), but each process would take other chats.
   The local use runs one; the lease is the server plan's [Q22].
@@ -1426,6 +1636,9 @@ or a later bead does, as named.
   the channel's listener gives each piece to the buffers at once and waits for no client,
   so nothing of the host's adds a wait; the smoke test measures the time from the wire to
   a client.
+- **The memory of the reads under load** (lead, ec-9p347, T10): the server's measure of
+  memory under load says whether the listener's reads need a bound of their own ("Pages",
+  the sums of memory for reads).
 - **The one connection of a file** serializes the statements of all chats (ec-f7m3i Q1,
   item 2). Its cost with many chats at work is not measured.
 
@@ -1521,7 +1734,8 @@ For a later glossary bead. Elsewhere this page uses the glossary's words.
   not joined gets only its own first read's gives.
 - **join**: the step at the end of a client's first read, under the give lock, at which
   the client starts to get the gives of the listener and of the reads at a load, after a
-  loss and at an unload.
+  loss and at an unload; it needs the client's `given` at `last` or more and room in its
+  buffer for one entry of `entry` bytes.
 - **longest silence**: the longest time in which the host sends no byte to a client that
   waits, on any way (section 3, "Admission", 9); Bun's idle limit is at least twice it.
 - **fit**: the one function of the host that makes the JSON of an entry, measures it, and
@@ -1540,8 +1754,8 @@ For a later glossary bead. Elsewhere this page uses the glossary's words.
 - **hosted set**: the functions of a chat that needs no machine: `zoom`, `date` and
   `result`.
 - **sum for the common case**: a total of time that the page adds up from its limits (a
-  lock, a place, a stopped load, a longest silence); a design's number, not a promise
-  (section 2, "What the page promises, and what it sums").
+  lock, a place, a stopped load, a longest silence, a token's time past its `exp`); a
+  design's number, not a promise (section 2, "What the page promises, and what it sums").
 - **accepted risk**: a case that passes a sum or a rule of the page, which the lead keeps,
   given with its conditions, why it is rare, how it fails safe or is recovered, and what
   would fix it (section 2, "Accepted risks").
