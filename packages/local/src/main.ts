@@ -137,8 +137,8 @@ machine only (127.0.0.1).`
 // The program of the sandbox's worker thread. In the executable, every
 // module's address is the executable's own, and Bun finds an entrypoint of
 // the build by its path from the first entrypoint's directory. So worker.ts
-// must stay next to this file. (The library's own default finds the same
-// file in the executable today, but only because of that file's name.)
+// must stay next to this file. (The adopted default finds the same file in
+// the executable today, but only because of that file's name.)
 const WORKER = new URL("./worker.ts", import.meta.url)
 
 // The program but its interface, for one launch.

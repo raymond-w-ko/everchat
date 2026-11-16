@@ -6,7 +6,7 @@
 // domain.
 
 import { expect, test } from "bun:test"
-import { loadQuickJSWasm } from "@earendil-works/pi-codemode"
+import { loadQuickJSWasm } from "./pi/index.ts"
 import { Effect, Layer } from "effect"
 import { Functions } from "@everchat/core/functions"
 import { type Ran, Sandbox } from "@everchat/core/sandbox"

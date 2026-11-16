@@ -1,12 +1,13 @@
 // Inline
 // ======
 // The second engine of the sandbox (sandbox.ts): a QuickJS engine that is
-// compiled to WebAssembly, in the caller's own thread (the library
-// `pi-codemode`, `InlineCodemodeSandbox` of its entry `/portable`). It needs
-// no worker thread, no file and no built-in module of Node or Bun, so it
-// runs where threads do not exist: in tests now, and later on the server
-// side of a separate Worker (the Cloudflare build). The executable does not
-// use it; a local chat runs on the thread engine (thread.ts).
+// compiled to WebAssembly, in the caller's own thread
+// (`InlineCodemodeSandbox` of `pi/portable.ts`, adopted from `pi-codemode`).
+// It needs no worker thread, no file and no built-in module of Node or
+// Bun, so it runs where threads do not exist: in tests now, and later on
+// the server side of a separate Worker (the Cloudflare build). The
+// executable does not use it; a local chat runs on the thread engine
+// (thread.ts).
 //
 // For all that a caller sees, it keeps the thread engine's contract: the
 // result (what the program printed, then what it returned), a failed
@@ -35,13 +36,13 @@
 //   reaches a program while it waits for a function.
 // - Memory: `memory`, as on the thread engine.
 //
-// The QuickJS file: the library needs it compiled, as a WebAssembly module
-// (`wasm`), and this engine cannot read a file. The caller gives it: from
-// source on Bun or Node, `loadQuickJSWasm()` of the library's main entry
-// (which reads the file of `quickjs-wasi` from `node_modules`); on
+// The QuickJS file: the adopted code needs it compiled, as a WebAssembly
+// module (`wasm`), and this engine cannot read a file. The caller gives it:
+// from source on Bun or Node, `loadQuickJSWasm()` of `pi/index.ts` (which
+// reads the file of `quickjs-wasi` from `node_modules`); on
 // Cloudflare, the module that Wrangler compiles.
 
-import { type CodemodeWasmModule, DEFAULT_INTERRUPT_BUDGET, InlineCodemodeSandbox } from "@earendil-works/pi-codemode/portable"
+import { type CodemodeWasmModule, DEFAULT_INTERRUPT_BUDGET, InlineCodemodeSandbox } from "./pi/portable.ts"
 import { Effect, Layer } from "effect"
 import { Functions } from "@everchat/core/functions"
 import { MEMORY, Sandbox } from "@everchat/core/sandbox"
@@ -59,7 +60,7 @@ export interface Options {
 // The numeric fields of `Options`: the type check holds this list to them.
 const NUMBERS: Fields<Options> = { memory: true, polls: true }
 
-// The default count of polls: the library's. A count of the engine's
+// The default count of polls: the adopted code's. A count of the engine's
 // interrupt checks, not a time (the header says why).
 export const POLLS = DEFAULT_INTERRUPT_BUDGET
 
@@ -75,8 +76,8 @@ export const inlineLayer = (options: Options) => {
       const polls = given.polls ?? POLLS
       const wasm = options.wasm
 
-      // The library's message for the polls names its option; the model
-      // reads this one.
+      // The adopted code's message for the polls names its option; the
+      // model reads this one.
       const spent = "The program was stopped: it computed for too long in all (" + polls +
         " polls of the engine). Do less in one program."
 

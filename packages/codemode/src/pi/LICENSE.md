@@ -1,0 +1,53 @@
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Upstream
+
+The files of this directory are code of the library `@earendil-works/pi-codemode` 1.5.2, under the MIT license above: https://github.com/earendil-works/pi, directory `packages/codemode`, tag `v1.5.2`, commit `b4afdddf44e059c67ccf5097e5317d913521b470`. Each file keeps its path under upstream's `packages/codemode/src`: `index.ts` is `packages/codemode/src/index.ts`, `runtime/vm.ts` is `packages/codemode/src/runtime/vm.ts`, and so on for `portable.ts`, `source.ts`, `types.ts`, `wasm.ts` and `runtime/{execution,host,inline,prelude-source,protocol,remote,worker}.ts`. This `LICENSE.md` is upstream's `LICENSE` (the text above).
+
+The code was written for `quickjs-wasi` 3.6.2. `runtime/vm.ts` uses that library's internal exports, so the version in `packages/codemode/package.json` is exactly this one, and a test (`packages/codemode/src/sandbox.test.ts`) checks that the manifest, the loaded `quickjs-wasi` and this line agree.
+
+Left out of this directory:
+
+- `declarations.ts` and `identifier.ts`, and the types of a tool, of a result, and `CodemodeDuring` (upstream `types.ts`, its lines 3 to 109 and 200 to 204): the core's part, in `packages/core/src/codemode` (its own `LICENSE.md` lists them).
+- `cloudflare.ts` and `cloudflare-modules.d.ts`: they import `cloudflare:workers`, which no package of this tree may import until the Cloudflare package exists.
+- Upstream's tests (`packages/codemode/test`).
+
+## Local changes
+
+- `index.ts`, `portable.ts`, `runtime/execution.ts`: the imports of `./declarations.ts`, `./identifier.ts` and `../identifier.ts` name `@everchat/core/declarations` (the core's part, which exports `toCodemodeIdentifier` too). Nothing else of `index.ts` and `portable.ts` changes.
+- `types.ts`: upstream's lines 3 to 110 (the tool and result types and the empty line after them) and 200 to 205 (`CodemodeDuring` and the empty line after it) are not here. In their place, after the import of `./wasm.ts`: a type import of `CodemodeResult` and `CodemodeTool` from `@everchat/core/codemode`, and a type re-export of the eleven types that the core holds, so that `index.ts` and `portable.ts` export them from `./types.ts` as upstream does.
+- `runtime/execution.ts`: `parts[0]!` (upstream's `parts[0]`, at its lines 157 and 161), for this project's `noUncheckedIndexedAccess`; and `type Control = { [K in "onStarted" | "onCall" | "onIdle"]: CodemodeRunOptions[K] };` (upstream's `Pick<CodemodeRunOptions, "onStarted" | "onCall" | "onIdle">`, its line 170), for this project's `exactOptionalPropertyTypes`. The JavaScript is the same.
+- `source.ts`: `lines[0]!` (upstream's `lines[0]`, its line 117), for `noUncheckedIndexedAccess`. The JavaScript is the same.
+- The other files: no change.
+
+## Upstream's later changes
+
+A person, not a seat of the factory (a fetch is a remote act), sees what upstream changed in these files since the commit above, in a clone of upstream (the owner's is `~/src/pi`, with the remote `upstream`):
+
+```
+git -C ~/src/pi fetch upstream
+git -C ~/src/pi log --oneline b4afdddf44e059c67ccf5097e5317d913521b470..upstream/main -- packages/codemode/src packages/codemode/test
+git -C ~/src/pi diff b4afdddf44e059c67ccf5097e5317d913521b470 upstream/main -- packages/codemode/src packages/codemode/test
+```
+
+Or, with no clone: `gh api repos/earendil-works/pi/compare/b4afdddf44e059c67ccf5097e5317d913521b470...main --jq '.files[].filename' | grep '^packages/codemode/'`.

@@ -20,3 +20,10 @@ interface TextDecoder {
   decode(input?: Uint8Array): string
 }
 declare var TextDecoder: { new(label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean }): TextDecoder }
+
+// The context of a tool in codemode/types.ts (the adopted code of
+// pi-codemode) holds one: Bun, Node and workerd have it.
+interface AbortSignal {
+  readonly aborted: boolean
+  readonly reason: unknown
+}

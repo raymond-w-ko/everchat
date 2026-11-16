@@ -19,7 +19,6 @@
       "name": "@everchat/codemode",
       "version": "0.1.0",
       "dependencies": {
-        "@earendil-works/pi-codemode": "1.5.2",
         "@everchat/core": "workspace:*",
         "effect": "4.1.2",
         "quickjs-wasi": "3.6.2",
@@ -33,7 +32,6 @@
       "name": "@everchat/core",
       "version": "0.1.0",
       "dependencies": {
-        "@earendil-works/pi-codemode": "1.5.2",
         "effect": "4.1.2",
       },
       "devDependencies": {
@@ -46,7 +44,6 @@
       "name": "@everchat/local",
       "version": "0.1.0",
       "dependencies": {
-        "@earendil-works/pi-codemode": "1.5.2",
         "@earendil-works/pi-tui": "1.5.2",
         "@effect/platform-bun": "4.1.2",
         "@everchat/codemode": "workspace:*",
@@ -86,8 +83,6 @@
     },
   },
   "packages": {
-    "@earendil-works/pi-codemode": ["@earendil-works/pi-codemode@1.5.2", "", { "dependencies": { "quickjs-wasi": "3.6.2" } }, "sha512-HoZQ40a9RgdZ1VgmrX6x8887cNXedaRJT1l+Ie5YRIMK4gY7v0EpsiNqf6dmixrKylZlTgUSyR+vE8xhjfkr+w=="],
-
     "@earendil-works/pi-tui": ["@earendil-works/pi-tui@1.5.2", "", { "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.11", "marked-cjk-friendly": "0.1.2" } }, "sha512-WK8ih+c88GWizaB79y7Pq3PV7ySf5VI1pZ1i/6aBBjDOAiG2EE3ojKjl+pxQqLfyQGnzHYu4VfakOBJgumuoyw=="],
 
     "@effect/platform-bun": ["@effect/platform-bun@4.1.2", "", { "dependencies": { "@effect/platform-node-shared": "4.1.2" }, "peerDependencies": { "effect": "^4.1.2" } }, "sha512-waEAa84CITqjctgw9VdhlL9PyXRHICG3KAWTFRDPUE2XL/pfMPhO7V9oFdfx22dbAhhUzV+MHs0d9hnmy/DQ7w=="],

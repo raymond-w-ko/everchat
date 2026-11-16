@@ -7,7 +7,9 @@
     ".": "./src/turn.ts",
     "./ask": "./src/ask.ts",
     "./cache": "./src/cache.ts",
+    "./codemode": "./src/codemode/types.ts",
     "./compactor": "./src/compactor.ts",
+    "./declarations": "./src/codemode/declarations.ts",
     "./diagnostics": "./src/diagnostics.ts",
     "./follow": "./src/follow.ts",
     "./functions": "./src/functions.ts",
@@ -21,7 +23,6 @@
     "./turn": "./src/turn.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-codemode": "1.5.2",
     "effect": "4.1.2"
   },
   "devDependencies": {

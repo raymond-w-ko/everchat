@@ -100,7 +100,7 @@ export const BUILTINS: Builtins = {
   "@everchat/local": { src: "any", tests: "any" },
   "@everchat/openai": { src: [], tests: "any" },
   "@everchat/sqlite": { src: [], tests: "any" },
-  "@everchat/codemode": { src: [], tests: "any" }
+  "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
 }
 type Rule = "any" | ReadonlyArray<string>
 export type Builtins = Readonly<Record<string, { readonly src: Rule; readonly tests: Rule }>>

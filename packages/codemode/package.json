@@ -5,10 +5,10 @@
   "type": "module",
   "exports": {
     "./inline": "./src/inline.ts",
-    "./thread": "./src/thread.ts"
+    "./thread": "./src/thread.ts",
+    "./worker": "./src/pi/runtime/worker.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-codemode": "1.5.2",
     "@everchat/core": "workspace:*",
     "effect": "4.1.2",
     "quickjs-wasi": "3.6.2"

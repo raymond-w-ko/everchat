@@ -2,14 +2,16 @@
 // =======
 // The closed place where a program runs. A program is JavaScript that the
 // model wrote. It runs in a QuickJS engine that is compiled to WebAssembly,
-// in a worker thread of its own (the library `pi-codemode`). In there it
-// has no files, no network, no timers, and no way to start a process. It
-// can reach the world only through the functions (functions.ts), and each
-// function runs here, on EverChat's side.
+// in a worker thread of its own (the adopted code,
+// `packages/codemode/src/pi`). In there it has no files, no network, no
+// timers, and no way to start a process. It can reach the world only
+// through the functions (functions.ts), and each function runs here, on
+// EverChat's side.
 //
 // This file is the core's part: the tag, the limits, and how a result
 // reads. The engine of a local chat, a QuickJS engine in a worker thread,
-// is in thread.ts. What the engine adds to the library:
+// is in thread.ts. What the engine adds to the adopted code
+// (`packages/codemode/src/pi`):
 //
 // - A call row for each function: written when the function starts, and
 //   closed when it ends, with its whole result (docs/schema.html, `call`).
@@ -39,12 +41,13 @@
 //   program is stopped, its functions are stopped too. A function that was
 //   stopped is closed as cut.
 //
-// A stop is a request. The library asks the worker thread to end and does
-// not wait for it: a long built-in operation can keep the thread busy.
+// A stop is a request. The adopted code (`packages/codemode/src/pi`) asks
+// the worker thread to end and does not wait for it: a long built-in
+// operation can keep the thread busy.
 // The program's result does not wait for the thread, and the thread can
 // do nothing more, because every function call goes through the engine.
 
-import type { CodemodeResult } from "@earendil-works/pi-codemode/portable"
+import type { CodemodeResult } from "./codemode/types.ts"
 import { Context, type Effect } from "effect"
 import { capped, HARD } from "./limit.ts"
 

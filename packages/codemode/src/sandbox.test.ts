@@ -21,16 +21,20 @@ import { threadLayer } from "./thread.ts"
 
 type Fake = (args: ReadonlyArray<unknown>, caller: Caller) => Effect.Effect<unknown, FunctionError>
 
-test("the QuickJS file that the sandbox loads is the one that the library was built for", async () => {
+test("the QuickJS file that the sandbox loads is the one that the adopted code was written for", async () => {
   // The sandbox imports the QuickJS file itself, so that it is in the
-  // executable. The library names the version that it needs, and ours must
-  // be that one: another engine under the library's code can fail in ways
-  // that no other test here would show.
-  const library = await Bun.file(new URL("../node_modules/@earendil-works/pi-codemode/package.json", import.meta.url)).json()
+  // executable. The adopted code (pi/) was written for one version of
+  // `quickjs-wasi`, which its notice (pi/LICENSE.md) records, and it uses
+  // that library's internal exports (pi/runtime/vm.ts). So ours must be
+  // exactly that one: another engine under the adopted code can fail in
+  // ways that no other test here would show.
+  const notice = await Bun.file(new URL("./pi/LICENSE.md", import.meta.url)).text()
+  const written = /The code was written for `quickjs-wasi` (\d+\.\d+\.\d+)\./.exec(notice)?.[1]
   const ours = await Bun.file(new URL("../package.json", import.meta.url)).json()
   const loaded = await Bun.file(new URL("../node_modules/quickjs-wasi/package.json", import.meta.url)).json()
-  expect(ours.dependencies["quickjs-wasi"]).toBe(library.dependencies["quickjs-wasi"])
-  expect(loaded.version).toBe(library.dependencies["quickjs-wasi"])
+  expect(written).toBe("3.6.2")
+  expect(ours.dependencies["quickjs-wasi"]).toBe(written)
+  expect(loaded.version).toBe(written)
 })
 
 // Fake functions. `seen` holds what each call got.

@@ -20,7 +20,7 @@
 // The head is text that the program owns, so it is part of the executable.
 // The person's own rules (a file that the config names) go at its end.
 
-import { renderDeclarations } from "@earendil-works/pi-codemode/declarations"
+import { renderDeclarations } from "./codemode/declarations.ts"
 import { PROMPT as prompt } from "./prompt.ts"
 import type { Head } from "./request.ts"
 

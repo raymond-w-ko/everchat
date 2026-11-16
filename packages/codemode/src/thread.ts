@@ -2,22 +2,23 @@
 // ======
 // The engine of the sandbox (sandbox.ts) for a local chat: a QuickJS engine
 // that is compiled to WebAssembly, in a worker thread of its own for each
-// program (the library `pi-codemode`).
+// program (the code adopted from the library `pi-codemode`, in `pi/`).
 //
 // The two files of the engine
 //
-// The library looks for its worker thread's program and for the QuickJS
-// file in `node_modules`. The executable has no `node_modules`. So both are
-// parameters of the engine, in a way that holds in a run from source and in
-// the executable:
+// The adopted code looks for its worker thread's program next to its own
+// file (`pi/runtime/worker.ts`), and for the QuickJS file in `node_modules`.
+// The executable has neither: a thread starts only from an entrypoint of
+// the build, and it has no `node_modules`. So both are parameters of the
+// engine, in a way that holds in a run from source and in the executable:
 //
 // - QUICKJS: the QuickJS file, imported as a file. The build puts it into
 //   the executable, and the import gives its path in there. It is the
 //   default.
 // - `worker`: the program of the worker thread, which the caller gives.
 //   The executable's is local's worker.ts, the build's second entrypoint
-//   (worker.ts says why, and main.ts gives it). With none, the library's
-//   own worker runs, from `node_modules`.
+//   (worker.ts says why, and main.ts gives it). With none, the adopted
+//   code's own worker runs, `pi/runtime/worker.ts` (the tests use that).
 //
 // The limits of memory and compute are parameters too, with defaults.
 //
@@ -26,7 +27,7 @@
 
 /// <reference path="./assets.d.ts" />
 
-import { CodemodeSandbox, loadQuickJSWasm } from "@earendil-works/pi-codemode"
+import { CodemodeSandbox, loadQuickJSWasm } from "./pi/index.ts"
 import { Effect, Layer } from "effect"
 import QUICKJS from "quickjs-wasi/quickjs.wasm" with { type: "file" }
 import { Functions } from "@everchat/core/functions"
@@ -115,7 +116,7 @@ export const threadLayer = (options: Options = {}) => {
         const vm = new CodemodeSandbox({
           timeoutMs: Number.POSITIVE_INFINITY,
           memoryLimitBytes: memory,
-          // Read and compiled once: the library keeps it by its path.
+          // Read and compiled once: the adopted code keeps it by its path.
           wasm: loadQuickJSWasm(quickjs),
           ...(worker === undefined ? {} : { workerUrl: worker }),
           globals: calls.names.map((name) => ({
@@ -136,10 +137,10 @@ export const threadLayer = (options: Options = {}) => {
           signal.addEventListener("abort", () => controller.abort(new Error("The program was stopped.")), { once: true })
           // The clock counts the boot of the worker too: `vm.execute` starts
           // a new worker and loads QuickJS, and on a loaded host that can
-          // take most of the limit. The library's `execute` gives no point
-          // after the boot; its `start` does (`onStarted`), but only in its
-          // deterministic mode, which changes what a program sees. That is
-          // the draft ec-q2nbc.
+          // take most of the limit. The adopted code's `execute` gives no
+          // point after the boot; its `start` does (`onStarted`), but only
+          // in its deterministic mode, which changes what a program sees.
+          // That is the draft ec-q2nbc.
           arm()
           return vm.execute(program, { signal: controller.signal })
         }).pipe(

@@ -6,7 +6,7 @@
 // imports it, and neither engine imports the other. It imports no built-in
 // module, so the inline engine still runs where none exists.
 
-import type { CodemodeResult } from "@earendil-works/pi-codemode/portable"
+import type { CodemodeResult } from "./pi/portable.ts"
 import { Effect, FiberSet } from "effect"
 import { FunctionError, Functions } from "@everchat/core/functions"
 import { type Ran, render, STOPPED } from "@everchat/core/sandbox"

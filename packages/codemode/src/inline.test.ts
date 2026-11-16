@@ -5,7 +5,7 @@
 // (sandbox.test.ts) that are true of any engine are the model.
 
 import { expect, test } from "bun:test"
-import { loadQuickJSWasm } from "@earendil-works/pi-codemode"
+import { loadQuickJSWasm } from "./pi/index.ts"
 import { Effect, Exit, Fiber, Layer } from "effect"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
 import { type Caller, FunctionError, Functions } from "@everchat/core/functions"
