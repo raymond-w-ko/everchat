@@ -64,7 +64,7 @@
 // and a list of names that are all `type`: those load nothing at run time,
 // and the type checks see them. One exception: it also lists an import with
 // no `type` in a `declare module` block, which loads nothing (that limit
-// and the other one, reflection, are in AGENTS.md, "Be modular"). Each
+// and the other one, reflection, are in docs/boundaries.md). Each
 // rule is decided on that list, and on nothing else: no verdict depends on
 // text that this script finds itself.
 //
@@ -225,7 +225,9 @@ const isMap = (value: unknown): value is Record<string, unknown> => typeof value
 // - `.html`: the inspector's page, imported as text
 //   (packages/local/src/inspector.ts).
 // - `.txt`: a text file (the fixtures of graph.test.ts).
-const NOT_CODE = new Set([".html", ".txt"])
+// - `.md`: a Markdown file (a package's notes for its readers, at its root
+//   or under its sources).
+const NOT_CODE = new Set([".html", ".txt", ".md"])
 
 // The plain kinds of file, which are not source, matched exactly on a path's
 // end: `.d.ts` (which the type checks read), `.json` (a manifest, a type

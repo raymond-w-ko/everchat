@@ -2,7 +2,8 @@
 // =========
 // What a program can call. In code mode the model has one tool, and what
 // the old code gave it as separate tools (shell, read, write, edit, zoom)
-// are functions (AGENTS.md, "Code mode is the only primary tool").
+// are functions (packages/core/AGENTS.md, "Code mode is the only primary
+// tool").
 //
 // Each function has two parts:
 //

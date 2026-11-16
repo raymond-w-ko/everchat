@@ -7,8 +7,8 @@
 // The text is the old one (ref/src/prompt.txt), with a section for a
 // subagent task, the kind `asst`, and code mode in place of the list of
 // tools. Its bytes are part of the prompt cache's key: change it only on
-// purpose (AGENTS.md, "One system prompt for every kind of request"). In
-// this file, each \` stands for a backtick.
+// purpose (packages/core/AGENTS.md, "One system prompt for every kind of
+// request"). In this file, each \` stands for a backtick.
 
 export const PROMPT = `You are EverChat, an AI agent that works for one user in a single chat that never
 ends. Each request to you is a turn, a compaction, or a subagent task: the view

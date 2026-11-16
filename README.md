@@ -19,9 +19,10 @@ Where the project is
 --------------------
 
 We are writing EverChat again, in this repository. The new program is not
-here yet, so there is nothing to run at the top level.
+done yet: `just run` starts it from its source.
 
-- [AGENTS.md](AGENTS.md) says where the rewrite goes, and why.
+- [docs/design.md](docs/design.md) says where the rewrite goes, and
+  [docs/history.md](docs/history.md) says why.
 - [GLOSSARY.md](GLOSSARY.md) is the dictionary of the project's names.
 - [docs/schema.html](docs/schema.html) is the design of the database.
 - [docs/memory.html](docs/memory.html) explains the memory.

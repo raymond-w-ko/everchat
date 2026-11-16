@@ -1,9 +1,10 @@
 # Vendor API audit
 
-We keep our own vendor wires (AGENTS.md, "Our own vendor wires"). Before the
-rewrite, this file checks what the reference code (`src/anthropic.ts`,
-`src/openai.ts`, `src/askai.ts`, `src/agent.ts`, `src/memory.ts`) assumes
-about each vendor's API against the vendor's official documentation.
+We keep our own vendor wires (`packages/openai/AGENTS.md`, "Our own vendor
+wires"). Before the rewrite, this file checks what the reference code
+(`src/anthropic.ts`, `src/openai.ts`, `src/askai.ts`, `src/agent.ts`,
+`src/memory.ts`) assumes about each vendor's API against the vendor's
+official documentation.
 
 Checked on 2026-11-10. Each finding has a verdict:
 

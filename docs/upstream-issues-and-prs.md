@@ -140,8 +140,8 @@ In priority order:
   before the system prompt in the request. So the two prefixes already differ.
 - Divergence from the design doc: `docs/references/optchat.md` (sections 4 and
   5, and mistake #6) says compactions must share the turns' system prompt to
-  share the cache. The code already made that claim false. Per AGENTS.md the
-  code is canonical, so we record the divergence and the reason.
+  share the cache. The code already made that claim false. Per `docs/history.md`
+  the code is canonical, so we record the divergence and the reason.
 - Change: new `src/compact.txt`; `src/prompt.txt` (-43); `src/server.ts`
   (`share(chat, prompt = MASTER)`, and `Memory.load` gets the compaction
   prompt); `src/tools.ts` (a `COMPACT` export); `src/memory.ts` (comments);

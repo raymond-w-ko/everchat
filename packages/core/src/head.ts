@@ -2,8 +2,8 @@
 // ====
 // The part of a request before the messages: the system prompt and the tool
 // list. Turns, compactions and subagents all send the same head, so that
-// they share one cache prefix (AGENTS.md, "One system prompt for every kind
-// of request").
+// they share one cache prefix (packages/core/AGENTS.md, "One system prompt
+// for every kind of request").
 //
 // The system prompt (prompt.ts) is the old one (ref/src/prompt.txt), with a
 // section for a subagent task (the old `SUB` text in ref/src/tools.ts), the

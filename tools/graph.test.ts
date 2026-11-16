@@ -626,7 +626,7 @@ test("a file that no rule can read is a fault at its line 1: a source whose real
   // A .mts and a .js file of a package, which nothing imports.
   const kinds = workspace({ "packages/core/src/z.mts": `import "node:fs"\n`, "packages/local/src/y.js": `export const y = 1\n` })
   expect(run(kinds)).toEqual([UNCHECKED("packages/core/src/z.mts"), UNCHECKED("packages/local/src/y.js")])
-  // The kinds on the list: .ts, .d.ts, .json, .html and .txt. A file under
+  // The kinds on the list: .ts, .d.ts, .json, .html, .txt and .md. A file under
   // node_modules is no package's own.
   const good = workspace({
     "packages/core/src/c.d.ts": `export declare const c: number\n`,
@@ -670,6 +670,28 @@ test("a file that is no checked member is of one plain kind by its name and by i
     "packages/core/src/notes.txt": `notes\n`
   }, { "packages/core/src/e.d.ts": "c.d.ts", "packages/core/src/more.json": "data.json" })
   expect(run(good)).toEqual([])
+})
+
+test("a Markdown file is no code, as a text file is: under a package, at its root and under its sources, it passes, and an import of one is a leaf", () => {
+  // At a package's root and under its sources, by its own name.
+  const notes = {
+    "packages/core/AGENTS.md": `# core\n`,
+    "packages/core/src/AGENTS.md": `# src\n`,
+    "packages/local/src/notes.md": `notes\n`
+  }
+  expect(run(workspace(notes))).toEqual([])
+  // An import of one that exists resolves to itself, imports nothing, and
+  // is no fault, under forbid and under only, as a text file's.
+  const only: Tables = { ...FIXTURE, budgets: [{ package: "@everchat/local", from: ["./x"], only: ["packages/core/src/"] }] }
+  const imported = { [B]: `import notes from "./notes.md" with { type: "text" }\nexport const b = notes\n`, "packages/core/src/notes.md": `notes\n` }
+  expect(run(workspace(imported))).toEqual([])
+  expect(run(workspace(imported), only)).toEqual([])
+  // A link of the kind to a file of a kind off the list: the real path
+  // decides, and the file is told once.
+  expect(run(workspace({ "packages/core/src/z.bin": `x\n` }, { "packages/core/src/z.md": "z.bin" }))).toEqual([UNCHECKED("packages/core/src/z.bin")])
+  // A link of another plain kind to one: the kinds differ.
+  const N = "packages/local/src/notes.md"
+  expect(run(workspace(notes, { "packages/core/src/x.json": "../../local/src/notes.md" }))).toEqual([UNCHECKED(N, "packages/core/src/x.json")])
 })
 
 test("the rule at line 1 judges every file found under a package, by a link into another package too", () => {

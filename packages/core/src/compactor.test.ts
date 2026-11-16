@@ -49,8 +49,8 @@ test("the head names the three kinds of request, has the one tool, and ends with
 test("the head's bytes are the ones that the prompt cache was written for", () => {
   // A change of the prompt, of a declaration or of their order changes
   // every request's prefix, and misses the vendor's cache once for every
-  // chat (AGENTS.md, "One system prompt for every kind of request"). Change
-  // this hash only on purpose.
+  // chat (packages/core/AGENTS.md, "One system prompt for every kind of
+  // request"). Change this hash only on purpose.
   const hash = createHash("sha256").update(JSON.stringify(head(DECLARATIONS))).digest("hex")
   assert.equal(hash, "315565fca459411a20a7aec74f3162b5ee0de974035c0cd79510b256554e7b73")
 })
