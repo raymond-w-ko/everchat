@@ -39,6 +39,13 @@
 //   The boot and the prelude take about 3 polls. The local use sets none;
 //   a hosted deployment sets it after a measure there.
 //
+// Neither bound stops work in a native while a function is at work: the
+// compute limit's clock is stopped then, and the count does not see work
+// between two polls. A review's probe, `slow(25000); for (;;)
+// 'x'.repeat(1e5)` with `{ polls: 1000 }`, ran for 85 s. The one bound in
+// time then is the deadline of a program, which a hosted deployment will
+// have (packages/core/src/sandbox.ts; not built yet).
+//
 // The call rows of the functions and the result are calls.ts's code, which
 // both engines use.
 
@@ -60,8 +67,10 @@ export interface Options {
   // The compute budget: the count of the engine's interrupt polls over the
   // whole program, also while a function is at work; past it the program
   // is stopped. A count, not a time, as on the inline engine (inline.ts
-  // says what it bounds). None when not given: the worker then counts
-  // nothing. The local use sets none; a hosted deployment sets it.
+  // says what it bounds): work in a native between two polls is not
+  // counted, while a function is at work too (the head says what bounds
+  // it then). None when not given: the worker then counts nothing. The
+  // local use sets none; a hosted deployment sets it.
   readonly polls?: number | undefined
   readonly worker?: URL | undefined // the program of the worker thread
   readonly quickjs?: string | undefined // the path of the QuickJS file

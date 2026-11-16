@@ -388,6 +388,13 @@ test("the point after the boot comes once, after the prelude: a VM whose prelude
   expect(await run(32 * 1024 * 1024)).toEqual({ ok: true, started: 1 })
 }, 60_000)
 
+test("the point after the boot comes before the program is compiled: a program with a syntax error gives it once, and fails", async () => {
+  let started = 0
+  const result = await new CodemodeSandbox({ timeoutMs: 30_000, wasm: loadQuickJSWasm() }).execute("return (", { onStarted: () => void started++ })
+  expect(started).toBe(1)
+  expect(result).toMatchObject({ ok: false, error: { kind: "script", name: "SyntaxError" } })
+}, 60_000)
+
 // A worker program that never runs the adopted worker, so no `started`
 // comes, and that beats: it appends one byte to a file every 50 ms while
 // its thread lives. The file is in the worker's own directory, under the

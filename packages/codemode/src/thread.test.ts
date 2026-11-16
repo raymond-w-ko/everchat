@@ -1,7 +1,8 @@
 // The four run cases (tests/cases.ts) on the thread engine (thread.ts): a
 // QuickJS engine in a worker thread of its own for each program. Then this
-// engine's own cases of its compute budget, the count of polls (the option
-// `polls`).
+// engine's own cases of its two bounds of compute: its compute budget, the
+// count of polls (the option `polls`), and its compute limit, which is not
+// armed while a function is still at work (the option `compute`).
 
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
@@ -88,6 +89,41 @@ test("thread: a program that waits for a slow function and then computes little 
   expect({ output: got.output, failed: got.failed }).toEqual({ output: "slept 499500", failed: false })
   expect(got.ms).toBeGreaterThanOrEqual(3000)
 }, 30_000)
+
+// The least count of polls at which `ran` runs to its end: a count past
+// the polls that it takes, doubled from 8, then halved down to the edge.
+// Found in the case, so that it holds when the boot's cost changes.
+const least = async (ran: (polls: number) => Promise<Ran>): Promise<number> => {
+  let high = 8
+  while ((await ran(high)).failed) high *= 2
+  let low = 1
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2)
+    if ((await ran(mid)).failed) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+test("thread: a program is never stopped before its count: at its least count it runs, and at one less it is stopped with that number", async () => {
+  // About 20 polls of the loop and 4 of the boot and the prelude.
+  const program = "let n = 0\nfor (let i = 0; i < 100000; i++) n += i\nreturn n"
+  const thread = await least((polls) => run(program, { polls }))
+  // The inline engine counts the polls of the same engine by its own code
+  // (pi/runtime/inline.ts), not the worker's: the two least counts agree,
+  // so the worker stops a program at its count, not one poll before.
+  const wasm = loadQuickJSWasm()
+  const inline = await least(async (polls) => (await runs(inlineLayer({ wasm, polls }), [program]))[0]!)
+  expect(thread).toBeGreaterThan(4)
+  expect(thread).toBe(inline)
+  const at = await run(program, { polls: thread })
+  expect({ output: at.output, failed: at.failed }).toEqual({ output: "4999950000", failed: false })
+  const below = await run(program, { polls: thread - 1 })
+  expect({ output: below.output, failed: below.failed }).toEqual({
+    output: "The program was stopped: it computed for too long in all (" + (thread - 1) + " polls of the engine). Do less in one program.",
+    failed: true
+  })
+}, 60_000)
 
 // Twenty stretches of about 200 polls each, with a function waited for
 // between two of them: about 4,000 polls in all, and each stretch far

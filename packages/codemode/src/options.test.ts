@@ -174,8 +174,10 @@ for (const engine of engines) {
 // compute budget is the count, `polls`). It is refused as every name that
 // is no option is: the type check refuses it, and a layer given it anyway
 // does not read it, so it bounds nothing. A program that computes for 600
-// ms after its start, which a budget of 250 ms stopped, runs to its end, as
-// with a name that never was an option.
+// ms after its start, which a budget of 250 ms stopped, and then for about
+// 1,000 polls, which a count of 250 stops, runs to its end, as with a name
+// that never was an option: `budget` is read neither as a time nor as a
+// count.
 test("thread: { budget: 5000 } is no option: the type check refuses it, and the engine does not read it", async () => {
   // @ts-expect-error `budget` is no option of the thread engine.
   expect(thrown(() => threadLayer({ budget: 5000 }))).toBeUndefined()
@@ -183,7 +185,7 @@ test("thread: { budget: 5000 } is no option: the type check refuses it, and the 
   expect(thrown(() => threadLayer({ nine: 5000 }))).toBeUndefined()
   // Bad values are not checked either: the engine reads no such field.
   expect(thrown(() => threadLayer({ budget: -1 } as ThreadOptions))).toBeUndefined()
-  const program = "const end = Date.now() + 600; while (Date.now() < end) {}\nreturn 'done'"
+  const program = "const end = Date.now() + 600; while (Date.now() < end) {}\nfor (let i = 0; i < 5_000_000; i++) {}\nreturn 'done'"
   for (const given of [{ budget: 250 }, { nine: 250 }]) {
     const [got] = await runs(threadLayer(given as ThreadOptions), [program])
     expect(got).toEqual({ output: "done", failed: false })

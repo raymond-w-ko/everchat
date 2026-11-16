@@ -238,9 +238,9 @@ test("inline: the polls stop a program that loops, with a message that names the
 })
 
 test("inline: the polls count over the whole program, also while a function is at work", async () => {
-  // The thread engine's budget does not count this case (sandbox.test.ts,
-  // "the known limit"); this engine's polls do, since the engine polls
-  // while a program computes.
+  // The thread engine's count counts this case too (sandbox.test.ts, "the
+  // count stops a program that computes while a function is at work"):
+  // each engine polls while a program computes.
   const file = newFile()
   const fake = fakes()
   await withSandbox(file, fake, (run) =>
