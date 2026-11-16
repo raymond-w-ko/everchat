@@ -1544,13 +1544,18 @@ test("the limit store: when the lock is free again, the next call of the same st
     const failed = yield* timedError(store.setGoal("mine"))
     other.run("rollback")
     other.close()
-    const write = yield* timedValue(store.setGoal("next"))
-    const transaction = yield* timedValue(store.transaction(store.append([{ kind: "user", text: "next" }])))
-    const snapshot = yield* timedValue(store.snapshot(store.chat))
-    return { failed, times: [write.ms, transaction.ms, snapshot.ms], goal: snapshot.value.goal, count: yield* store.count }
+    yield* store.setGoal("next")
+    yield* store.transaction(store.append([{ kind: "user", text: "next" }]))
+    const snapshot = yield* store.snapshot(store.chat)
+    return { failed, goal: snapshot.goal, count: yield* store.count }
   }).pipe(Effect.provide(limited(file))))
   waitedLimit(got.failed, "setGoal")
-  for (const ms of got.times) expect(ms).toBeLessThan(LIMIT)
+  // Each of the three calls waited for no lock, and that is proved with no
+  // clock: the lock is free before the first, and no other connection has
+  // the file open, so a wait could end only at store, with StoreError, and
+  // the run would fail. The write and the transaction ran (the goal, the
+  // count). No bound of time is put on them: a write's time is the disk's,
+  // and on a loaded machine that is not short.
   expect(got.goal).toBe("next")
   expect(got.count).toBe(1)
 })
@@ -1617,17 +1622,23 @@ test("the limit store: a commit waits for no reader: while another connection ho
     const reader = new Sqlite(file, { readonly: true })
     reader.run("begin")
     const before = reader.query("select goal from everchat_chat").all()
-    const write = yield* timedValue(store.transaction(Effect.gen(function*() {
+    yield* store.transaction(Effect.gen(function*() {
       yield* store.setGoal("written")
       yield* store.append([{ kind: "user", text: "written" }])
-    })))
+    }))
     const during = reader.query("select goal from everchat_chat").all()
     reader.run("commit")
     const after = reader.query("select goal from everchat_chat").all()
     reader.close()
-    return { before, write: write.ms, during, after }
+    return { before, during, after }
   }).pipe(Effect.provide(limited(file))))
-  expect(got.write).toBeLessThan(LIMIT)
+  // The commit waited for no reader, and that is proved with no clock: the
+  // reader holds its read until the write has returned, and SQLite's wait
+  // holds the test's thread, so a wait could end only at store, with
+  // StoreError, and the run would fail. The reader kept its state while the
+  // write committed (`during`), and sees the write after its read (`after`).
+  // No bound of time is put on the write: its time is the disk's, and on a
+  // loaded machine that is not short.
   expect(got.before).toEqual([{ goal: null }])
   expect(got.during).toEqual([{ goal: null }])
   expect(got.after).toEqual([{ goal: "written" }])
@@ -1946,11 +1957,13 @@ test("the limit store: the first open of a new file, whose change to WAL waits f
   waitedLimit(got.value, "open")
   noWait(first(got.ran, BEGIN))
   expect(got.ran.filter((statement) => statement.sql.startsWith("create ")).length).toBeGreaterThan(0)
-  // The commit writes the whole schema, so its time is the disk's: it
-  // passes, and no other connection has the file open yet, so it has
-  // nothing to wait for.
+  // The commit waited for no lock, and that is proved with no clock: no
+  // other connection has the file open until the reader starts, in the hook
+  // after the commit (`reader` is defined only if the commit passed), so a
+  // wait could end only at store and fail the commit; and the commit
+  // passed. The commit writes the whole schema, so its time is the disk's
+  // (410 ms seen at a load of 24): no bound of time is put on it.
   expect(first(got.ran, COMMIT).ok).toBe(true)
-  expect(first(got.ran, COMMIT).ms).toBeLessThan(LIMIT)
   waitedAndFailed(first(got.ran, WAL))
   // What the failed open left: the schema and the mark, committed by the
   // check, in the journal mode of a new file; no row of a launch or a chat.
