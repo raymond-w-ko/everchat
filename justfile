@@ -12,7 +12,10 @@ test *args:
 # packages openai, sqlite, codemode and local, their tests too, with the Bun
 # types; the tools, but tools/golden.ts, with the Bun types
 # (tools/tsconfig.json). Then the boundaries of the packages, which the types
-# do not see: their imports and their manifests (tools/graph.ts).
+# do not see: their imports and their manifests (tools/graph.ts). Last, that
+# no file of the tree holds a word of the owner's list, which lives outside
+# the repository; with no list on this machine it checks nothing
+# (tools/words.ts).
 check:
     bunx tsc --noEmit -p packages/core
     bunx tsc --noEmit -p packages/core/tsconfig.test.json
@@ -22,6 +25,13 @@ check:
     bunx tsc --noEmit -p packages/local
     bunx tsc --noEmit -p tools
     bun tools/graph.ts
+    bun tools/words.ts
+
+# Turn on the commit hook (tools/hooks/commit-msg) in this clone: no commit
+# message holds a word of the owner's list. Git does not carry the setting to
+# another clone, so each clone runs this once.
+hooks:
+    git config core.hooksPath tools/hooks
 
 # Run EverChat from its source, in this terminal.
 run *args:

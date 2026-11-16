@@ -1,0 +1,19 @@
+#!/bin/sh
+# The commit hook: no commit message holds a word of the owner's list
+# (tools/words.ts). `just hooks` turns it on in a clone. It runs the check on
+# the message file, its first argument, from the root of the checkout that
+# holds this hook, and ends with the check's code.
+case $1 in
+  /*) message=$1 ;;
+  *) message=$PWD/$1 ;;
+esac
+case $0 in
+  */*) here=${0%/*} ;;
+  *) here=. ;;
+esac
+cd "$here/../.." || exit 1
+if ! command -v bun >/dev/null 2>&1; then
+  echo "commit-msg: bun is not found, so the message is not checked for the words of the list" >&2
+  exit 1
+fi
+bun tools/words.ts --message "$message"

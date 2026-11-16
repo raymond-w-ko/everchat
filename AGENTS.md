@@ -253,10 +253,19 @@ The same holds for the file `.env` in this repository, which holds the keys
 of other services for probes (`OPENROUTER_API_KEY`). Git ignores it. Bun
 reads it into the environment of every `bun` command.
 
-The repository is public. Name the inference gateway only as "the author's
-inference gateway". Do not name its program or its host, and do not say how
-it routes requests or signs in, in any file, test or commit message. The
-owner makes the edits of the passages about the gateway.
+The repository is public. In each file, test and commit message, name the
+inference gateway only as "the inference gateway" or "the author's inference
+gateway". Do not write the name of its program or of its host, and do not
+say how it routes requests or signs in. If you are about to write one of
+these, write "the inference gateway" instead. A seat can edit the passages
+about the gateway. This rule holds for each edit.
+
+A check holds the rule: `just check` fails when a file of the tree holds a
+word of the owner's list, in any letter case (`tools/words.ts`). The list is
+a file outside the repository, `$HOME/.config/ai/never.txt`; with no list
+the check says so and passes. Its message gives the place and never the
+word. A hook does the same for a commit message (`just hooks` turns it on in
+a clone).
 
 Signing in with a ChatGPT plan comes later. Its tokens will then go in the
 database, because the program writes them.
