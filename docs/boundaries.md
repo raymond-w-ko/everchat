@@ -44,7 +44,13 @@ What the two checks do not hold, each an accepted risk:
   conditions `node` and `default` (the `exports` of its `package.json`),
   which Node and Bun take, give a bundled validator, Ajv
   (`dist/shimsNode.mjs:1`), that makes each schema's check with `new
-  Function` (`dist/ajvProvider-BIwGVY6G.mjs:2594`). A file of
+  Function` (`dist/ajvProvider-BIwGVY6G.mjs:2594`). It also reaches
+  `pkce-challenge` 5.0.1 (`dist/index.mjs:2`, then
+  `dist/public-CvV4ZHkX.mjs:3`), whose `exports` have the conditions
+  `browser` and `node` only; its node file's fallback
+  `import("node:crypto")` (`dist/index.node.js:2-5` of `pkce-challenge`)
+  runs only when `globalThis.crypto` is missing, which Bun and current
+  Node have. A file of
   `packages/mcp/src` that imports the stdio entry passes the package's
   guard (`tsc -p packages/mcp`) and the graph, though the package may
   import no built-in module; only a runtime with no child process (a

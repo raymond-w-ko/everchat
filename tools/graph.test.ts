@@ -774,8 +774,8 @@ test("manifest: a file that is not a test imports no test's file, relative or by
 //   server: the core's row forbids both.
 // - openai, sqlite, codemode: the root `AGENTS.md`, "Be modular" (openai
 //   may import the core's requests; sqlite and codemode the core, so none
-//   reaches the others). Their lists of built-ins are graph.ts's own: the
-//   documents name none.
+//   reaches the others, the server and mcp among them). Their lists of
+//   built-ins are graph.ts's own: the documents name none.
 // - local: the root `AGENTS.md`, "Be modular": it may import every other
 //   package, and runs on Bun, so it has no row of BUDGETS and any built-in.
 test("the real tables are the documents' rows: each package's built-ins, for its files and its tests, and each budget", () => {
@@ -791,8 +791,8 @@ test("the real tables are the documents' rows: each package's built-ins, for its
   expect(BUDGETS).toEqual([
     { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
     { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/"] },
-    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/"] },
+    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
+    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/"] },
     { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
     { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/"] }
   ])
@@ -827,6 +827,30 @@ const stubs = (reach = false): Record<string, string> => {
     }
   }
   return files
+}
+
+// A tree with a stub of each real row's package, where `from` (a package
+// of the real rows) declares `to` in its manifest and its file imports it:
+// the real tables decide.
+const importing = (from: string, to: string) => {
+  const files = stubs()
+  const dir = "packages/" + from.split("/").pop()
+  const manifest = JSON.parse(files[dir + "/package.json"]!) as Record<string, unknown>
+  files[dir + "/package.json"] = JSON.stringify({ ...manifest, dependencies: { [to]: "workspace:*" } })
+  files[dir + "/src/stub.ts"] = `import { stub } from "${to}"\nexport const own = stub\n`
+  return { root: workspace(files), file: dir + "/src/stub.ts" }
+}
+
+for (const from of ["@everchat/sqlite", "@everchat/codemode"]) {
+  test(`budget: a source file of ${from} that imports @everchat/mcp or @everchat/server, declared in its manifest, is a fault of the real row`, () => {
+    const row = BUDGETS.find((one) => one.package === from)!
+    for (const to of ["@everchat/mcp", "@everchat/server"]) {
+      const { root, file } = importing(from, to)
+      expect(check(root)).toEqual([file + ":1: budget, " + from + " must not reach " + row.forbid!.join(", ") + ": " + to])
+    }
+    // The same tree with an import that the row allows has no fault.
+    expect(check(importing(from, "@everchat/core").root)).toEqual([])
+  })
 }
 
 test("the script prints the faults and fails, and passes a clean workspace", () => {

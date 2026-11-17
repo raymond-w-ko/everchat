@@ -126,8 +126,8 @@ export type Budget = {
 export const BUDGETS: ReadonlyArray<Budget> = [
   { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
   { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/"] },
-  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/"] },
+  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
+  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/"] },
   { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
   { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/"] }
 ]

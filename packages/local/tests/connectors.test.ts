@@ -9,10 +9,10 @@
 // Each child that a launch starts has a mark in its arguments (Bun's
 // `--conditions=<mark>`, a name of a condition of imports that nothing
 // uses), so the process list shows whether one is left (as in
-// connectors.test.ts of src). The servers that start a helper, or that hear
-// neither the end of their input nor SIGTERM, are scripts of the test's own
-// directory. The SDK starts each program twice for a load (its probe of the
-// version runs on a process of its own).
+// connectors.test.ts of src). The servers that start a helper, that hear
+// neither the end of their input nor SIGTERM, or that relay the example,
+// are scripts of the test's own directory. The SDK starts each program
+// twice for a load (its probe of the version runs on a process of its own).
 
 import { afterAll, expect, test } from "bun:test"
 import { Effect } from "effect"
@@ -98,6 +98,48 @@ fs.writeFileSync(
   `process.on("SIGTERM", () => {})\nprocess.stdin.on("data", () => {})\nprocess.stdin.on("end", () => {})\nsetInterval(() => {}, 1 << 30)\n`
 )
 
+// A relay of the example: it writes its pid to `relay.pids` at its start,
+// runs the example as its child, and passes each line of the protocol on,
+// both ways, but a request of `tools/list`, which it drops. It hears
+// neither the end of its input nor SIGTERM. Unlike STUBBORN, it answers the
+// SDK's probe of the version and the handshake, so the client's own
+// transport starts, and its load fails only at the load's limit: the close
+// of that transport then takes the SDK's every step.
+const RELAY = path.join(dir, "relay.ts")
+const RELAYS = path.join(dir, "relay.pids")
+fs.writeFileSync(
+  RELAY,
+  `require("node:fs").appendFileSync(${JSON.stringify(RELAYS)}, process.pid + "\\n")
+process.on("SIGTERM", () => {})
+const child = Bun.spawn([process.execPath, ${JSON.stringify("--conditions=" + MARK)}, ${JSON.stringify(EXAMPLE)}], { stdin: "pipe", stdout: "pipe", stderr: "ignore" })
+;(async () => { for await (const chunk of child.stdout) process.stdout.write(chunk) })()
+let buffer = ""
+process.stdin.on("data", (data) => {
+  buffer += data.toString()
+  for (let at = buffer.indexOf("\\n"); at >= 0; at = buffer.indexOf("\\n")) {
+    const line = buffer.slice(0, at + 1)
+    buffer = buffer.slice(at + 1)
+    if (!line.includes('"tools/list"')) {
+      child.stdin.write(line)
+      child.stdin.flush()
+    }
+  }
+})
+process.stdin.on("end", () => {})
+setInterval(() => {}, 1 << 30)
+`
+)
+
+// Whether a process runs: one that has ended but that its parent has not
+// yet reaped (a zombie) does not.
+const alive = (pid: number) => {
+  try {
+    return !/\) [ZX] /.test(fs.readFileSync(`/proc/${pid}/stat`, "utf8"))
+  } catch {
+    return false
+  }
+}
+
 // The pids in a file of pids, or none.
 const pidsIn = (file: string): ReadonlyArray<number> =>
   fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter((one) => one !== "").map(Number) : []
@@ -108,6 +150,17 @@ const pidsIn = (file: string): ReadonlyArray<number> =>
 const left = async () => {
   for (let k = 0; k < 30 && marked().length > 0; k++) await Bun.sleep(10)
   return marked()
+}
+
+// Kills each marked process, and waits until none runs: a case that fails
+// leaves no child to the next one.
+const stopMarked = async () => {
+  for (const pid of marked()) {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {}
+  }
+  await left()
 }
 
 // The live processes of the wrapper (WRAPPER) among the marked ones.
@@ -250,8 +303,11 @@ test("a server that never answers beside the example: the launch has the example
   const took = performance.now() - started
   expect(exit._tag).toBe("Success")
   expect(exit._tag === "Success" ? exit.value.names : []).toEqual([...BUILT_INS, "example.add", "example.send"])
-  // The server hears neither the end of its input nor SIGTERM, so the SDK's
-  // close takes 4 s: the load does not wait for it (the launch's end does).
+  // The server never answers the SDK's probe of the version, which runs on
+  // a process of its own, so the client's own transport never starts and
+  // its close returns at once: this case does not reach the SDK's wait
+  // before SIGTERM and SIGKILL (with that wait put back in the load, it
+  // still passes). The relay's case below does.
   expect(took).toBeLessThan(2_000 + 3_000)
   const logged = rows<{ level: string; source: string; text: string }>(file, "select level, source, text from everchat_log where source = 'mcp'")
   expect(logged.length).toBe(1)
@@ -436,5 +492,68 @@ test("pipe mode: a signal during the load (SIGTERM, SIGHUP, SIGINT) leaves no pr
     } finally {
       proc.kill("SIGKILL")
     }
+  }
+}, 20_000)
+
+test("pipe mode with a relay of the example that drops tools/list and hears neither the end of its input nor SIGTERM: the load gives it up at its limit and does not wait for its close, so the relay still runs when the launch shows the message; after the exit no process of it is left", async () => {
+  fs.rmSync(RELAYS, { force: true })
+  const at = place()
+  fs.mkdirSync(at.home, { recursive: true })
+  fs.writeFileSync(path.join(at.home, "config.json"), configOf([stdio("relay", RELAY)]))
+  const proc = Bun.spawn([...PROGRAM, "--model", "gpt-test"], { cwd: at.work, env: env(at, fake().address), stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  try {
+    proc.stdin.write("hello\n")
+    proc.stdin.flush()
+    // What the launch shows first, the message, follows the load. The
+    // load gives the relay up at its limit and starts the SDK's close,
+    // which ends the relay's input, waits 2 s, sends SIGTERM, waits 2 s,
+    // and sends SIGKILL (`StdioClientTransport.close` in the installed
+    // @modelcontextprotocol/client 2.4.0, dist/stdio.mjs, its two waits of
+    // 2e3 ms). So the relay runs for 4 s after the load's end: the margin
+    // of this check. A load that waited for that close would end only
+    // after the SIGKILL, and show the message to a relay that is gone.
+    // The relay's process for the SDK's probe is gone by then: one runs.
+    const reader = proc.stdout.getReader()
+    const first = await reader.read()
+    const running = pidsIn(RELAYS).filter(alive)
+    expect(running.length).toBe(1)
+    proc.stdin.end()
+    const read = async () => {
+      let out = new TextDecoder().decode(first.value)
+      for (let got = await reader.read(); !got.done; got = await reader.read()) out += new TextDecoder().decode(got.value)
+      return out
+    }
+    const [out, err, code] = await Promise.all([read(), new Response(proc.stderr).text(), proc.exited])
+    expect({ out, err, code }).toEqual({ out: "› hello\n\nDone.\n", err: "", code: 0 })
+    expect(rows(at.file, "select level, text from everchat_log where source = 'mcp'")).toEqual([
+      { level: "warn", text: 'A function from outside is refused: server "relay": It did not load in 10000 ms.' }
+    ])
+    expect(await left()).toEqual([])
+    expect(pidsIn(RELAYS).filter(alive)).toEqual([])
+  } finally {
+    proc.kill("SIGKILL")
+    await proc.exited
+    await stopMarked()
+  }
+}, 40_000)
+
+test("pipe mode with a server named as a built-in function (shell): the load refuses each of its functions with its sentence, the launch goes on with the built-in functions, and the head of its turn is that of a chat with no server; no child is left", async () => {
+  const at = place()
+  fs.mkdirSync(at.home, { recursive: true })
+  fs.writeFileSync(path.join(at.home, "config.json"), configOf([stdio("shell", EXAMPLE)]))
+  try {
+    const ran = await run(at, fake().address, "hello\n")
+    expect(ran).toEqual({ out: "› hello\n\nDone.\n", err: "", code: 0 })
+    expect(rows(at.file, "select level, text from everchat_log where source = 'mcp' order by n")).toEqual([
+      { level: "warn", text: 'A function from outside is refused: server "shell", tool "add": Its namespace "shell" is the name of another function.' },
+      { level: "warn", text: 'A function from outside is refused: server "shell", tool "send": Its namespace "shell" is the name of another function.' }
+    ])
+    // The head of a chat with no server, as the core makes it.
+    const heads = turnHeads(at.file)
+    expect(heads.map((body) => JSON.parse(body))).toEqual([head(DECLARATIONS)])
+    expect(heads.map((body) => named(JSON.parse(body) as Head))).toEqual([BUILT_INS])
+    expect(marked()).toEqual([])
+  } finally {
+    await stopMarked()
   }
 }, 20_000)

@@ -217,6 +217,55 @@ test("the example over HTTP (--port 0, its address from its first line): the sam
   }
 })
 
+test("an HTTP server's headers reach each of its requests: a server of the test on 127.0.0.1 records the headers of each request and passes it on to the example over HTTP", async () => {
+  const child = Bun.spawn([process.execPath, EXAMPLE, "--port", "0"], { stdout: "pipe", stderr: "ignore" })
+  const seen: Array<Record<string, string>> = []
+  let relay: ReturnType<typeof Bun.serve> | undefined
+  try {
+    const reader = child.stdout.getReader()
+    let text = ""
+    while (!text.includes("\n")) {
+      const { value, done } = await reader.read()
+      if (done) break
+      text += new TextDecoder().decode(value)
+    }
+    reader.releaseLock()
+    const target = text.split("\n")[0]!
+    expect(target).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
+    relay = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        seen.push(Object.fromEntries(request.headers))
+        const headers = new Headers(request.headers)
+        headers.delete("host")
+        const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+        return fetch(target, { method: request.method, headers, body })
+      }
+    })
+    const web: HttpServer = {
+      kind: "http",
+      name: "web",
+      approval: "auto",
+      tools: {},
+      url: `http://127.0.0.1:${relay.port}/mcp`,
+      headers: { "x-everchat-test": "a value", authorization: "Bearer test-token" }
+    }
+    const got = await loaded([web], async (got) => {
+      expect(await add(got, 2, 3)).toEqual({ sum: 5 })
+    })
+    expect(names(got)).toEqual(["web.add", "web.send"])
+    expect(got.refused).toEqual([])
+    // The handshake, the list and the call: each request has both headers.
+    expect(seen.length).toBeGreaterThanOrEqual(3)
+    expect(seen.map((one) => [one["x-everchat-test"], one["authorization"]])).toEqual(seen.map(() => ["a value", "Bearer test-token"]))
+  } finally {
+    await relay?.stop(true)
+    child.kill("SIGTERM")
+    await child.exited
+  }
+})
+
 test("a server whose program does not exist: no function, a refusal, and the other server loads; no child is left", async () => {
   const missing = path.join(dir, "no-such-program-" + MARK)
   const got = await loaded([stdio("example", EXAMPLE), { ...stdio("missing", EXAMPLE), command: missing, args: [] }])
