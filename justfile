@@ -20,8 +20,9 @@ test *args:
 # and no Node types (its guard); the core's tests, with the Bun types; the
 # packages openai, sqlite, codemode and local, their tests too, with the Bun
 # types; the server alone, with no Bun and no Node types (its guard), and the
-# server's tests, with the Bun types; the tools, but tools/golden.ts, with the
-# Bun types (tools/tsconfig.json). Then the boundaries of the packages, which
+# server's tests, with the Bun types; the same two for mcp, the client of
+# functions from outside; the tools, but tools/golden.ts, with the Bun types
+# (tools/tsconfig.json). Then the boundaries of the packages, which
 # the types do not see: their imports and their manifests (tools/graph.ts).
 # Last, that no file of the tree holds a word of the owner's list, which lives
 # outside the repository; with no list on this machine it checks nothing
@@ -35,6 +36,8 @@ check:
     bunx tsc --noEmit -p packages/local
     bunx tsc --noEmit -p packages/server
     bunx tsc --noEmit -p packages/server/tsconfig.test.json
+    bunx tsc --noEmit -p packages/mcp
+    bunx tsc --noEmit -p packages/mcp/tsconfig.test.json
     bunx tsc --noEmit -p tools
     bun tools/graph.ts
     bun tools/words.ts
@@ -54,6 +57,11 @@ run *args:
 # `EVERCHAT_HOME=/tmp/sample just run inspect`.
 sample home turns="200":
     bun tools/sample.ts {{home}} {{turns}}
+
+# Run the example MCP server (tools/mcpexample.ts): on stdio, or over HTTP on
+# 127.0.0.1 with `--port <n>`. Its head comment says how a chat names it.
+mcp-example *args:
+    bun tools/mcpexample.ts {{args}}
 
 # Build EverChat as one executable, `everchat`. The sandbox's worker thread
 # is the second entrypoint (packages/local/src/worker.ts says why).

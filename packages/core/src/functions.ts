@@ -29,8 +29,11 @@
 // JSON), so each function decodes them with a schema. An argument that the
 // program left out, or gave as `undefined`, arrives as nothing or as null.
 //
-// A function gives its whole result to the program. The output limit
-// applies to the program's own result (limit.ts).
+// A built-in function gives its whole result to the program. A function
+// from outside does up to `MAX` characters (limit.ts); past it the program
+// gets the shortened text (`Shortened`) and reads the rest with
+// `result(id, from, to)`. The output limit applies to the program's own
+// result (limit.ts).
 //
 // One list for each stack: the stack makes its list of declarations one
 // time, and gives that value to the turn loop's layer and the compactor's
@@ -61,6 +64,7 @@ import { Context, DateTime, Effect, Layer, Schema } from "effect"
 import { DEFAULT_INPUT_SCHEMA_MAX_CHARS, schemaToType } from "./codemode/declarations.ts"
 import { toCodemodeIdentifier } from "./codemode/identifier.ts"
 import type { Declaration, JsonSchema } from "./head.ts"
+import { part } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { Store, type StoreError } from "./store.ts"
 
@@ -84,8 +88,8 @@ export const DATE = {
 
 export const RESULT = {
   name: "result",
-  signature: "(id: number): Promise<string>",
-  description: "The whole result of an earlier program or function, by the number that a shortened result names."
+  signature: "(id: number, from?: number, to?: number): Promise<string>",
+  description: "The result of an earlier program or function, by the number that a shortened result names: the whole, or its characters from `from` (0 when not given) to before `to` (the end when not given)."
 } as const satisfies Declaration
 
 // The declarations of a host's chat, in the head's order.
@@ -225,8 +229,16 @@ export interface Caller {
   readonly call: number
 }
 
+// A result that the program gets shortened: the call's row keeps `whole`,
+// and the program gets the text `given` (`given` of limit.ts), never this
+// object. No built-in function gives one; a function from outside does,
+// for a result over `MAX`.
+export class Shortened {
+  constructor(readonly whole: string, readonly given: string) {}
+}
+
 // One function: its declaration, and its work. A result must be a JSON
-// value. `args` is always the list of the call's arguments, as the call's
+// value, or a `Shortened`. `args` is always the list of the call's arguments, as the call's
 // row keeps it (its `input`, as JSON): a function with a signature gets
 // what the program gave, one with an `inputSchema` gets `[object]`. So a
 // later run of a recorded call is `call(name, JSON.parse(input), caller)`
@@ -268,7 +280,8 @@ export class Functions extends Context.Service<Functions, {
   // The functions that a program can call.
   readonly names: ReadonlyArray<string>
   // Runs one function with the list of its arguments (`Entry`). A result
-  // must be a JSON value.
+  // must be a JSON value, or a `Shortened`: its row keeps `whole`, and the
+  // program gets `given`.
   call(name: string, args: ReadonlyArray<unknown>, caller: Caller): Effect.Effect<unknown, FunctionError>
 }>()("everchat/functions/Functions") {}
 
@@ -329,7 +342,9 @@ export const make = (declarations: ReadonlyArray<Declaration>, entries: Readonly
 
 const zoomArgs = decoder(ZOOM, Schema.Tuple([Schema.Union([Schema.Int, Schema.String]), maybe(Schema.Int), maybe(Schema.Int)]))
 const dateArgs = decoder(DATE, Schema.Tuple([Schema.Int]))
-const resultArgs = decoder(RESULT, Schema.Tuple([Schema.Int]))
+// A bound of a part of a result: a whole number of 0 or more.
+const bound = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+const resultArgs = decoder(RESULT, Schema.Tuple([Schema.Int, maybe(bound), maybe(bound)]))
 
 // The functions that need only the memory and the store.
 export const core = Effect.gen(function*() {
@@ -360,22 +375,29 @@ export const core = Effect.gen(function*() {
     })
   }
 
-  // A call's whole output, from the store. It reads and writes no file.
-  const result = {
+  // A call's output, from the store: the whole, or the part from `from` to
+  // before `to` (`part`, limit.ts). It reads and writes no file: `read`
+  // gives the whole text too, for a layer that keeps a copy of it.
+  const read = Effect.fnUntraced(function*(args: ReadonlyArray<unknown>) {
+    const [id, from, to] = yield* resultArgs(args)
+    if (from != null && to != null && from > to) {
+      return yield* new FunctionError({ message: "Wrong arguments: from (" + from + ") is over to (" + to + "). Use " + RESULT.name + RESULT.signature + "." })
+    }
+    const call = yield* stored(store.call(id))
+    if (call._tag === "None") {
+      return yield* new FunctionError({ message: "No call " + id + "." })
+    }
+    const whole = call.value.output
+    if (whole === null) {
+      return yield* new FunctionError({ message: "Call " + id + " still runs: it has no result yet." })
+    }
+    return { id, whole, part: part(whole, from ?? 0, to ?? whole.length) }
+  })
+  const result: Entry & { readonly read: typeof read } = {
     declaration: RESULT,
-    run: Effect.fnUntraced(function*(args) {
-      const [id] = yield* resultArgs(args)
-      const call = yield* stored(store.call(id))
-      if (call._tag === "None") {
-        return yield* new FunctionError({ message: "No call " + id + "." })
-      }
-      const output = call.value.output
-      if (output === null) {
-        return yield* new FunctionError({ message: "Call " + id + " still runs: it has no result yet." })
-      }
-      return output
-    })
-  } satisfies Entry
+    read,
+    run: (args) => Effect.map(read(args), (got) => got.part)
+  }
 
   return { zoom, date, result }
 })

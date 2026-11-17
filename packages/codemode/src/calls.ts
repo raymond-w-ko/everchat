@@ -8,7 +8,7 @@
 
 import type { CodemodeResult } from "./pi/portable.ts"
 import { Effect, FiberSet } from "effect"
-import { FunctionError, Functions } from "@everchat/core/functions"
+import { FunctionError, Functions, Shortened } from "@everchat/core/functions"
 import { type Ran, render, STOPPED } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
 
@@ -82,8 +82,12 @@ export const functionCalls = (at: { readonly turn: number; readonly call: number
             yield* Effect.mapError(store.endCall(id, { status: "failed", output: got.failure.message }), () => broken("endCall"))
             return yield* Effect.fail(got.failure)
           }
-          yield* Effect.mapError(store.endCall(id, { status: "done", output: text(got.success) }), () => broken("endCall"))
-          return got.success
+          // A `Shortened`: the row keeps the whole text, and the program
+          // gets the shortened one, never the object.
+          const value = got.success
+          const short = value instanceof Shortened
+          yield* Effect.mapError(store.endCall(id, { status: "done", output: short ? value.whole : text(value) }), () => broken("endCall"))
+          return short ? value.given : value
         })
       )
 

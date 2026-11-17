@@ -37,6 +37,13 @@
 // - When the program starts, it kills every process that carries the run
 //   tag of a launch that ended: a crash leaves such processes behind
 //   (docs/schema.html, section 8, step 2).
+// - A sweep of tags (`sweep`) lists and kills, then lists again, until a
+//   list holds no process that it has not killed yet, and at most SCANS
+//   times, with no wait between: a process born while a sweep runs, of a
+//   parent that the sweep then kills, is in the next list.
+// - Two limits: a program that starts new processes faster than SCANS
+//   lists find them, and a process that takes the variable out of its
+//   environment, are left for the next launch's sweep of the ended tags.
 //
 // The command's environment is EverChat's own, without the inference
 // gateway's address and key: a command has no use for them.
@@ -104,7 +111,7 @@ const holds = (proc: Bun.Subprocess): boolean => {
 
 // The processes of this user that carry one of the run tags. Linux gives
 // each process's environment as a file. Elsewhere, `ps` lists it.
-const tagged = (tags: ReadonlySet<string>): Array<number> => {
+export const tagged = (tags: ReadonlySet<string>): Array<number> => {
   const out: Array<number> = []
   const has = (environment: string) => {
     const found = CARRIES.exec(environment)
@@ -140,17 +147,41 @@ const tagged = (tags: ReadonlySet<string>): Array<number> => {
   return out
 }
 
-// Kills every process that carries one of the run tags. It gives their
-// number.
-export const sweep = (tags: ReadonlySet<string>): Effect.Effect<number> =>
+// The most lists of one sweep.
+export const SCANS = 8
+
+// Kills every process that carries one of the run tags, and gives their
+// number (each process once). It lists them (`scan`: `tagged`, or a test's
+// own), kills those of the list that it has not killed yet, and lists
+// again, until a list holds none that it has not killed, and at most SCANS
+// times. A process that this sweep has killed may still be in a list until
+// it has ended, but it starts no other: so it does not make the sweep go
+// on. With no tag, it lists nothing. One synchronous step: no wait between
+// the lists.
+export const sweep = (
+  tags: ReadonlySet<string>,
+  scan: (tags: ReadonlySet<string>) => ReadonlyArray<number> = tagged
+): Effect.Effect<number> =>
   Effect.sync(() => {
-    try {
-      const pids = tagged(tags)
-      pids.forEach(kill)
-      return pids.length
-    } catch {
+    const killed = new Set<number>()
+    if (tags.size === 0) {
       return 0
     }
+    try {
+      for (let n = 0; n < SCANS; n++) {
+        const found = scan(tags).filter((pid) => !killed.has(pid))
+        if (found.length === 0) {
+          break
+        }
+        for (const pid of found) {
+          kill(pid)
+          killed.add(pid)
+        }
+      }
+    } catch {
+      // A list that failed: what was killed is counted.
+    }
+    return killed.size
   })
 
 export class Shell extends Context.Service<Shell, {

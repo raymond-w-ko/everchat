@@ -1,0 +1,8 @@
+// The tests of the package `mcp`, with the Bun types (`bun:test`).
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src"]
+}

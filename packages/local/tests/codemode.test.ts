@@ -10,7 +10,8 @@ import * as path from "node:path"
 import { Ask, AskDelay } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import * as Diagnostics from "@everchat/core/diagnostics"
-import { Limit } from "@everchat/core/limit"
+import { HOSTED, hostedLayer } from "@everchat/core/functions"
+import { Limit, noFileLayer } from "@everchat/core/limit"
 import { limitLayer } from "../src/limitfile.ts"
 import { DECLARATIONS, functionsLayer } from "../src/localfunctions.ts"
 import { Memory } from "@everchat/core/memory"
@@ -37,6 +38,19 @@ const launch = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: E
   const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const turns = Turns.layer({ head: head(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
+  return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
+}
+
+// One launch of a host's stack: the hosted list (no shell, no file), and
+// the limit's layer with no file.
+const launchHosted = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: Effect.Effect<A, E, Turns | Store | Limit>, limit = 2000) => {
+  const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options({ runTag: "tag-" + crypto.randomUUID() }))))
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
+  const limits = noFileLayer({ limit })
+  const functions = hostedLayer(HOSTED).pipe(Layer.provide(memory))
+  const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
+  const turns = Turns.layer({ head: head(HOSTED) }).pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
@@ -149,7 +163,7 @@ test("a long result: the model and the log get its head and tail, the database a
     expect(seen.length).toBeLessThanOrEqual(2000)
     expect(seen).toStartWith("row 0\nrow 1\n")
     expect(seen).toEndWith("row 998\nrow 999")
-    expect(seen).toContain("characters left out. The whole result is in the file " + limit.file(1) + ", and result(1) gives it to a program. ...]")
+    expect(seen).toContain("characters left out. The whole result is in the file " + limit.file(1) + ", and result(1) gives it to a program, or result(1, from, to) a part of it. ...]")
     // The memory holds what the model saw.
     expect(messages(file)[2]).toEqual({ kind: "echo", text: seen })
     // The database holds all of it, and says how much the model got.
@@ -158,6 +172,23 @@ test("a long result: the model and the log get its head and tail, the database a
     // The next program got the whole text, and gave back a part of it.
     expect(back(wire.sent[2])).toBe("row 77 row 177 row 277 row 377 row 477 row 577 row 677 row 777 row 877 row 977")
   }))
+})
+
+test("a host's stack, with no file: the line names result(id) and result(id, from, to), and a program reads the shortened result in two parts and joins them", async () => {
+  const file = newFile()
+  const long = "return Array.from({ length: 1000 }, (_, k) => 'row ' + k).join('\\n')"
+  const parts = "const a = await result(1, 0, 4000)\nconst b = await result(1, 4000)\nreturn [a.length, b.length, a + b === await result(1)].join(' ')"
+  const wire = model(long, parts)
+  await launchHosted(file, wire, say("list the rows"))
+  const whole = Array.from({ length: 1000 }, (_, k) => "row " + k).join("\n")
+  const seen = back(wire.sent[1])
+  expect(seen.length).toBeLessThanOrEqual(2000)
+  expect(seen).toContain("characters left out. result(1) gives the whole result to a program, and result(1, from, to) a part of it. ...]")
+  // The program got the two parts, and they join to the whole.
+  expect(back(wire.sent[2])).toBe("4000 " + (whole.length - 4000) + " true")
+  const read = calls(file).filter((row) => row.fn === "result").map((row) => row.output)
+  expect(read).toEqual([whole.slice(0, 4000), whole.slice(4000), whole])
+  expect(read[0]! + read[1]!).toBe(whole)
 })
 
 test("the person's stop kills a running command, and the model reads later what the program did", async () => {

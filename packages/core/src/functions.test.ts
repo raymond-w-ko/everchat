@@ -10,8 +10,9 @@ import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, RESULT, TYPE_MAX, ZOOM } from "./functions.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, RESULT, Shortened, TYPE_MAX, ZOOM } from "./functions.ts"
 import { globalOf, head } from "./head.ts"
+import { given, MAX } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "./store.ts"
@@ -66,7 +67,71 @@ test("result gives a call's whole output from the store, and says when there is 
     assert.equal(yield* call("result", done), whole)
     assert.equal(yield* fails("result", open), "Call " + open + " still runs: it has no result yet.")
     assert.equal(yield* fails("result", 99), "No call 99.")
-    assert.equal(yield* fails("result", "1"), "Wrong arguments: Expected number at [0]. Use result(id: number): Promise<string>.")
+    assert.equal(yield* fails("result", "1"), "Wrong arguments: Expected number at [0]. " + USE)
+  }))
+})
+
+// The end of an error of `result`'s arguments: the signature.
+const USE = "Use result(id: number, from?: number, to?: number): Promise<string>."
+
+// The parts of `text` of `size` characters each, from `result`, in order.
+const partsOf = (id: number, text: string, size: number) =>
+  Effect.gen(function*() {
+    const got: Array<string> = []
+    for (let from = 0; from < text.length; from += size) {
+      got.push(String(yield* call("result", id, from, from + size)))
+    }
+    return got
+  })
+
+test("result(id, from, to) gives the characters from `from` to before `to`: no range the whole, a part from the middle, a `to` past the end, a `from` at the end or past it the empty text; the parts of a text with a pair at a bound join to the whole; each refusal shows the signature", async () => {
+  const file = newFile()
+  await withHosted(file, Effect.gen(function*() {
+    const store = yield* Store
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const ended = (output: string) =>
+      Effect.gen(function*() {
+        const id = yield* store.startCall({ turn: turn.id, vendorId: "call_" + output.length, fn: "run", input: "" })
+        yield* store.endCall(id, { status: "done", output, shown: 10 })
+        return id
+      })
+    const text = "0123456789"
+    const id = yield* ended(text)
+    // No range: the whole; null is a bound not given.
+    assert.equal(yield* call("result", id), text)
+    assert.equal(yield* call("result", id, null, null), text)
+    // A part from the middle: `to` is the first character after it.
+    assert.equal(yield* call("result", id, 3, 7), "3456")
+    assert.equal(yield* call("result", id, 3), "3456789")
+    assert.equal(yield* call("result", id, null, 4), "0123")
+    assert.equal(yield* call("result", id, 4, 4), "")
+    // A `to` past the end: up to the end. A `from` at the end or past it.
+    assert.equal(yield* call("result", id, 8, 1000), "89")
+    assert.equal(yield* call("result", id, 10), "")
+    assert.equal(yield* call("result", id, 10, 12), "")
+    assert.equal(yield* call("result", id, 50, 60), "")
+
+    // A text with a surrogate pair at each bound of parts of 3 characters:
+    // a bound between its halves moves one character back, so no part has
+    // half a pair, and the parts join to the whole.
+    const paired = "ab" + "\u{1F600}".repeat(6) + "c\u{1F600}"
+    const pairs = yield* ended(paired)
+    for (const size of [1, 2, 3, 4, 5]) {
+      const parts = yield* partsOf(pairs, paired, size)
+      assert.equal(parts.join(""), paired, "parts of " + size)
+      for (const one of parts) assert.ok(one.isWellFormed(), JSON.stringify(one) + " in parts of " + size)
+    }
+    assert.equal(yield* call("result", pairs, 0, 3), "ab")
+    assert.equal(yield* call("result", pairs, 3, 6), "\u{1F600}\u{1F600}")
+    assert.equal(yield* call("result", pairs, 3), paired.slice(2))
+
+    // Each refusal shows the signature.
+    assert.equal(yield* fails("result", id, -1), "Wrong arguments: Expected a value greater than or equal to 0 at [1]. " + USE)
+    assert.equal(yield* fails("result", id, 0, -2), "Wrong arguments: Expected a value greater than or equal to 0 at [2]. " + USE)
+    assert.equal(yield* fails("result", id, 1.5), "Wrong arguments: Expected an integer at [1]. " + USE)
+    assert.equal(yield* fails("result", id, 0, 2.5), "Wrong arguments: Expected an integer at [2]. " + USE)
+    assert.equal(yield* fails("result", id, "1"), "Wrong arguments: Expected number | null | undefined at [1]. " + USE)
+    assert.equal(yield* fails("result", id, 5, 3), "Wrong arguments: from (5) is over to (3). " + USE)
   }))
 })
 
@@ -86,6 +151,37 @@ const schemaOf = (name: string, more: Partial<Declaration> = {}): Declaration =>
 
 // The functions of a head, as its tool's description lists them.
 const listed = (declarations: ReadonlyArray<Declaration>) => head(declarations).tools[0]!.description.split("these functions:\n\n")[1] ?? ""
+
+// A result from outside kept whole and given short (`Shortened`, `given`;
+// the sandbox's side: packages/codemode/src/sandbox.test.ts and
+// inline.test.ts).
+test("given of a text within max is the text; of a longer one, the head, the line with the call's number, the tail, and no half of a pair; MAX is 1,048,576", () => {
+  assert.equal(MAX, 1_048_576)
+  const fits = "x".repeat(2000)
+  assert.equal(given(7, fits, 2000), fits)
+  assert.equal(given(7, "", 2000), "")
+  // max 2000: the head is 1000 characters and the tail 488 (limit.ts,
+  // `shorten`). The head's cut falls inside the first pair, the tail's
+  // inside the second: each moves out of the pair, so neither half is kept.
+  const pair = "\u{1F600}"
+  const text = "a".repeat(999) + pair + "b".repeat(3000) + pair + "c".repeat(487)
+  const line = "\n[... 3004 of " + text.length + " characters left out. result(7, from, to) gives a part of the whole result to a program. ...]\n"
+  assert.equal(given(7, text, 2000), "a".repeat(999) + line + "c".repeat(487))
+  assert.equal(given(42, "y".repeat(3000), 2000).includes("result(42, from, to) gives a part of the whole result to a program."), true)
+})
+
+test("a Shortened goes through Functions.call as it is, with its whole and its given; a plain value as before", async () => {
+  const short = new Shortened("the whole", "the given")
+  const entries: ReadonlyArray<Entry> = [
+    { declaration: schemaOf("ns.short"), run: () => Effect.succeed(short) },
+    { declaration: schemaOf("ns.plain"), run: () => Effect.succeed({ a: 1 }) }
+  ]
+  const functions = make(entries.map((one) => one.declaration), entries)
+  const got = await Effect.runPromise(functions.call("ns.short", [{}], CALLER))
+  assert.equal(got instanceof Shortened, true)
+  assert.deepEqual([(got as Shortened).whole, (got as Shortened).given], ["the whole", "the given"])
+  assert.deepEqual(await Effect.runPromise(functions.call("ns.plain", [{}], CALLER)), { a: 1 })
+})
 
 test("a function ns.member with both schemas renders in the head as declare const ns: { member(args: <input>): Promise<<output>> }, after the built-ins, which keep their bytes; its global takes one object (spread false), a built-in's a list (spread true)", () => {
   assert.deepEqual(refusals([...HOSTED, SEARCH]), [])

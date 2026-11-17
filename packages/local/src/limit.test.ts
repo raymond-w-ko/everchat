@@ -84,7 +84,7 @@ test("a long result is shortened, and its whole text is in a file that only the 
     const seen = yield* limit.show(7, text)
     expect(seen.text.length).toBeLessThanOrEqual(1000)
     expect(seen.shown).toBe(Buffer.byteLength(seen.text))
-    expect(seen.text).toContain("The whole result is in the file " + limit.file(7) + ", and result(7) gives it to a program.")
+    expect(seen.text).toContain("The whole result is in the file " + limit.file(7) + ", and result(7) gives it to a program, or result(7, from, to) a part of it.")
     expect(fs.readFileSync(limit.file(7), "utf8")).toBe(text)
     expect(fs.statSync(limit.file(7)).mode & 0o777).toBe(0o600)
     expect(fs.statSync(path.dirname(limit.file(7))).mode & 0o777).toBe(0o700)
@@ -99,7 +99,7 @@ test("a directory that others can enter is not used: the result names only resul
   await withLimit(file, Effect.gen(function*() {
     const limit = yield* Limit
     const seen = yield* limit.show(3, "y".repeat(5000))
-    expect(seen.text).toContain("result(3) gives the whole result to a program.")
+    expect(seen.text).toContain("result(3) gives the whole result to a program, and result(3, from, to) a part of it.")
     expect(seen.text).not.toContain("file")
     expect(fs.existsSync(limit.file(3))).toBe(false)
     expect(yield* limit.put(3, "text")).toBe(false)
@@ -145,7 +145,7 @@ test("the layer with no file shows a result as the file's layer does when it can
   expect(bare.at.text).toBe("x".repeat(1000))
   expect(bare.long).toEqual(filed[1]!)
   expect(bare.long.text.length).toBeLessThanOrEqual(1000)
-  expect(bare.long.text).toContain("result(3) gives the whole result to a program.")
+  expect(bare.long.text).toContain("result(3) gives the whole result to a program, and result(3, from, to) a part of it.")
   expect(bare.long.text).not.toContain("file")
   expect(bare.long.shown).toBe(Buffer.byteLength(bare.long.text))
   // It writes nothing: no path, put is false, and the home is as it was.
@@ -158,6 +158,6 @@ test("the layer with no file shows a result as the file's layer does when it can
 test("the layer with no file takes the default limit when given none", async () => {
   const text = "z".repeat(LIMIT + 1)
   const seen = await Effect.runPromise(Limit.use((limit) => limit.show(5, text)).pipe(Effect.provide(noFileLayer())))
-  expect(seen.text).toBe(shorten(text, LIMIT, "result(5) gives the whole result to a program."))
+  expect(seen.text).toBe(shorten(text, LIMIT, "result(5) gives the whole result to a program, and result(5, from, to) a part of it."))
   expect((await Effect.runPromise(Limit.use((limit) => limit.show(5, "z".repeat(LIMIT))).pipe(Effect.provide(noFileLayer())))).text).toBe("z".repeat(LIMIT))
 })

@@ -30,3 +30,30 @@ What the two checks do not hold, each an accepted risk:
   never passes a real import. Write `import type` in the block (Bun's
   parser then lists nothing), or put the block in a `.d.ts` file. What
   would fix it: an import list from a parser that knows ambient blocks.
+- A library's own imports (ec-t5ss9). The two checks read only the
+  workspace's own files: the walk of `tools/graph.ts` skips a specifier of
+  no workspace package (`tools/graph.ts:508-509`), and the type programs
+  have `skipLibCheck` (`tsconfig.json`). So a library that a package's row
+  names may import what the package itself may not, and both checks pass.
+  The SDK of MCP in `@everchat/mcp` does (`@modelcontextprotocol/client`
+  2.4.0; the paths are of its installed files). Its entry
+  `@modelcontextprotocol/client/stdio` imports `node:process`,
+  `node:stream` and `cross-spawn` (`dist/stdio.mjs:2-4`), to start a
+  program as a child. Its main entry imports
+  `@modelcontextprotocol/client/_shims` (`dist/index.mjs:3`), whose
+  conditions `node` and `default` (the `exports` of its `package.json`),
+  which Node and Bun take, give a bundled validator, Ajv
+  (`dist/shimsNode.mjs:1`), that makes each schema's check with `new
+  Function` (`dist/ajvProvider-BIwGVY6G.mjs:2594`). A file of
+  `packages/mcp/src` that imports the stdio entry passes the package's
+  guard (`tsc -p packages/mcp`) and the graph, though the package may
+  import no built-in module; only a runtime with no child process (a
+  Worker of Cloudflare) would show it. What holds the stdio entry out of
+  `@everchat/mcp` is a rule of `packages/mcp/AGENTS.md` ("Its
+  libraries"): only `packages/local` imports it. The reviews hold that
+  rule; no check of `just check` does. The review of a change to
+  `packages/mcp` looks for `@modelcontextprotocol/client/stdio`, and the
+  review of a change to `bun.lock` reads each new package. What would fix
+  it: a graph that follows a library's own imports by its `exports`
+  conditions and refuses a built-in module there, or a list of the
+  entries of a library that each row refuses.

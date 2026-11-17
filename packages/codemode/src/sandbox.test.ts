@@ -17,7 +17,8 @@ import { Effect, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
-import { type Caller, ENGINE_GLOBALS, FunctionError, Functions, INHERITED, make, RESERVED } from "@everchat/core/functions"
+import { type Caller, ENGINE_GLOBALS, FunctionError, Functions, INHERITED, make, RESERVED, Shortened } from "@everchat/core/functions"
+import { given } from "@everchat/core/limit"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
@@ -42,8 +43,8 @@ test("the QuickJS file that the sandbox loads is the one that the adopted code w
   expect(loaded.version).toBe(written)
 })
 
-// Fake functions. `seen` holds what each call got.
-const fakes = () => {
+// Fake functions, and `more` of a test's own. `seen` holds what each call got.
+const fakes = (more: Record<string, Fake> = {}) => {
   const seen: Array<{ name: string; args: ReadonlyArray<unknown>; caller: Caller }> = []
   const state = { stopped: 0 }
   // When each slow function started and ended, on the host's clock.
@@ -62,7 +63,8 @@ const fakes = () => {
           Effect.as("slept"),
           Effect.onInterrupt(() => Effect.sync(() => void (state.stopped += 1)))
         )
-      })
+      }),
+    ...more
   }
   const layer = Layer.succeed(
     Functions,
@@ -201,6 +203,27 @@ test("a function gets the program's arguments, and each call is a row under the 
     { parent: 5, fn: "nothing", input: "[]", output: "", status: "done" }
   ])
   expect(rows(file, "select count(*) as n from everchat_call where parent is not null and (ended is null or size is null)")).toEqual([{ n: 0 }])
+})
+
+// A result kept whole and given short (functions.ts, `Shortened`): the
+// call's row keeps the whole text, and the program gets the text `given`.
+const WHOLE = "head " + "w".repeat(300) + " tail"
+const short: Fake = (_args, caller) => Effect.succeed(new Shortened(WHOLE, given(caller.call, WHOLE, 100)))
+
+test("a function that gives a Shortened has a done row whose output is whole, and the program gets the text given (a string, not an object); a plain value goes as before", async () => {
+  const file = newFile()
+  const fake = fakes({ short, plain: () => Effect.succeed({ a: [1] }) })
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("const t = await short(); return JSON.stringify([typeof t, t])")).toEqual({ output: JSON.stringify(["string", given(2, WHOLE, 100)]), failed: false })
+      expect(yield* run("const t = await plain(); return JSON.stringify([typeof t, t])")).toEqual({ output: JSON.stringify(["object", { a: [1] }]), failed: false })
+    }))
+  expect(given(2, WHOLE, 100)).toContain("result(2, from, to) gives a part of the whole result to a program.")
+  expect(given(2, WHOLE, 100).length).toBeLessThan(WHOLE.length)
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "short", input: "[]", output: WHOLE, status: "done" },
+    { parent: 3, fn: "plain", input: "[]", output: "{\"a\":[1]}", status: "done" }
+  ])
 })
 
 test("a function with an input schema gets the program's one object as [object], and its row's input is [{\"a\":1}]; a second argument is dropped by the adopted prelude (pi/runtime/prelude-source.ts:204, `spread ? args : args[0]`), so the function and its row get [first]; a spread function still gets its list", async () => {

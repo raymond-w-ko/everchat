@@ -6,7 +6,7 @@ import { Effect, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, write } from "../tests/help.ts"
-import { Shell, sweep, TAG } from "./shell.ts"
+import { SCANS, Shell, sweep, TAG, tagged } from "./shell.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 
@@ -179,4 +179,100 @@ test("a launch kills what a crashed launch left behind, and nothing else", async
     bystander.kill("SIGKILL")
     left.kill("SIGKILL")
   }
+})
+
+// A sweep that lists more than once
+// ---------------------------------
+
+// The processes that the cases below start: each is killed in a `finally`.
+const started: Array<Bun.Subprocess> = []
+const stopAll = () => {
+  for (const proc of started.splice(0)) proc.kill("SIGKILL")
+}
+
+// Starts `sleep 60` with the tag, and waits (busily, at most 2 s) until its
+// environment shows the tag: a spawn may return before the program runs.
+// It gives the pid.
+const born = (tag: string): number => {
+  const proc = Bun.spawn(["sleep", "60"], { env: { ...process.env, [TAG]: tag }, stdout: "ignore", stderr: "ignore" })
+  started.push(proc)
+  for (const end = Date.now() + 2_000; Date.now() < end;) {
+    try {
+      if (fs.readFileSync("/proc/" + proc.pid + "/environ", "utf8").includes(TAG + "=" + tag)) break
+    } catch {
+      // Not there yet.
+    }
+  }
+  return proc.pid
+}
+
+test("a process born after the first list: the sweep finds it in the next list, kills it too, and counts both", async () => {
+  const tag = "born-" + crypto.randomUUID()
+  try {
+    const first = born(tag)
+    let scans = 0
+    let second = 0
+    // The real list, then a new process with the tag, then the old list.
+    const scan = (tags: ReadonlySet<string>) => {
+      scans += 1
+      const list = tagged(tags)
+      if (scans === 1) second = born(tag)
+      return list
+    }
+    expect(await Effect.runPromise(sweep(new Set([tag]), scan))).toBe(2)
+    expect(await eventually(() => !alive(first) && !alive(second))).toBe(true)
+  } finally {
+    stopAll()
+  }
+})
+
+test("a chain: each list's step starts one more process, three times; all are killed, and the sweep stops at the first list with none new", async () => {
+  const tag = "chain-" + crypto.randomUUID()
+  try {
+    // Each list holds every process started so far: one that the sweep has
+    // killed may still be listed until it has ended.
+    const pids = [born(tag)]
+    let scans = 0
+    const scan = () => {
+      scans += 1
+      const list = [...pids]
+      if (scans <= 3) pids.push(born(tag))
+      return list
+    }
+    expect(await Effect.runPromise(sweep(new Set([tag]), scan))).toBe(4)
+    expect(scans).toBe(5)
+    expect(await eventually(() => pids.every((pid) => !alive(pid)))).toBe(true)
+  } finally {
+    stopAll()
+  }
+})
+
+test("the bound: a list that always gives one new live process ends the sweep after SCANS (8) lists", async () => {
+  const tag = "bound-" + crypto.randomUUID()
+  try {
+    let scans = 0
+    // Past 32 lists the test's list is empty, so that a sweep with no bound
+    // still ends (and fails the case) without starting processes for ever.
+    const scan = () => {
+      scans += 1
+      return scans > 32 ? [] : [born(tag)]
+    }
+    expect(SCANS).toBe(8)
+    expect(await Effect.runPromise(sweep(new Set([tag]), scan))).toBe(8)
+    expect(scans).toBe(8)
+  } finally {
+    stopAll()
+  }
+})
+
+test("nothing with the tag: one list, and 0; no tag: no list, and 0", async () => {
+  let scans = 0
+  const scan = (tags: ReadonlySet<string>) => {
+    scans += 1
+    return tagged(tags)
+  }
+  expect(await Effect.runPromise(sweep(new Set(["none-" + crypto.randomUUID()]), scan))).toBe(0)
+  expect(scans).toBe(1)
+  expect(await Effect.runPromise(sweep(new Set(), scan))).toBe(0)
+  expect(scans).toBe(1)
 })

@@ -380,6 +380,57 @@ test("with no inference gateway to read, the program says what to set, and ends"
   expect(launches(at.file).every((one) => one.ended !== null)).toBe(true)
 })
 
+// The home's config file (config.ts), before a launch.
+const configure = (at: ReturnType<typeof place>, value: unknown) => {
+  fs.mkdirSync(at.home, { recursive: true, mode: 0o700 })
+  const file = path.join(at.home, "config.json")
+  fs.writeFileSync(file, JSON.stringify(value))
+  return file
+}
+
+test("a config file with faults: the program ends with 1, each fault and its field on the standard error, with no screen and no database", async () => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const config = configure(at, { limit: 5, nope: true, servers: { git: { command: "c", args: [3] } } })
+  const stderr = path.join(at.root, "stderr")
+  const pty = start(at, server.address, undefined, stderr)
+  await pty.ends()
+  expect(pty.code).toBe(1)
+  expect(fs.readFileSync(stderr, "utf8").split("\n").sort()).toEqual([
+    "",
+    "everchat: " + config + ": limit: Expected a whole number from 2000 to 1000000",
+    "everchat: " + config + ": nope: Unknown field",
+    "everchat: " + config + ": servers.git.args[0]: Expected string"
+  ])
+  // No screen: the paste was never bracketed.
+  expect(pty.raw).not.toContain("\x1b[?2004h")
+  expect(fs.existsSync(at.file)).toBe(false)
+  expect(server.bodies.length).toBe(0)
+})
+
+test("a config file sets the picks and the output limit, and a flag wins over it", async () => {
+  const at = place()
+  // The compactions' requests are answered apart, whenever they come.
+  let turns = 0
+  const server = fake((_, body) => (body.model === "gpt-file-compactor" ? text("A summary.") : ++turns === 1 ? program("call_1", "return 'y'.repeat(5000)") : text("It is done.")))
+  configure(at, { model: "gpt-file", effort: "high", compactor: "gpt-file-compactor", limit: 2_000 })
+  const pty = start(at, server.address, ["--model", "gpt-test"])
+  await pty.sees("idle · gpt-test high")
+  pty.type("run it\r")
+  await pty.sees("It is done.", "idle · gpt-test high")
+  const asked = server.bodies.filter((body) => body.model !== "gpt-file-compactor")
+  expect(asked.map((body) => [body.model, body.reasoning.effort])).toEqual([["gpt-test", "high"], ["gpt-test", "high"]])
+  // A compaction, if one came, asked the file's compactor.
+  for (const body of server.bodies.filter((one) => !asked.includes(one))) expect(body.reasoning.effort).toBe("low")
+  // The program's result was shortened to the file's limit (the default is 30,000).
+  const output = JSON.stringify(asked[1].input)
+  expect(output).toContain("y".repeat(900))
+  expect(output).not.toContain("y".repeat(2_000))
+  pty.type("/quit\r")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+})
+
 test("when only one of the standard input and the standard output is a terminal, the program works in pipe mode", async () => {
   const at = place()
   const server = fake(() => text("Hello."))

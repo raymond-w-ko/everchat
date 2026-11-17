@@ -46,7 +46,7 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 ## Layout
 
 The new code is a Bun workspace (`"workspaces"` in the root `package.json`)
-with six packages, each in `packages/<name>/` with its own `package.json`.
+with seven packages, each in `packages/<name>/` with its own `package.json`.
 A package's entries are the keys of its `exports` (see "Be modular").
 Each package's own matter, its entries too, is in its `AGENTS.md`:
 
@@ -56,17 +56,21 @@ Each package's own matter, its entries too, is in its `AGENTS.md`:
 - `packages/codemode/AGENTS.md`: `@everchat/codemode`, the engines of the sandbox.
 - `packages/local/AGENTS.md`: `@everchat/local`, the rest, the local build.
 - `packages/server/AGENTS.md`: `@everchat/server`, the host of many chats over HTTP and WebSocket.
+- `packages/mcp/AGENTS.md`: `@everchat/mcp`, the client of functions from outside (MCP).
 - `packages/<name>/src/x.test.ts`: the tests of one module sit next to it
   (`x.ts`), in its package. A test goes with the code that it tests.
 
-Today five of them exist: `@everchat/core`, `@everchat/openai`,
-`@everchat/sqlite`, `@everchat/codemode` and `@everchat/local` ("Be modular" has all nine).
+Today seven of them exist: `@everchat/core`, `@everchat/openai`,
+`@everchat/sqlite`, `@everchat/codemode`, `@everchat/local`,
+`@everchat/server` and `@everchat/mcp` ("Be modular" has all ten).
 Each of the three cut out of `local` holds less than its row says:
 `openai` has the wire for OpenAI and none for Anthropic, `sqlite` an
 entry for Bun only (`./bun`), and `codemode` two engines, `./thread`
 (the engine in a worker thread) and `./inline` (the engine in the
-caller's own thread), but none in a separate Worker.
-`mariadb`, `server`, `cloudflare` and `wakeups` do not exist yet.
+caller's own thread), but none in a separate Worker. So do the two new
+ones: `server` is the host with no lease and no provider, and `mcp` has
+only the version of the protocol, with no client yet.
+`mariadb`, `cloudflare` and `wakeups` do not exist yet.
 
 Run the full check (see "Checks") before you say that a change is done.
 
@@ -83,7 +87,7 @@ The rest:
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
 - `tools/`: scripts outside the packages, which import them by their names
-  (the root `package.json` names all five); `just check` checks the types of
+  (the root `package.json` names all seven); `just check` checks the types of
   all but `golden.ts` (`tools/tsconfig.json`). `tools/graph.ts` is a step of
   `just check` (see "Be modular"), and `tools/graph.test.ts` its tests.
   `tools/golden.ts` makes `packages/local/tests/golden.json` from the old
@@ -198,7 +202,7 @@ it. In particular, the core (the memory and the agent loop) must not depend on
 the server, the web, accounts, or billing. In the old code the chat logic
 lives in `ref/src/server.ts`, so this is a large change.
 
-The nine packages of the design (`docs/design.md`, "Packages"), and what each
+The ten packages of the design (`docs/design.md`, "Packages"), and what each
 may import:
 
 | Package | Holds | May import |
@@ -208,8 +212,9 @@ may import:
 | `@everchat/sqlite` | the store on SQLite: an entry each for Bun, Node and a Durable Object | `core` |
 | `@everchat/mariadb` | the store on MariaDB | `core`, `@effect/sql-mysql2` |
 | `@everchat/codemode` | the engine: in a worker thread, or in a separate Worker | `core`, `quickjs-wasi` |
-| `@everchat/local` | the terminal, the shell, the files, the inspector, the executable | `core`, `openai`, `sqlite`, `codemode`, `pi-tui`, `@effect/platform-bun` |
-| `@everchat/server` | HTTP and WebSocket, the lease, the provider | `core`, `openai`, `mariadb`, `codemode` |
+| `@everchat/mcp` | the client of functions from outside (MCP): the load of a server's definitions, the checks, a call | `core`, `@modelcontextprotocol/client`, `@earendil-works/pi-schema` |
+| `@everchat/local` | the terminal, the shell, the files, the inspector, the executable | `core`, `openai`, `sqlite`, `codemode`, `mcp`, `@modelcontextprotocol/client` (its stdio entry), `pi-tui`, `@effect/platform-bun` |
+| `@everchat/server` | HTTP and WebSocket, the lease, the provider | `core`, `openai`, `mariadb`, `codemode`, `mcp` |
 | `@everchat/cloudflare` | the Durable Object of a chat | `core`, `openai`, `sqlite`, `codemode` |
 | `@everchat/wakeups` | reminders and routines, optional | `core` |
 

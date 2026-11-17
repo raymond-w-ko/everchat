@@ -9,7 +9,9 @@
 //
 // The order of the list is the order in which the head shows the
 // declarations, so it is part of the prompt cache's key (head.ts). The stack
-// gives its one list to the layer (`functionsLayer`), as to the heads'.
+// gives its one list to the layer (`functionsLayer`), as to the heads'. A
+// launch with connectors (main.ts) adds their functions after these, in the
+// load's order (`more`).
 
 import { Effect, Layer, Schema } from "effect"
 import * as fs from "node:fs"
@@ -66,11 +68,15 @@ const editArgs = decoder(
 
 export interface Options {
   readonly cwd?: string | undefined // the work directory of the file functions; the program's own when not given
+  // The entries after the built-ins', in the list's order: the functions
+  // that a launch loaded from its connectors (main.ts). None when not given.
+  readonly more?: ReadonlyArray<Entry> | undefined
 }
 
 // The functions of a local chat: the core's, and these (`DECLARATIONS`, in
-// its order), over `declarations`, the list of the stack's head: it dies at
-// its build when that list is not `DECLARATIONS` (`make`).
+// its order), then `more`, over `declarations`, the list of the stack's
+// head: it dies at its build when that list is not those entries'
+// declarations, in that order (`make`).
 export const functionsLayer = (
   declarations: ReadonlyArray<Declaration>,
   options: Options = {}
@@ -129,19 +135,18 @@ export const functionsLayer = (
         result: {
           declaration: RESULT,
           run: Effect.fnUntraced(function*(args) {
-            const output = yield* result.run(args)
-            // The core's `result` decoded the id. The file is a copy that
-            // the system may delete.
-            const id = args[0] as number
+            const { id, whole, part } = yield* result.read(args)
+            // The file is a copy that the system may delete: it gets the
+            // whole text again, for a call with a range too, never a part.
             const at = limit.file(id)
             if (at !== "" && !fs.existsSync(at)) {
-              yield* limit.put(id, output)
+              yield* limit.put(id, whole)
             }
-            return output
+            return part
           })
         }
       }
 
-      return make(declarations, DECLARATIONS.map((one) => entries[one.name]))
+      return make(declarations, [...DECLARATIONS.map((one) => entries[one.name]), ...(options.more ?? [])])
     })
   )

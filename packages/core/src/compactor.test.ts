@@ -57,7 +57,7 @@ test("the head's bytes are the ones that the prompt cache was written for", () =
   // chat (packages/core/AGENTS.md, "One system prompt for every kind of
   // request"). Change this hash only on purpose.
   const hash = createHash("sha256").update(JSON.stringify(head(DECLARATIONS))).digest("hex")
-  assert.equal(hash, "315565fca459411a20a7aec74f3162b5ee0de974035c0cd79510b256554e7b73")
+  assert.equal(hash, "52cab4d3bef1ebac0fd4125fa6db9eefac15f977867448fcff28e2457136f826")
 })
 
 test("a compaction is one patient request with the chat's id and head, and its usage is written with its node", async () => {

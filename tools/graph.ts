@@ -101,6 +101,7 @@ export const BUILTINS: Builtins = {
   "@everchat/openai": { src: [], tests: "any" },
   "@everchat/sqlite": { src: [], tests: "any" },
   "@everchat/server": { src: [], tests: "any" },
+  "@everchat/mcp": { src: [], tests: "any" },
   "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
 }
 type Rule = "any" | ReadonlyArray<string>
@@ -123,11 +124,12 @@ export type Budget = {
 } & ({ readonly forbid: ReadonlyArray<string>; readonly only?: ReadonlyArray<string> } | { readonly forbid?: ReadonlyArray<string>; readonly only: ReadonlyArray<string> })
 
 export const BUDGETS: ReadonlyArray<Budget> = [
-  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
+  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
   { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
   { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/"] },
   { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/"] },
-  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] }
+  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
+  { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/"] }
 ]
 
 export interface Tables {

@@ -8,27 +8,37 @@
 //   says how much was left out and where the whole text is;
 // - the whole text is written to a file, so that a program can read or
 //   search it with `shell` and `read`;
-// - `result(id)` gives the whole text to a program too, from the database.
+// - `result(id)` gives the whole text to a program too, from the database,
+//   and `result(id, from, to)` a part of it (`part`): its characters from
+//   `from` to before `to`, in the unit of the line.
 //
 // The file is a copy, not state. It is in a private directory under the
 // system's temporary directory. When it is gone (after a reboot, for
-// example), `result(id)` writes it again.
+// example), `result(id)` writes it again, whole, with a range or not.
 //
 // The limit is on what the model reads, not on what a program gets: a
-// function gives its whole result to the program that called it. A second,
-// hard limit keeps a command that never stops printing from filling the
-// memory and the database.
+// built-in function gives its whole result to the program that called it.
+// A function from outside does up to `MAX` characters; past it the program
+// gets the shortened text (`given`; `Shortened`, functions.ts) and reads
+// the rest with `result(id, from, to)`, while the call's row keeps the
+// whole. A second, hard limit keeps a command that never stops printing
+// from filling the memory and the database.
 //
 // This file is the core's part: the cap, the rule that shortens a result
 // and its line, the tag, and the layer with no file (`noFileLayer`), for a
-// chat that has no machine: its line names `result(id)` only. The layer
-// that writes the files is in `packages/local/src/limitfile.ts`.
+// chat that has no machine: its line names `result(id)` and
+// `result(id, from, to)` only. The layer that writes the files is in
+// `packages/local/src/limitfile.ts`.
 
 import { Context, Effect, Layer } from "effect"
 
 // The most characters of a result that the model is shown, when the config
 // gives no other number. Three harnesses agree on about this size.
 export const LIMIT = 30000
+
+// The most characters of a result from outside that a program is given,
+// when no option gives another number (`given`).
+export const MAX = 1_048_576
 
 // The most bytes that one call may produce: the hard limit.
 export const HARD = 64 * 1024 * 1024
@@ -61,6 +71,17 @@ export const bytes = (text: string): number => {
 
 // True when a cut at `at` would part the two halves of a surrogate pair.
 const parts = (text: string, at: number) => at > 0 && at < text.length && text.charCodeAt(at) >> 10 === 0x37
+
+// True when `at` falls between the two halves of a surrogate pair.
+const between = (text: string, at: number) =>
+  at > 0 && at < text.length && text.charCodeAt(at - 1) >> 10 === 0x36 && text.charCodeAt(at) >> 10 === 0x37
+
+// The part of `text` from character `from` to before `to`, as `slice` has
+// them: a bound past the end is the end. A bound between the two halves of
+// a surrogate pair moves one character back, both by the same rule, so the
+// parts (0, n), (n, 2n), and so on join to the whole text.
+export const part = (text: string, from: number, to: number): string =>
+  text.slice(between(text, from) ? from - 1 : from, between(text, to) ? to - 1 : to)
 
 // A result as the model is shown it: whole when it fits in `limit`
 // characters, else its head and its tail (half each), with `where` in the
@@ -102,17 +123,23 @@ export const capped = (text: string, most: number): string => {
   return at === text.length ? text : text.slice(0, parts(text, at) ? at - 1 : at)
 }
 
+// A result from outside as a program is given it, by the rule of
+// `shorten`: whole within `max` characters, else its head and its tail,
+// with a line that names `result(call, from, to)`.
+export const given = (call: number, text: string, max: number): string =>
+  shorten(text, max, "result(" + call + ", from, to) gives a part of the whole result to a program.")
+
 export interface Shown {
   readonly text: string // what the model reads
   readonly shown: number // its bytes
 }
 
 // Where the whole result of a call is: in `file` when one holds it, else
-// only from `result(id)`.
+// only from `result(id)`, and a part of it from `result(id, from, to)`.
 export const where = (call: number, file?: string): string =>
   file === undefined
-    ? "result(" + call + ") gives the whole result to a program."
-    : "The whole result is in the file " + file + ", and result(" + call + ") gives it to a program."
+    ? "result(" + call + ") gives the whole result to a program, and result(" + call + ", from, to) a part of it."
+    : "The whole result is in the file " + file + ", and result(" + call + ") gives it to a program, or result(" + call + ", from, to) a part of it."
 
 // A call's result as the model is shown it, by the rule of `shorten`: whole
 // within `limit` characters, else its head and its tail, with a line that
@@ -127,7 +154,7 @@ export class Limit extends Context.Service<Limit, {
   // A call's result as the model is shown it. A result over the limit is
   // shortened, and a layer that writes files writes its whole text to the
   // call's file. This never fails: with no file, the line names only
-  // `result(id)`.
+  // `result(id)` and `result(id, from, to)`.
   show(call: number, text: string): Effect.Effect<Shown>
   // The path of a call's file, whether it exists or not. The empty string:
   // this layer writes no file (`noFileLayer`).

@@ -84,8 +84,9 @@ Where the research recommends something else, this document holds:
 
 ## Packages
 
-- **One repository with workspaces, nine packages named `@everchat/<name>`: `core`,
-  `openai`, `sqlite`, `mariadb`, `codemode`, `local`, `server`, `cloudflare`, `wakeups`.
+- **One repository with workspaces, ten packages named `@everchat/<name>`: `core`,
+  `openai`, `sqlite`, `mariadb`, `codemode`, `mcp`, `local`, `server`, `cloudflare`,
+  `wakeups`.
   One version. The packages import the TypeScript sources of each other. No publishing to
   npm at first.** [Q31, Q45] Reason: clear packages with clear boundaries, as `~/src/pi`
   has, that a person outside can use one at a time; Bun, Node and `workerd` ran the `.ts`
@@ -99,6 +100,7 @@ Where the research recommends something else, this document holds:
 | `sqlite` | the store on SQLite, one entry each for Bun, Node and a Durable Object | each entry its own |
 | `mariadb` | the store on MariaDB | Bun |
 | `codemode` | the engine for programs: in a worker thread, or in a separate Worker | each entry its own |
+| `mcp` | the client of functions from outside (MCP), for the local connectors and the hosted provider | `fetch` only |
 | `local` | the terminal, the shell, the files, the inspector, the executable | Bun |
 | `server` | HTTP and WebSocket, the lease, the provider | Bun |
 | `cloudflare` | the Durable Object of a chat | `workerd` |

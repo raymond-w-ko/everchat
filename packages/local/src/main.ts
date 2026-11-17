@@ -89,8 +89,32 @@
 // `effect/cli` prints for an argument, and the reason why the program
 // could not start or go on. Pipe mode's output is pipe.ts's own.
 //
-// Not here yet: the config file. Until then the picks come from the
-// arguments, with fixed defaults.
+// The config file
+//
+// `everchat` reads `config.json` in the home (config.ts) one time, at its
+// start, before it opens the database: the picks and the output limit. A
+// flag of the launch wins over the file, and the file over the fixed
+// defaults. A fault of the file ends the start, with each fault on the
+// standard error and the code 1. `everchat inspect` and `everchat serve`
+// do not read it.
+//
+// The connectors
+//
+// The servers that the config file names (connectors.ts) are loaded once
+// for each launch of `everchat` (the terminal and pipe mode), in `layer`:
+// after the store and the diagnostics, before the layers that take the
+// chat's list of functions. Their functions come after the built-ins in
+// that one list, so the head is fixed for the launch, and changes only at
+// the next load. The connections and the children of the servers live in
+// the launch's scope: they end with the launch, at a quit, at a signal or
+// at a failure. Each program of a server carries the launch's run tag, and
+// at the end, after the client's close, the sweep of the tag kills what is
+// left: a server that did not end, and each process that a server started
+// (connectors.ts). A server that does not answer within the load's limit
+// (`@everchat/mcp`) gives no function, and the chat loads without it; its
+// refusal is in the log (the source `mcp`), not on the screen. With no
+// server, a start loads no module of the client: it is imported only when
+// a server is named. `everchat inspect` and `everchat serve` start none.
 
 // Only this module of the package: its index loads all of it (an HTTP
 // server, sockets, a cluster), and each start would pay for that.
@@ -102,9 +126,10 @@ import * as os from "node:os"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import * as Compactor from "@everchat/core/compactor"
+import * as ConfigFile from "./config.ts"
 import * as Database from "@everchat/sqlite/database"
 import * as Diagnostics from "@everchat/core/diagnostics"
-import type { Declaration } from "@everchat/core/functions"
+import type { Declaration, Entry } from "@everchat/core/functions"
 import { head } from "@everchat/core/head"
 import { Inspect } from "./inspect.ts"
 import { gatewayLayer } from "./gateway.ts"
@@ -115,7 +140,7 @@ import { openaiLayer } from "@everchat/openai"
 import { Pipe } from "./pipe.ts"
 import { Shell } from "./shell.ts"
 import { readsLayer, storeLayer } from "@everchat/sqlite/bun"
-import type { Pick } from "@everchat/core/store"
+import { type Pick, Store } from "@everchat/core/store"
 import { Terminal } from "./terminal.ts"
 import { threadLayer } from "@everchat/codemode/thread"
 import { Turns } from "@everchat/core/turn"
@@ -146,7 +171,8 @@ mode: each line of the standard input is a message, and each message goes to
 the standard output as text.
 
 The chat is in the home: the directory that ${HOME_VARIABLE} names (default
-~/${HOME}). Another home is another chat.`
+~/${HOME}). Another home is another chat. The file ${ConfigFile.FILE} in the home,
+if it is there, sets the picks and the output limit; a flag wins over it.`
 
 export const ABOUT_INSPECT = `Serves the inspector: a page in a browser that shows the state of the chat in
 the home. It shows the log, the tree, the views, each turn's request, and the
@@ -177,24 +203,72 @@ loaded, and its page then gets no live event of that chat.`
 // the executable today, but only because of that file's name.)
 const WORKER = new URL("./worker.ts", import.meta.url)
 
+// The functions of the config's servers, loaded in the scope that the
+// effect runs in: their connections close with it. Loaded only here: with
+// no server, a start pays for no module of the client (the SDK too).
+// `limit`: the load's time limit in ms; the client's when not given. Each
+// program on stdio gets the launch's run tag, and the sweep of that tag is
+// registered before the load: at the scope's end it runs after the client
+// has closed the connections, and kills what is left (connectors.ts).
+const connect = (servers: ReadonlyArray<ConfigFile.Server>, cwd: string, limit: number | undefined) =>
+  Effect.gen(function*() {
+    const tag = (yield* Store).launch.runTag
+    const [{ connectors, swept }, { load }] = yield* Effect.promise(() => Promise.all([import("./connectors.ts"), import("@everchat/mcp")]))
+    yield* swept(tag)
+    return yield* load(connectors(servers, cwd, tag), limit === undefined ? { beside: DECLARATIONS } : { beside: DECLARATIONS, load: limit })
+  })
+
+// The functions from outside of a launch: none, with no server.
+interface Outside {
+  readonly declarations: ReadonlyArray<Declaration>
+  readonly entries: ReadonlyArray<Entry>
+}
+const NOTHING: Outside = { declarations: [], entries: [] }
+
 // The program but its interface, for one launch.
-export const layer = (given: { readonly home: string; readonly file: string; readonly cwd: string; readonly pick: Pick | undefined; readonly compactor: Pick }) => {
+// `limit`: the output limit in characters; with none, limit.ts's.
+// `servers`: the config's servers, whose functions the launch loads
+// (connectors.ts); none when not given. `load`: the load's time limit in
+// ms, for a test; the client's when not given.
+export const layer = (given: {
+  readonly home: string
+  readonly file: string
+  readonly cwd: string
+  readonly pick: Pick | undefined
+  readonly compactor: Pick
+  readonly limit?: number | undefined
+  readonly servers?: ReadonlyArray<ConfigFile.Server> | undefined
+  readonly load?: number | undefined
+}) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
     Layer.provideMerge(storeLayer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(gatewayLayer)))), Layer.provideMerge(base))
   // The chat's functions: one list, for the head and the sandbox
-  // (functions.ts, "One list for each stack"). The head is made one time,
-  // from that list, for the turns and the compactions.
-  const declarations: ReadonlyArray<Declaration> = DECLARATIONS
-  const made = head(declarations)
-  const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, head: made })), Layer.provideMerge(asking))
-  const limits = limitLayer().pipe(Layer.provideMerge(memory))
-  const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(limits))
-  const functions = functionsLayer(declarations, { cwd: given.cwd }).pipe(Layer.provideMerge(shell))
-  const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
-  return Turns.layer({ head: made }).pipe(Layer.provideMerge(sandbox))
+  // (functions.ts, "One list for each stack"): the built-ins, then the
+  // functions from outside. The head is made one time, from that list, for
+  // the turns and the compactions.
+  const stack = (outside: Outside) => {
+    const declarations: ReadonlyArray<Declaration> = [...DECLARATIONS, ...outside.declarations]
+    const made = head(declarations)
+    const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, head: made })))
+    const limits = limitLayer({ limit: given.limit }).pipe(Layer.provideMerge(memory))
+    const functions = functionsLayer(declarations, { cwd: given.cwd, more: outside.entries }).pipe(Layer.provideMerge(limits))
+    const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
+    return Turns.layer({ head: made }).pipe(Layer.provideMerge(sandbox))
+  }
+  // The shell is built before the load, and so ends after it: its end
+  // kills what carries the run tag, and the servers carry it too, so the
+  // client must have closed them first (connectors.ts).
+  const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(asking))
+  const servers = given.servers ?? []
+  // The load runs where the diagnostics are up, so its refusals are in the
+  // log, and its scope is the layer's: the launch's.
+  const loaded = servers.length === 0
+    ? stack(NOTHING)
+    : Layer.unwrap(Effect.map(connect(servers, given.cwd, given.load), stack))
+  return loaded.pipe(Layer.provideMerge(shell))
 }
 
 // Pipe mode ended, and a turn of this launch had failed. The output holds
@@ -236,9 +310,14 @@ const free = (file: string): string | undefined => {
   return undefined
 }
 
-// What a failure says to the person, in one row.
+// What a failure says to the person, in one row; the faults of the config
+// file in one row each.
 const reason = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause)
+  if (error instanceof ConfigFile.ConfigFault) {
+    // One fault on each line, each with the file's path.
+    return error.faults.map((fault) => error.file + ": " + fault).join("\neverchat: ")
+  }
   if (typeof error === "object" && error !== null && "_tag" in error) {
     const tagged = error as { readonly _tag: string; readonly message?: unknown; readonly op?: unknown; readonly pid?: unknown; readonly cause?: unknown }
     if (tagged._tag === "LaunchLive") {
@@ -274,20 +353,26 @@ const homeOf = Effect.gen(function*() {
 })
 
 // One launch: the home, the picks, and then the interface that fits.
-const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Option<string>; readonly effort: Option.Option<string>; readonly compactor: string }) {
+const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Option<string>; readonly effort: Option.Option<string>; readonly compactor: Option.Option<string> }) {
   const stdio = yield* Stdio.Stdio
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const home = yield* homeOf
+  // Before the database is opened: a fault of the file leaves no launch.
+  const settings = yield* ConfigFile.read(home, process.env)
+  const { model, effort, compactor: compacting } = ConfigFile.picks(
+    { model: Option.getOrUndefined(given.model), effort: Option.getOrUndefined(given.effort), compactor: Option.getOrUndefined(given.compactor) },
+    settings
+  )
   // The home holds the chat: no other account may read it.
   yield* fs.makeDirectory(home, { recursive: true, mode: 0o700 })
   // The model and the effort of this launch only: with none, the chat's own pick.
-  const pick: Pick | undefined = Option.isNone(given.model) && Option.isNone(given.effort)
+  const pick: Pick | undefined = model === undefined && effort === undefined
     ? undefined
-    : { vendor: "openai", model: Option.getOrElse(given.model, () => MODEL), effort: Option.getOrElse(given.effort, () => EFFORT), speed: "slow" }
-  const compactor: Pick = { vendor: "openai", model: given.compactor, effort: "low", speed: "slow" }
+    : { vendor: "openai", model: model ?? MODEL, effort: effort ?? EFFORT, speed: "slow" }
+  const compactor: Pick = { vendor: "openai", model: compacting ?? COMPACTOR, effort: "low", speed: "slow" }
   const cwd = process.cwd()
-  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor })
+  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor, limit: settings.limit, servers: settings.servers })
 
   if ((yield* stdio.stdinIsTerminal) && (yield* stdio.stdoutIsTerminal)) {
     // The failures of the terminal's input, until the process ends
@@ -374,9 +459,9 @@ const serveCommand = Command.make(
 export const command = Command.make(
   "everchat",
   {
-    model: Flag.String("model").pipe(Flag.withDescription(`The model of the turns, for this launch. With none: the chat's own, which is ${MODEL} at first`), Flag.optional),
-    effort: Flag.String("effort").pipe(Flag.withDescription(`Its reasoning effort, for this launch. With none: the chat's own, which is ${EFFORT} at first`), Flag.optional),
-    compactor: Flag.String("compactor").pipe(Flag.withDescription(`The model of the compactions (default: ${COMPACTOR})`), Flag.withDefault(COMPACTOR))
+    model: Flag.String("model").pipe(Flag.withDescription(`The model of the turns, for this launch. With none: the config file's, else the chat's own, which is ${MODEL} at first`), Flag.optional),
+    effort: Flag.String("effort").pipe(Flag.withDescription(`Its reasoning effort, for this launch. With none: the config file's, else the chat's own, which is ${EFFORT} at first`), Flag.optional),
+    compactor: Flag.String("compactor").pipe(Flag.withDescription(`The model of the compactions. With none: the config file's, else ${COMPACTOR}`), Flag.optional)
   },
   launch
 ).pipe(Command.withDescription(ABOUT), Command.withSubcommands([inspectCommand, serveCommand]))
