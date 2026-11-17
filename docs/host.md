@@ -7,22 +7,22 @@ code batch is planned from this page, bead by bead, so each interface is given e
 
 Where this page and `docs/design.md` differ, `docs/design.md` wins. The facts of the tree
 come from the investigation ec-f7m3i; this page cites its answers as "ec-f7m3i Q1" to
-"ec-f7m3i Q10", and other facts by `path:line` at 704b3ba (lead, ec-0r89g; lead,
-ec-olqwa), or by a file and a name in it. A decision cites its question of the settled
-list (`[Q19]`), "lead, ec-mxcl": the lead's eleven decisions, in the bead ec-1h538,
-"lead, ec-vgn58": the lead's form of the fixes of the page's two reviews, by its rule's
-name (A1 to E), "lead, ec-7bi64": the lead's form of the fixes of its two re-reviews, by
-its rule's name (F1 to K), "lead, ec-12a32": the lead's form of the fixes of its two
-second re-reviews, by its rule's name (L1 to P5), "lead, ec-349x0": the lead's rules
-after its third re-review, by their names (Q1 to S3), or "lead, ec-9p347": the lead's
-rulings on the points that the page's reviews left open, by their names (T1 to T11),
-"lead, ec-uoo8x": the lead's fixes of the reviews of those rulings, by their names (T5a,
-T6a), "lead, ec-x0hhp": the lead's rulings on the bound of the answers that hold
-messages, by their names (U1 to U4, U1a), or "lead, ec-hp7pq": the lead's ruling on the
-life of an R5 with a `wait` above 0, by its name (V1), or "lead, ec-jbry3": the lead's
-rulings of the page's second catch-up, by their names (X1 to X6), or "lead, ec-olqwa":
-the lead's rulings of the page's third catch-up. The words are those of `GLOSSARY.md`;
-the new words are listed at the end.
+"ec-f7m3i Q10", and other facts by `path:line` at 108e6fa (lead, ec-0r89g; lead,
+ec-olqwa; lead, ec-dkhr1), or by a file and a name in it. A decision cites its question
+of the settled list (`[Q19]`), or "lead, <a bead's id>": a ruling of the lead in that
+bead. Some of those beads name their rulings: "lead, ec-mxcl": the lead's eleven
+decisions, in the bead ec-1h538; "lead, ec-vgn58": the lead's form of the fixes of the
+page's two reviews, by its rule's name (A1 to E); "lead, ec-7bi64": the lead's form of
+the fixes of its two re-reviews, by its rule's name (F1 to K); "lead, ec-12a32": the
+lead's form of the fixes of its two second re-reviews, by its rule's name (L1 to P5);
+"lead, ec-349x0": the lead's rules after its third re-review, by their names (Q1 to S3);
+"lead, ec-9p347": the lead's rulings on the points that the page's reviews left open, by
+their names (T1 to T11); "lead, ec-uoo8x": the lead's fixes of the reviews of those
+rulings, by their names (T5a, T6a); "lead, ec-x0hhp": the lead's rulings on the bound of
+the answers that hold messages, by their names (U1 to U4, U1a); "lead, ec-hp7pq": the
+lead's ruling on the life of an R5 with a `wait` above 0, by its name (V1); "lead,
+ec-jbry3": the lead's rulings of the page's second catch-up, by their names (X1 to X6).
+The words are those of `GLOSSARY.md`; the new words are listed at the end.
 
 ## Contents
 
@@ -89,13 +89,14 @@ What the local command (`everchat serve`, section 7) adds:
 | Part | What `everchat serve` gives | Where it comes from |
 | --- | --- | --- |
 | `Chats` | `chatsLayer(file)` over its own file, `serve.db` in the home | `packages/sqlite/src/sqlite.ts:1220-1221` |
-| the stack | the hosted stack: the local stack with the hosted set of functions (below), as a function of a store (its shape below the table) | `packages/local/src/hosted.ts`, `hostedStack`; the terminal keeps its own (`packages/local/src/main.ts`, `layer`) (ec-lw754) |
+| the stack | the stack of a host's chat (`hostedStack`): the local stack with the hosted set of functions (below), as a function of a store (its shape below the table) | `packages/local/src/hosted.ts`, `hostedStack`; the terminal keeps its own (`packages/local/src/main.ts`, `layer`) (ec-lw754) |
 | the author's inference gateway | `gatewayLayer`, built one time for the process and given to each stack | `packages/local/src/gateway.ts:60-66` |
 | the HTTP server | `BunHttpServer.layer({ hostname: "127.0.0.1", port, ...serverOptions(limits) })`, as the inspector has it but with the numbers of `serverOptions` (at the defaults `idleTimeout: 190`, `websocket: { idleTimeout: 120, maxPayloadLength: 524288, closeOnBackpressureLimit: true, backpressureLimit: 8388608 }`; section 3, "Admission", 9) | `packages/local/src/inspector.ts:131-136`; `packages/server/src/serve.ts:168-182`, `serverOptions` |
 | the secret | 32 random bytes, new at each start, kept in memory only | lead, ec-mxcl, decision 5 |
 | the page and its two routes | under a path that starts with a random value of the start (section 7) | lead, ec-mxcl, decision 5 |
 
-**The hosted stack** (`packages/local/src/hosted.ts`, `hostedStack`; ec-lw754). An effect
+**The stack of a host's chat (`hostedStack`)** (`packages/local/src/hosted.ts:145-176`;
+ec-lw754). An effect
 with a `Scope`: it builds, one time for the process and in that scope, what holds no
 chat's state (the wire, over the author's inference gateway), and it gives the function of
 a store. For each store, that function's layer builds every part that holds a chat's
@@ -117,7 +118,11 @@ const hostedStack: <E = GatewayError>(options: HostedOptions<E>) => Effect.Effec
 ```
 
 Its `Turns` runs `say` and `stop` under the chat's own loggers (`ownLogs`; section 2,
-Load, step 2).
+Load, step 2). It names the list of a chat's functions, `HOSTED`, one time for the
+process, and makes the head from it one time (`head`); it gives that head to the turn
+loop's layer and to the compactor's by their one option, `head`, and the list to
+`hostedLayer(declarations)` (`packages/local/src/hosted.ts:156-157, 169-173`; ec-0di3a;
+ec-u3nf8).
 
 **The functions of a host's chat: the hosted set.** A chat of the host has no `shell` and
 no file functions (`read`, `write`, `edit`): only the functions that need no machine
@@ -126,7 +131,10 @@ no file functions (`read`, `write`, `edit`): only the functions that need no mac
 reaches a shell through HTTP is a risk with no use here. So no chat of the host needs a
 work directory or an environment. The set is the core's `HOSTED`: `zoom`, `date` and
 `result` (`packages/core/src/functions.ts`: `ZOOM`, `DATE`, `RESULT`), whose functions
-`hostedLayer` gives over the store and the memory. The core's `result` reads the call's
+`hostedLayer(declarations)` gives over the store and the memory: a function of the
+stack's list, which dies at its build when its entries' declarations are not that list
+(`packages/core/src/functions.ts`, "One list for each stack", `make` and `mismatches`;
+ec-0di3a). The core's `result` reads the call's
 whole output from the store (`store.call`) and writes no file (ec-o9i2n). The output limit
 of a host's chat writes no file either: the core's `noFileLayer`
 (`packages/core/src/limit.ts`) names `result(id)` only. The set is a parameter (the
@@ -189,7 +197,7 @@ host's own frames to a client are not gives, and a client that has not joined ge
 too (below, "The host's own frames"; lead, ec-9p347, T7). Each give
 runs under the channel's give lock, as one step that an interruption cannot split
 (`Effect.uninterruptible`, as the turn loop's `record` does,
-`packages/core/src/turn.ts:289-300`; lead, ec-vgn58, A2). A give never waits: a full
+`packages/core/src/turn.ts:292-303`; lead, ec-vgn58, A2). A give never waits: a full
 buffer ends its client (section 8, "A slow client"). The one exception is a client's own
 first read, which waits for room before each page, with no place and no lock held
 (below). Every give puts the JSON of the entry that the fit made (section 8, "The bytes of
@@ -229,7 +237,7 @@ gives it this way and only this way (lead, ec-vgn58, A1):
   N3). So no event comes between the client's read and the gives that reach the clients
   that joined: every numbered event up to `last` is in the store, because the turn loop
   publishes an event only after its commit (`record` and `recordPush`,
-  `packages/core/src/turn.ts:289-328`). And a
+  `packages/core/src/turn.ts:292-331`). And a
   client that joins has room for one largest entry at least, so a live entry does not end
   as `slow` a client that is still draining its last page. A burst after the join can
   still end it: that is the buffer's bound, as designed. Before the chat's first load the
@@ -270,7 +278,7 @@ never opens a second store of a chat that it holds: a second request for the cha
 its channel, and so its one loaded instance (lead, ec-mxcl, decision 6). Today a second
 `Chats.store` of a held chat closes the first launch as a crash, and both stores could
 write (ec-f7m3i Q2); and "one turn at a time" is held only by the one `Turns` of a chat
-(`packages/core/src/turn.ts:258, 269`; ec-f7m3i Q3). So one instance is the rule that keeps
+(`packages/core/src/turn.ts:261, 272`; ec-f7m3i Q3). So one instance is the rule that keeps
 both. Two processes on one file: the store's refusal of a live launch of this host
 (`LaunchLive`, `packages/sqlite/src/sqlite.ts:753-754`) stays the wall for the local use.
 The host answers it with `409 chat_elsewhere`. The lease is the server plan's [Q22].
@@ -285,7 +293,7 @@ the channel's lock:
    row is written.
 2. The stack, built over that store, in the loaded chat's scope. A load makes all again
    from the database (`docs/design.md`, "Tenants and isolation" [Q12, Q20]): the turn
-   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:682-703`),
+   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:685-706`),
    and the memory loads from the database (ec-f7m3i Q8). Of the stack's context the host
    takes only `Turns` and `Memory` (`packages/server/src/loaded.ts:97-103`, `LoadedChat`), and it
    calls `Turns.say` from its own fibers (`packages/server/src/host.ts:259-268`, `work`). The turn
@@ -293,10 +301,11 @@ the channel's lock:
    with that fiber's loggers. So the stack's `Turns` runs `say` and `stop` under the
    chat's own loggers (`packages/local/src/hosted.ts`, `hostedStack` and `ownLogs`), and
    what a turn or a compaction logs (a retry of a request, a compaction that failed) goes
-   to the chat's own `everchat_log`, not to the host's own log (lead, ec-olqwa; ec-lw754;
+   to the chat's own `everchat_log`, not to the host's own diagnostics (the standard error)
+   (lead, ec-olqwa; ec-lw754;
    the case "two chats of two stores at one time" of `packages/local/src/hosted.test.ts`).
 3. The listener: the host subscribes to the turn loop (`Turns.subscribe`,
-   `packages/core/src/turn.ts:243-246`), and reads the chat's `seq` from the store. Then,
+   `packages/core/src/turn.ts:246-249`), and reads the chat's `seq` from the store. Then,
    under the give lock, in one step, it chooses and sets `last`: the lower of that `seq`
    and the lowest `given` of the clients that have joined, or, with no client that joined,
    that `seq` (lead, ec-12a32, N1, N4; lead, ec-mhmpr, C; ec-fhxnm). A client's `after`
@@ -399,8 +408,8 @@ ec-349x0, Q1; section 3, "Admission", 5).
   `lock.withPermits(1)(Effect.uninterruptible(body))`: once the lock is taken, the
   memory's change, its write and `then` are one step
   (`packages/core/src/memory.ts:755-785`), and the log of a message publishes its events
-  in `pushWith`'s `then` (`recordPush`, `packages/core/src/turn.ts:307-328`; `record`,
-  `:289-300`, does the same for a write that is not the memory's). So an interruption that
+  in `pushWith`'s `then` (`recordPush`, `packages/core/src/turn.ts:310-331`; `record`,
+  `:292-303`, does the same for a write that is not the memory's). So an interruption that
   comes in that step waits for its end: the order of the commit and the publish holds, and
   a message that was committed is published. Section 9 asks for no change of this. An
   interruption ends a wait for the memory's lock: nothing is written and no event number
@@ -410,7 +419,7 @@ ec-349x0, Q1; section 3, "Admission", 5).
   `pushWith`, `packages/core/src/memory.ts:584-587`; ec-v44v7). The step after the publish
   is in it too (section 9, item 9; ec-ts3qg): `Turns.say` forks the turn that its log
   began (`launch`) in the log's uninterruptible step, after the publish (`recordPush`'s
-  `next`, `packages/core/src/turn.ts:661`). So no interruption leaves a turn's row running
+  `next`, `packages/core/src/turn.ts:664`). So no interruption leaves a turn's row running
   and its `start` published with no fiber to run it, which would make the next message
   begin a second turn; and a fork does not wait. The host's work calls `Turns.say(text,
   key, told)` with no uninterruptible wrap (`packages/server/src/host.ts:259-268`, `work`): the
@@ -440,11 +449,11 @@ ec-349x0, Q1; section 3, "Admission", 5).
   row (`packages/sqlite/src/sqlite.ts:779-784`, registered at `:804`); and the read of
   Unload step 2, one call for each 100 events that the load wrote (the restart's: a
   `start`, and the pages of a cut program's `tool` and `echo`,
-  `packages/core/src/turn.ts:682-703`), so one call when it wrote at most 100 events
+  `packages/core/src/turn.ts:685-706`), so one call when it wrote at most 100 events
   that fit one page; large events need more ("Accepted risks", 1).
 - **A turn that started is never stopped because a request ended**: it runs in the
   loaded chat's scope, not in the request's (`Turns.say`,
-  `packages/core/src/turn.ts:615-664`).
+  `packages/core/src/turn.ts:618-667`).
 
 **What the page promises, and what it sums** (lead, ec-349x0, R1, R2). The page promises
 three things about the end of work. Ownership goes back when the work has ended, never
@@ -622,10 +631,11 @@ and no work (`packages/server/src/http.ts:701-710`, `none`).
 **The place, the `Host` and the method come first** (lead, ec-g3gkl, 1; lead, ec-olqwa).
 A request takes its place first ("Admission", 3). Then, when `serve(options, local)` gave
 the gate its `authority` (the local command, section 7, "127.0.0.1 only"), the check of
-`Host` comes right after the place: on every route, the preflight (R7) too, and on a
-path that is no route. A `Host` that is not `authority`, byte for byte (another letter
-case or port, two values), gets `403 forbidden_origin` with no CORS header, and its place
-goes back at once. Without
+`Host` comes right after the place, while the host serves: on every route, the preflight
+(R7) too, and on a path that is no route. After `serve`'s end mark, every request gets
+`503 busy` before the gate, with no `Host` check ("Admission", 12; lead, ec-dkhr1). A
+`Host` that is not `authority`, byte for byte (another letter case or port, two values),
+gets `403 forbidden_origin` with no CORS header, and its place goes back at once. Without
 `authority` there is no such check, and no `Host` is read: there an HTTP/1.0 request with
 no `Host` goes on to the route's checks (`packages/server/src/http.ts:410-411`). Then the
 method: another gets
@@ -718,7 +728,7 @@ D). Each number is a limit of section 8.
    `retry-after: 1`, and nothing is logged; with a key, the client sends it again safely
    (section 5). The channel's lock is held for a load, an unload, or the log of one
    message and the start of its turn: not for the turn, which runs after the answer
-   (`Turns.say`, `packages/core/src/turn.ts:615-664`). The work under the lock has a
+   (`Turns.say`, `packages/core/src/turn.ts:618-667`). The work under the lock has a
    deadline of 20 s, and the lock is free when that work has ended (section 2, "The
    deadline of the work under the lock"). (D4)
 5. **An end** (lead, ec-349x0, Q). However a request ends (its deadline, its client's
@@ -1385,7 +1395,7 @@ to the diagnostics.
   (`StoreError`, `append`), and that `say` alone fails: the chat's next `say` runs.
 - **What the answer says**: the `accepted` event's number and the first and last page ids
   (R1, the `said` frame). The answer comes when the message is in the log; the turn runs
-  after it (`Turns.say`, `packages/core/src/turn.ts:615-664`).
+  after it (`Turns.say`, `packages/core/src/turn.ts:618-667`).
 - **While a turn runs** the message steers, as the turn loop does today: it is logged at
   once with its `accepted`, and the turn takes it in after its step's results; one that
   comes too late starts the next turn (ec-f7m3i Q3). The host adds no queue.
@@ -1508,7 +1518,11 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
 - **Its options.** `--port <n>`: the port; 4681 when it is not given (the inspector's is
   4680, `packages/local/src/inspector.ts:45`); 0 for any free port. A port in use fails
   the start with a message, as the inspector's does (`NoPort`,
-  `packages/local/src/inspector.ts:131-136`). No other option.
+  `packages/local/src/inspector.ts:131-136`). The port 80 fails the start with `NoPort`
+  too, before the file and the server are made: a browser gives no port in `Host` for
+  the port 80, and the gate takes only `127.0.0.1:<port>`, so the page could not be
+  served there (lead, ec-r4yb6, 4; `packages/local/src/serve.ts:104-111`, `host`). No
+  other option.
 - **Its file.** `serve.db` in the home (`EVERCHAT_HOME`, `packages/local/src/main.ts`,
   `HOME_VARIABLE` and `homeOf`), next to the terminal's `everchat.db`. The file is its
   own, because the local layers refuse a file with more than one tenant or chat
@@ -1526,12 +1540,14 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
 - **127.0.0.1 only**, as the inspector [lead, ec-mxcl]. The host's own origin is then
   `http://127.0.0.1:<port>`, and its list of origins is that one origin. `serve(options,
   local)` gives the gate its `authority`, `127.0.0.1:<port>` with the port that the server
-  got (`packages/server/src/serve.ts`, the head comment; `packages/local/src/serve.ts`,
-  `host`). A request whose `Host` header is not that text, byte for byte, gets `403
-  forbidden_origin`, on every route and on a path that is no route, right after its place
-  (section 3, "The checks of each request, in their order"; lead, ec-g3gkl, 1;
-  `packages/server/src/http.ts:410-411`, `wrongHost`): this refuses a page of a web site
-  that points its own name at 127.0.0.1.
+  got (`packages/server/src/serve.ts`, the head comment;
+  `packages/local/src/serve.ts:128-137`, `host`). While the host serves, a request whose `Host` header is not that text, byte
+  for byte, gets `403 forbidden_origin`, on every route and on a path that is no route,
+  right after its place (section 3, "The checks of each request, in their order"; lead,
+  ec-g3gkl, 1; `packages/server/src/http.ts:410-411`, `wrongHost`): this refuses a page
+  of a web site that points its own name at 127.0.0.1. After `serve`'s end mark, every
+  request gets `503 busy` before the gate, with no `Host` check (section 3, "Admission",
+  12; lead, ec-dkhr1).
   The check is of the header's text, and of nothing else (ec-yi50l; lead, ec-olqwa). A
   request in the absolute form with another host in its target and the right `Host`
   header is served, since the server drops the target's host (section 3, "A route's
@@ -1580,22 +1596,26 @@ two routes for the page alone (lead, ec-mxcl, decision 5):
   person's click sends none). They take no token: the start value is their wall, as the
   inspector's. They count among the requests in flight ("Admission", 3: `503 busy` with
   `retry-after: 1`), and their place goes back when their work has ended.
-- **At the layer's start** (`packages/server/src/page.ts`, `pageRoutes`), before anything
-  is served, the layer fails with `LocalRefused`: with the reason `start` when the start
-  value is not 32 hex digits in lower case, with the reason `page` when the page has not
-  exactly one `<script>`, or its one has a `src`. Neither the error nor its text holds the
-  value.
+- **At the layer's start** (`packages/server/src/page.ts:230-233`, `pageRoutes`), before
+  anything is served, the layer fails with `LocalRefused`: with the reason `start` when
+  the start value is not 32 hex digits in lower case, with the reason `page` when the page
+  has not exactly one `<script>`, or its one has a `src`. Neither the error nor its text
+  holds the value.
 - **The path.** R8 is `/<start>/`, R9 `/<start>/chats`, R10 `/<start>/token`. The path's
   first part is compared with the start value over the start value's whole length, with
   no early end, so the time of a refusal tells nothing of how many digits were right
-  (`page.ts`, `isStart`). Every other path under it, a wrong start value (another letter
-  case or length too) and `/<start>` with no slash at its end are no route: the gate's
-  answer of no route, `404` with no body.
-- **R9**, in this order: the count; its body, read (at most 16,384 bytes, `PAGE_BODY`, in
-  at most `bodyRead`, 10 s) and dropped; `makeChat` of the local tenant with the default
-  pick. A request with no body is taken as no body: the page's own R9 posts none. A body
-  over the bound gets `413 too_large`, and one that comes too slowly `408 timeout`. A
-  store's failure is `500 internal`.
+  (`page.ts:159-163`, `isStart`). Every other path under it, a wrong start value
+  (another letter case or length too) and `/<start>` with no slash at its end are no
+  route: the gate's answer of no route, `404` with no body.
+- **R9**, in this order: the count; its body, when the request has one, read (at most
+  16,384 bytes, `PAGE_BODY`, in at most `bodyRead`, 10 s) and dropped; `makeChat` of the
+  local tenant with the default pick (`packages/server/src/page.ts:245-256`, `chatWork`).
+  A request has no body when it has no stream or a `content-length` of 0, and then
+  nothing is read: the page's own R9 posts none (lead, ec-r4yb6, 2; `page.ts:209-210`,
+  `hasBody`). A body over the bound gets `413 too_large`, and one that comes too slowly
+  `408 timeout`. A body whose read fails, in its middle or at once, gets `400
+  bad_request` with the connection closed, and no chat is made; it counts in the rate,
+  as below. A store's failure is `500 internal`.
 - **R10**, in this order: the count; the body's type, as R1's (`application/json`, and at
   most the parameter `charset=utf-8`; else `415 unsupported_type`); the body, at most
   16,384 bytes (`PAGE_BODY`) in at most `bodyRead` (`413`, `408`); its form: UTF-8 JSON,
@@ -1625,11 +1645,31 @@ R9 and R10 for its chats and its tokens. Its rules are the inspector's
 - it keeps its chats' UUIDs in the browser's `localStorage`, under the key
   `everchat.chats`: a JSON list of UUIDs in lower case, the oldest first. A value that is
   no such list is dropped whole, and a UUID twice is kept once
-  (`packages/server/src/client.html`, `STORED` and `loadChats`);
+  (`packages/server/src/client.html:81, 157-169`, `STORED` and `loadChats`);
 - it asks R10 for a new token one minute before its `exp` (`EARLY`), and after a `401`. A
   token names the newest 64 chats of the list (`MOST`), the open chat always among them:
-  an open chat older than those takes the place of the oldest of them (`client.html`,
-  `tokenChats`; ec-lycw1);
+  an open chat older than those takes the place of the oldest of them
+  (`client.html:186-190`, `tokenChats`; ec-lycw1);
+- after R10's `404 no_chat` for a list of more than one chat, it hunts for the gone chats
+  (lead, ec-ot20g, 1 to 3; lead, ec-88qxe, 1; `client.html:214-306`, `huntCall`, `search`
+  and `hunt`; `:313-340`, `ask`):
+  - its next call of R10 asks a token for the open chat alone, and that token serves the
+    open chat's work at once; a `404 no_chat` on that call takes the open chat from the
+    list. While the hunt runs, the page's other asks of R10 name the open chat alone when
+    one is open; with no chat open, they name `tokenChats`, as with no hunt. The chat of a
+    Send that is not open still gets a token that names it after at most one more call of
+    R10, for it alone (`client.html:361-391`, `tokenFor` and `askFor`; lead, ec-8gqty, 1;
+    ec-cdeu2, case 2);
+  - the hunt runs behind: no ask, no R9 and no work of the open chat waits for it. It asks
+    R10 for the halves of a list that holds a gone chat, down to one chat;
+  - it makes at most 30 calls of R10 in any 60 s (`HUNT`, `SPAN`; half of R10's rate). A
+    `429` waits its `retry-after`, 1 s at least, and asks again, counted in the 30, with
+    no error sentence on the page;
+  - a chat leaves the list only after a `404 no_chat` of an R10 call that named that chat
+    alone. Another failure (a `500`, a fault of the network) ends the hunt with every chat
+    kept and no sentence; the next `404 no_chat` starts it again. A round that finds no
+    gone chat ends the hunt. At a round's end it asks one token for the chats that are
+    left (`tokenChats`), and hunts again when that is `404 no_chat` too;
 - the page's list of chats is the browser's, for the address's origin (lead, ec-hwa43; the
   browser's proofs ec-5irtt and ec-hwa43). A start on the same port is the same origin,
   and its page finds the chats again. A start on another port (`--port 0` gives a new one
@@ -1774,8 +1814,8 @@ Each queue between the turn loop and a client has a bound (lead, ec-vgn58, C):
   limits in use: at the defaults an `accepted` is at most 394,452 bytes, a `message`
   180,246, an `end` 12,087, and a `start` 61. A `call`'s `program`, an `end`'s `why` and a piece's `delta`
   have no bound in the tree: the program and the delta are what the model wrote
-  (`packages/core/src/turn.ts:422`, `:494`), and `why` a text of the turn loop or of the
-  vendor (`packages/core/src/turn.ts:498`, `:512`; the vendor's error text,
+  (`packages/core/src/turn.ts:425`, `:497`), and `why` a text of the turn loop or of the
+  vendor (`packages/core/src/turn.ts:501`, `:515`; the vendor's error text,
   `packages/openai/src/openai.ts:288-295`). The next two parts bound them.
 
 ### The bytes of one entry
@@ -1808,10 +1848,10 @@ The host bounds what it gives in bytes (lead, ec-7bi64, F).
    largest entry finite:
    - an `end`'s `why` can be a vendor's error text with no bound: the wire copies the
      vendor's `error.message` whole (`packages/openai/src/openai.ts:288-295`), and the turn
-     loop ends the turn with it (`packages/core/src/turn.ts:498`). The turn loop keeps at
+     loop ends the turn with it (`packages/core/src/turn.ts:501`). The turn loop keeps at
      most 2,000 characters of a `why`, for every use, before it stores and publishes it
      (section 9). It makes a `why` well formed one time already, so the row and the event
-     hold the same text (`packages/core/src/turn.ts:396-413`); the cut goes in the same
+     hold the same text (`packages/core/src/turn.ts:399-416`); the cut goes in the same
      place, so they stay equal;
    - a `call`'s `program` and a piece's `delta` are parts of one answer of the model. The
      stack of a host's chat gives the wire a cap on one answer (`request.max`, sent as
@@ -2061,9 +2101,11 @@ or a later bead does, as named.
   fixed, the deadline cuts that wait and the lock is free at `lock` (20.000 s measured),
   no risk (lead, ec-jbry3, X5).
 - **The cap of one answer in bytes** (C of "The bytes of one entry"; ec-lw754, ruling 5):
-  the stack of a host's chat sends every request of the chat with `max` at most `MAX`,
-  16,384 tokens (`packages/local/src/hosted.ts:89-90`). At 24 bytes of JSON for a token,
-  the lead's assumption and not a measure, that is 393,216 bytes. A case of
+  the stack of a host's chat sends every request of the chat with `max` at most its cap:
+  the option `max` of `hostedStack`, or `MAX`, 16,384 tokens, when the options give none,
+  as `everchat serve` gives none (`packages/local/src/hosted.ts:92-93, 147`; lead,
+  ec-dkhr1). `MAX` is that default, not a fixed bound. At 24 bytes of JSON for a token,
+  the lead's assumption and not a measure, the default cap is 393,216 bytes. A case of
   `packages/local/src/hosted.test.ts` gives a fake wire's answer of 393,216 bytes in one
   program: its `call` event is 393,269 bytes of JSON, under 394,452, the largest
   `accepted` at the defaults. The vendor's true bytes for a token are for a real run,
@@ -2131,15 +2173,18 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    them under the channel's lock (section 2).
 4. **`result` in the core, over the store.** Done (ec-o9i2n): the core gives `RESULT`,
    whose function reads the call's output from the store (`store.call`) with no file,
-   `HOSTED` (`zoom`, `date`, `result`) and `hostedLayer`
-   (`packages/core/src/functions.ts`); and an output limit that writes no file and names
+   `HOSTED` (`zoom`, `date`, `result`) and `hostedLayer(declarations)`, a function of the
+   stack's list (`packages/core/src/functions.ts`; ec-0di3a); and an output limit that writes no file and names
    `result(id)` only, `noFileLayer` (`packages/core/src/limit.ts`).
 5. **The local stack as a function of a store.** Done (ec-lw754): `hostedStack`
-   (`packages/local/src/hosted.ts:142-168`) builds the wire one time for the process (over
-   `gatewayLayer`, when no `wire` is given), and gives the stack of a chat over the store
-   that `Chats.store` gives (section 1, "The hosted stack"; section 2). The stack of a
+   (`packages/local/src/hosted.ts:145-176`) builds the wire one time for the process (over
+   `gatewayLayer`, when no `wire` is given), makes the list and the head one time for the
+   process and gives the head to `Turns.layer` and `Compactor.layer` by the option `head`
+   (ec-0di3a; ec-u3nf8), and gives the stack of a chat over the store
+   that `Chats.store` gives (section 1, "The stack of a host's chat"; section 2). The stack of a
    host's chat gives the wire a cap on one answer (`request.max`,
-   `packages/openai/src/openai.ts:192`), `MAX`, 16,384 tokens, and its case measures the cap in bytes (section 8, "What is not proved here").
+   `packages/openai/src/openai.ts:192`), `MAX`, 16,384 tokens, when its option `max` gives
+   none, and its case measures the cap in bytes (section 8, "What is not proved here").
    The terminal keeps its stack (`packages/local/src/main.ts`, `layer`).
 6. **The inspector's error `NoChat` renamed `NoHome`.** Done (ec-wp0xs): `NoHome`
    (`packages/local/src/main.ts`, `NoHome`), in the batch that makes the local package
@@ -2176,7 +2221,7 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    change of the log's order (O1): the log of a message stays as the core has it, whole
    from the take of the memory's lock, and a wait for that lock can be cut (section 2,
    "The deadline of the work under the lock"; `record`,
-   `packages/core/src/turn.ts:289-300`, and `recordPush`, `:307-328`; `Memory.apply`,
+   `packages/core/src/turn.ts:292-303`, and `recordPush`, `:310-331`; `Memory.apply`,
    `packages/core/src/memory.ts:755-785`), so the commit comes before the publish, a
    key's numbers on a retry are those of the message that was committed, and a turn runs
    in the loaded chat's scope, as today. One change next to it, done (ec-ts3qg):

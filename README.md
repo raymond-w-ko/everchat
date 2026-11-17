@@ -43,7 +43,10 @@ You need [Bun](https://bun.sh) and [just](https://github.com/casey/just).
 `everchat serve` (`just run serve`) is for development: it serves the
 reference client's page and the chats of one local tenant, in `serve.db` in
 the home, on 127.0.0.1 port 4681 (`--port <n>`). It prints the page's
-address. Run one for a home.
+address. Run one for a home. The page's list of chats is the browser's, for
+the address's origin: a start on another port (`--port 0` too, which takes a
+new one at each start) shows an empty list, and the chats stay in the home's
+database.
 
 License
 -------
