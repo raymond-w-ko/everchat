@@ -50,6 +50,7 @@
         "@everchat/codemode": "workspace:*",
         "@everchat/core": "workspace:*",
         "@everchat/openai": "workspace:*",
+        "@everchat/server": "workspace:*",
         "@everchat/sqlite": "workspace:*",
         "effect": "4.1.2",
       },

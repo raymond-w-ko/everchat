@@ -15,6 +15,11 @@
 // database, so it runs next to a launch of the chat, or with none. It
 // prints the page's address, and it runs until a signal ends it.
 //
+// `everchat serve` does not start the chat either. It serves the host on
+// this machine, for the reference client's page, for development: chats of
+// one local tenant in the home's `serve.db`, over HTTP on 127.0.0.1. It
+// prints the page's address, and it runs until a signal ends it (serve.ts).
+//
 // The two interfaces
 //
 // - The terminal (terminal.ts), when the standard input and the standard
@@ -115,6 +120,9 @@ export const COMPACTOR = "gpt-6-luna"
 // The inspector's port when no argument gives one.
 export const INSPECT_PORT = 4680
 
+// The host's port when no argument gives one (serve.ts, `PORT`).
+export const SERVE_PORT = 4681
+
 export const ABOUT = `EverChat: one chat that never ends.
 
 In a terminal, it shows the chat and reads the keys. With no terminal (the
@@ -133,6 +141,19 @@ changes nothing.
 It prints the page's address. The address holds a token that is new at each
 start: only who has the address can read the chat. The server listens on this
 machine only (127.0.0.1).`
+
+export const ABOUT_SERVE = `Serves the host on this machine, for development: the chats of one local
+tenant, in the file serve.db in the home, and the page of the reference
+client, in a browser, which makes chats and talks to them. A chat's turns call
+only zoom, date and result: no shell and no file.
+
+It prints the page's address. The address holds a value that is new at each
+start: only who has the address can open the page. The server listens on this
+machine only (127.0.0.1), and takes only that address as the request's host.
+
+Run one everchat serve for a home: a second one on the same home, on another
+port, gets an answer of "chat_elsewhere" for a chat that the first has
+loaded, and its page then gets no live event of that chat.`
 
 // The program of the sandbox's worker thread. In the executable, every
 // module's address is the executable's own, and Bun finds an entrypoint of
@@ -245,7 +266,7 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
 })
 
 // The home has no chat to inspect.
-export class NoChat extends Schema.TaggedError<NoChat>()("NoChat", { message: Schema.String }) {}
+export class NoHome extends Schema.TaggedError<NoHome>()("NoHome", { message: Schema.String }) {}
 
 // The inspector, until a signal ends it. It takes no launch and makes no
 // home: it reads the database that is there.
@@ -255,7 +276,7 @@ const inspect = Effect.fnUntraced(function*(given: { readonly port: number }) {
   const home = yield* homeOf
   const file = path.join(home, Database.FILE)
   if (!(yield* fs.exists(file))) {
-    return yield* new NoChat({ message: `no chat in ${home}: the inspector shows a chat that EverChat has started. ${HOME_VARIABLE} names another home.` })
+    return yield* new NoHome({ message: `no chat in ${home}: the inspector shows a chat that EverChat has started. ${HOME_VARIABLE} names another home.` })
   }
   // Loaded only here: the HTTP server is not part of a launch of the chat.
   const { Inspector } = yield* Effect.promise(() => import("./inspector.ts"))
@@ -275,6 +296,30 @@ const inspectCommand = Command.make(
   inspect
 ).pipe(Command.withDescription(ABOUT_INSPECT))
 
+// The host, until a signal ends it. It takes a launch for each chat that it
+// loads, in its own file.
+const serveHost = Effect.fnUntraced(function*(given: { readonly port: number }) {
+  const fs = yield* FileSystem.FileSystem
+  const home = yield* homeOf
+  // The home holds the chats: no other account may read it.
+  yield* fs.makeDirectory(home, { recursive: true, mode: 0o700 })
+  // Loaded only here: the host is not part of a launch of the chat, nor of the inspector.
+  const { host } = yield* Effect.promise(() => import("./serve.ts"))
+  return yield* host({
+    home,
+    port: given.port,
+    pick: { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" },
+    compactor: { vendor: "openai", model: COMPACTOR, effort: "low", speed: "slow" },
+    version: VERSION
+  })
+})
+
+const serveCommand = Command.make(
+  "serve",
+  { port: Flag.Int("port").pipe(Flag.withDescription(`The port on this machine (default: ${SERVE_PORT}). 0: any free port`), Flag.withDefault(SERVE_PORT)) },
+  serveHost
+).pipe(Command.withDescription(ABOUT_SERVE))
+
 export const command = Command.make(
   "everchat",
   {
@@ -283,7 +328,7 @@ export const command = Command.make(
     compactor: Flag.String("compactor").pipe(Flag.withDescription(`The model of the compactions (default: ${COMPACTOR})`), Flag.withDefault(COMPACTOR))
   },
   launch
-).pipe(Command.withDescription(ABOUT), Command.withSubcommands([inspectCommand]))
+).pipe(Command.withDescription(ABOUT), Command.withSubcommands([inspectCommand, serveCommand]))
 
 // The flags that `effect/cli` adds to each command, but its wizard: that
 // one asks for each argument in turn, and this program has three.

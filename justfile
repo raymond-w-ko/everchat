@@ -62,7 +62,7 @@ build:
 
 # Build the executable, and run the tests of the whole program on it.
 test-build: build
-    EVERCHAT_BIN=./everchat bun test --isolate --timeout {{test_timeout}} packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts
+    EVERCHAT_BIN=./everchat bun test --isolate --timeout {{test_timeout}} packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts packages/local/tests/serve.test.ts
 
 # The full check: the types, the tests from source, and the tests of the
 # whole program on the executable.

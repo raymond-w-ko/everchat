@@ -12,6 +12,20 @@
 // (http.ts, `makeGate`), then it serves the routes for as long as the layer
 // lives.
 //
+// `serve(options, local)`: with `local` (page.ts, `LocalOptions`: the start
+// value, the local tenant, the pick of a new chat and the one value of
+// `Host`), the gate is made with `authority` (http.ts: every member checks the
+// header `Host`), and three more routes are served, each through the gate's
+// `local`: R8 `GET /<start>/`, the page; R9 `POST /<start>/chats`, a new
+// chat; R10 `POST /<start>/token`, a token (docs/host.md, section 7; lead,
+// ec-3jrdd, 1). A start value of another form than 32 hex digits in lower
+// case, or a page that has not exactly one `<script>`, fails the layer at
+// its start with `LocalRefused`, before anything is served. Every other path
+// under the start value, a wrong start value and `/<start>` with no slash at
+// its end get the gate's answer of no route; the start value is compared
+// over its whole length, with no early end (`pageRoutes`). With no `local`,
+// there is no such route and no check of `Host`.
+//
 // The routes, each path exact on the target as the server gives it: no
 // other letter case, no slash at its end, no part more. `{chat}` is that
 // text, and the gate checks it (lead, ec-5tdje, 1). Bun parses a request's
@@ -37,6 +51,9 @@
 // | `GET /v1/chats/{chat}/events`, any other `Accept` or none | R5, `pollRoute` (poll.ts) |
 // | `GET /v1/chats/{chat}/socket` | R6, `socketRoute` (socket.ts) |
 // | `OPTIONS` on the paths of R1 to R5 | R7, the gate's `preflight` |
+// | `GET /<start>/` (with `local`) | R8, the page (page.ts) |
+// | `POST /<start>/chats` (with `local`) | R9, a new chat (page.ts) |
+// | `POST /<start>/token` (with `local`) | R10, a token (page.ts) |
 //
 // Every other path, and every other method on these paths (a `HEAD` too, and
 // `OPTIONS` on R6's path), gets the gate's answer of no route (`none`: a
@@ -125,6 +142,7 @@ import { messagesRoute, snapshotRoute } from "./history.ts"
 import { Host, type HostOptions, type SecretTooShort } from "./host.ts"
 import { errorAnswer, type Gate, makeGate } from "./http.ts"
 import { DEFAULTS, type Limits, type LimitsRefused } from "./limits.ts"
+import { type LocalOptions, type LocalRefused, type PageFind, pageRoutes } from "./page.ts"
 import { pollRoute } from "./poll.ts"
 import { messageRoute } from "./post.ts"
 import { socketRoute } from "./socket.ts"
@@ -243,8 +261,9 @@ const busyAnswer = (request: HttpServerRequest.HttpServerRequest, origins: Reado
     : answer
 }
 
-// The handler of all routes for one request.
-const routes = (gate: Gate, host: typeof Host.Service) => {
+// The handler of all routes for one request; with `page`, the page's routes
+// first (R8 to R10).
+const routes = (gate: Gate, host: typeof Host.Service, page: PageFind | undefined) => {
   const r1 = messageRoute(gate, host)
   const r2 = snapshotRoute(gate, host.reads, host.limits)
   const r3 = messagesRoute(gate, host.reads, host.limits)
@@ -252,7 +271,10 @@ const routes = (gate: Gate, host: typeof Host.Service) => {
   const r5 = pollRoute(gate, host.registry, host.reads, host.limits)
   const r6 = socketRoute(gate, host)
   return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
-    const found = PATH.exec(pathOf(request.url))
+    const path = pathOf(request.url)
+    const paged = page?.(path)
+    if (paged !== undefined) return paged
+    const found = PATH.exec(path)
     if (found === null) return gate.none
     const chat = found[1] as string
     const method = request.method
@@ -339,7 +361,10 @@ const tracker = (origins: ReadonlyArray<string>) => {
 // The layer
 // ---------
 
-export const serve = (options: HostOptions): Layer.Layer<Host, LimitsRefused | SecretTooShort, Chats | HttpServer.HttpServer> =>
+export const serve = (
+  options: HostOptions,
+  local?: LocalOptions
+): Layer.Layer<Host, LimitsRefused | SecretTooShort | LocalRefused, Chats | HttpServer.HttpServer> =>
   Layer.effectContext(Effect.gen(function*() {
     const scope = yield* Effect.scope
     // The host's scope, closed first at the end, before the server stops
@@ -348,9 +373,16 @@ export const serve = (options: HostOptions): Layer.Layer<Host, LimitsRefused | S
     const context = yield* Layer.buildWithScope(Host.layer(options), own)
     const host = Context.get(context, Host)
     const chats = yield* Chats
-    const gate = makeGate({ secret: host.secret, origins: host.origins, limits: host.limits, chats })
+    const gate = makeGate({
+      secret: host.secret,
+      origins: host.origins,
+      limits: host.limits,
+      chats,
+      ...(local === undefined ? {} : { authority: local.authority })
+    })
+    const page = local === undefined ? undefined : yield* pageRoutes(local, { gate, chats, secret: host.secret, limits: host.limits })
     const requests = tracker(host.origins)
-    yield* HttpServer.serveEffect(requests.track(routes(gate, host)))
+    yield* HttpServer.serveEffect(requests.track(routes(gate, host, page)))
     // Added last, so run first: the mark, the host's end, the wait for the
     // streams and the interruption of the requests, then the server's own
     // finalizers of these routes.

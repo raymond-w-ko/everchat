@@ -11,9 +11,13 @@ The root `AGENTS.md` holds the rules for every file.
   `./backend` (`packages/server/src/backend.ts`: `makeTenant`, `makeChat`,
   and `makeToken` again). The `.` entry gives each name of `host.ts`
   (`Host` and `Host.layer`, with the message in under a channel's lock,
-  `HostOptions` and the errors of a message in), `serve(options)`, the layer
-  that serves the routes R1 to R7 over the `HttpServer` of its context, and
-  `serverOptions(limits)`, the numbers of that server.
+  `HostOptions` and the errors of a message in), `serve(options, local?)`,
+  the layer that serves the routes R1 to R7 over the `HttpServer` of its
+  context, and with its option `local` (`LocalOptions`: the start value, the
+  local tenant, the pick of a new chat and the one value of `Host`) the
+  page's routes R8 to R10 too and the gate's check of `Host`, with
+  `LocalRefused`, its error at the start; and `serverOptions(limits)`, the
+  numbers of that server.
 - The modules of the host, one line each:
   - `packages/server/src/reads.ts`: the places of `reads`, and a client's
     own first read with its join.
@@ -30,6 +34,10 @@ The root `AGENTS.md` holds the rules for every file.
   - `packages/server/src/stream.ts`: R4, the event stream.
   - `packages/server/src/poll.ts`: R5, the events with no stream.
   - `packages/server/src/socket.ts`: R6, the WebSocket.
+  - `packages/server/src/page.ts`: R8 to R10, the local command's page with
+    its policy, a new chat and a token, under the start value.
+  - `packages/server/src/client.html`: the page, the reference client, one
+    file with its style and its one script, served by R8.
   - `packages/server/src/serve.ts`: `serve`, the routes by their paths and
     methods over one gate, the end in its order, and `serverOptions`.
   - `packages/server/src/index.ts`: the `.` entry.
@@ -94,7 +102,10 @@ declarations name, the core's `node:crypto` too, and refuses only a module
 that none names: the list of built-ins of `tools/graph.ts`, which gives the
 server's files none, is what refuses each module of Bun or of Node there.
 Its tests may import any of them, with the Bun types
-(`packages/server/tsconfig.test.json`).
+(`packages/server/tsconfig.test.json`). The page, `client.html`, is taken in
+as text (`with { type: "text" }`, as the inspector's), with no build step;
+`tsconfig.server.d.ts` declares such an import as a text, and `crypto.subtle`
+for its script's hash.
 
 ## Its design
 

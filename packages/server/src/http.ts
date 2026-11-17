@@ -75,6 +75,25 @@
 // the list, each answer, an error too, has `access-control-allow-origin` with
 // that origin and `vary: origin`. No answer allows credentials.
 //
+// The local command's host (section 7, "127.0.0.1 only"; lead, ec-g3gkl, 1):
+// with `authority`, each member that takes a place (`route`, `none`,
+// `socket`, `preflight`, `local`) checks the header `Host` right after the
+// place, before the method and every other check: a `Host` that is not
+// `authority`, byte for byte (another letter case or port, a name that points
+// at 127.0.0.1, two values, none), gets `403 forbidden_origin` with no CORS
+// header and gives its place back at once. This refuses a page of a web site
+// that points its own name at 127.0.0.1. With no `authority`, no `Host` is
+// read.
+//
+// The page's routes, R8 to R10 (`local`; section 7, "The start value and the
+// page's routes"; lead, ec-g3gkl, 2 and 3): the place, the `Host`, the method
+// (R8 `GET`, R9 and R10 `POST`; another gets the answer of `none`), the
+// origin (R9 and R10 need an `Origin` on the list; R8 takes none too), then
+// the work under the deadline, as a route's. They read no token. Their work
+// reads its body with a bound of its own (R10: 16,384 bytes) in at most
+// `bodyRead`. Their answers are no stream (the page, JSON): the place goes
+// back when the work has ended.
+//
 // The gate's log holds the route's name, the status, the error's code and the
 // token check's number: never a query, a header's value, a token or a body.
 
@@ -159,6 +178,22 @@ export interface GateOptions {
   readonly origins: ReadonlyArray<string>
   readonly limits: Limits
   readonly chats: typeof Chats.Service
+  // The one value of the header `Host` that the host takes, as text (the
+  // local command's `127.0.0.1:<port>`); with none, no `Host` is checked.
+  readonly authority?: string
+}
+
+// The page's routes (section 7): R8 the page, R9 a new chat, R10 a token.
+export type PageRoute = "R8" | "R9" | "R10"
+
+const PAGE_METHODS: Record<PageRoute, "GET" | "POST"> = { R8: "GET", R9: "POST", R10: "POST" }
+
+// What the work of a page's route gets: the request, and its body's reader,
+// which takes at most `max` bytes in at most `bodyRead`; else `Refused`
+// `too_large`, or `timeout` with `close`, as `Gate.body`.
+export interface Local {
+  readonly request: HttpServerRequest.HttpServerRequest
+  readonly body: (max: number) => Effect.Effect<Uint8Array, Refused>
 }
 
 // What the checks found, for the route's work.
@@ -259,6 +294,15 @@ export interface Gate {
   readonly token: (text: string, chat: string | undefined) => Effect.Effect<Authorized, SocketRefused>
   // R7: a place and check 1 only.
   readonly preflight: Effect.Effect<HttpServerResponse.HttpServerResponse, never, HttpServerRequest.HttpServerRequest>
+  // R8 to R10: the place, the `Host`, the method (else the answer of `none`),
+  // the origin (R9 and R10: an `Origin` on the list only; R8: none passes
+  // too), then `work`, under the deadline. No token is read. It never fails:
+  // a `Refused` of the work gives its error answer, any other failure
+  // `500 internal`.
+  readonly local: <E, R>(
+    route: PageRoute,
+    work: (local: Local) => Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>
+  ) => Effect.Effect<HttpServerResponse.HttpServerResponse, never, R | HttpServerRequest.HttpServerRequest>
   // The body of R1: at most `body` bytes, read in at most `bodyRead`; else
   // `Refused` `too_large`, or `timeout` with `close`.
   readonly body: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<Uint8Array, Refused>
@@ -323,7 +367,7 @@ const once = (action: () => void): (() => void) => {
 }
 
 export const makeGate = (options: GateOptions): Gate => {
-  const { secret, origins, limits, chats } = options
+  const { secret, origins, limits, chats, authority } = options
   let taken = 0
   let waiting = 0
 
@@ -360,6 +404,16 @@ export const makeGate = (options: GateOptions): Gate => {
   // `503 busy` past the bound of places.
   const full = (route: string, origin: string | undefined, listed: boolean) =>
     Effect.as(note({ route, status: 503, error: "busy" }), finish(errorAnswer("busy", { retryAfter: 1 }), origin, listed))
+
+  // Whether the request's `Host` is not the one the host takes (text, byte
+  // for byte); with no `authority`, never.
+  const wrongHost = (request: HttpServerRequest.HttpServerRequest) =>
+    authority !== undefined && request.headers["host"] !== authority
+
+  // `403 forbidden_origin` for an origin off the list, or a wrong `Host`: no
+  // CORS header.
+  const forbidden = (route: string) =>
+    Effect.as(note({ route, status: 403, error: "forbidden_origin" }), finish(errorAnswer("forbidden_origin"), undefined, false))
 
   // The place and the deadline of one request that holds `give`. The
   // deadline is `request` from `arm`; `fired` is done when it passes, and
@@ -438,7 +492,7 @@ export const makeGate = (options: GateOptions): Gate => {
     })
 
   // The answer of a work that failed.
-  const failed = (route: Route | "R6", cause: Cause.Cause<unknown>) => {
+  const failed = (route: Route | "R6" | PageRoute, cause: Cause.Cause<unknown>) => {
     const error = Option.getOrUndefined(Cause.findErrorOption(cause))
     if (error instanceof Refused) {
       const options: { retryAfter?: number; close?: boolean } = {}
@@ -462,6 +516,12 @@ export const makeGate = (options: GateOptions): Gate => {
           // is in place before any part of the request can be interrupted.
           const give = take()
           if (give === null) return full(name, origin, listed)
+          // The `Host`, right after the place: no check and no work runs for
+          // a wrong one.
+          if (wrongHost(request)) {
+            give()
+            return forbidden(name)
+          }
           // The method, after the place and before check 1: no check and no
           // work runs for another.
           if (request.method !== METHODS[name]) {
@@ -645,6 +705,7 @@ export const makeGate = (options: GateOptions): Gate => {
     if (give === null) return yield* full("none", origin, listed)
     // No work: the place goes back at once.
     give()
+    if (wrongHost(request)) return yield* forbidden("none")
     return yield* notFound("none")
   })
 
@@ -656,6 +717,10 @@ export const makeGate = (options: GateOptions): Gate => {
           // The place and its give-back are one step, as in `route`.
           const give = take()
           if (give === null) return full("R6", origin, listed)
+          if (wrongHost(request)) {
+            give()
+            return forbidden("R6")
+          }
           if (request.method !== "GET" || request.headers["upgrade"]?.toLowerCase() !== "websocket") {
             give()
             return notFound("R6")
@@ -728,6 +793,7 @@ export const makeGate = (options: GateOptions): Gate => {
     if (give === null) return yield* full("R7", origin, listed)
     // Check 1 only, with no wait: the place goes back at once.
     give()
+    if (wrongHost(request)) return yield* forbidden("R7")
     if (origin === undefined) return finish(HttpServerResponse.empty({ status: 204 }), origin, listed)
     if (!listed) {
       yield* note({ route: "R7", status: 403, error: "forbidden_origin" })
@@ -736,26 +802,27 @@ export const makeGate = (options: GateOptions): Gate => {
     return finish(HttpServerResponse.empty({ status: 204, headers: PREFLIGHT }), origin, listed)
   })
 
-  const body: Gate["body"] = (request) =>
+  // A body of at most `max` bytes, read in at most `bodyRead`.
+  const bounded = (request: HttpServerRequest.HttpServerRequest, max: number): Effect.Effect<Uint8Array, Refused> =>
     Effect.gen(function*() {
       const length = request.headers["content-length"]
-      if (length !== undefined && /^\d+$/.test(length) && Number(length) > limits.body) {
+      if (length !== undefined && /^\d+$/.test(length) && Number(length) > max) {
         return yield* new Refused({ code: "too_large", close: true })
       }
-      // The chunks while their sum is at most `body`; the chunk that passes
+      // The chunks while their sum is at most `max`; the chunk that passes
       // it is not kept, and the read stops there.
       const chunks: Array<Uint8Array> = []
       let size = 0
       const read = Stream.runForEachWhile(request.stream, (chunk) =>
         Effect.sync(() => {
           size += chunk.length
-          if (size > limits.body) return false
+          if (size > max) return false
           chunks.push(chunk)
           return true
         })).pipe(Effect.mapError(() => new Refused({ code: "bad_request", close: true })))
       const done = yield* Effect.timeoutOption(read, limits.bodyRead)
       if (done._tag === "None") return yield* new Refused({ code: "timeout", close: true })
-      if (size > limits.body) return yield* new Refused({ code: "too_large", close: true })
+      if (size > max) return yield* new Refused({ code: "too_large", close: true })
       const bytes = new Uint8Array(size)
       let at = 0
       for (const chunk of chunks) {
@@ -765,5 +832,43 @@ export const makeGate = (options: GateOptions): Gate => {
       return bytes
     })
 
-  return { route, none, socket, token, preflight, body, inFlight: () => taken, waiting: () => waiting }
+  const body: Gate["body"] = (request) => bounded(request, limits.body)
+
+  const local: Gate["local"] = (name, work) =>
+    Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          const { origin, listed } = originOf(request)
+          // The place and its give-back are one step, as in `route`.
+          const give = take()
+          if (give === null) return full(name, origin, listed)
+          if (wrongHost(request)) {
+            give()
+            return forbidden(name)
+          }
+          if (request.method !== PAGE_METHODS[name]) {
+            give()
+            return notFound(name)
+          }
+          // The origin: R9 and R10 are the page's calls, and need its
+          // `Origin`; a person's click on R8 sends none.
+          if (origin !== undefined ? !listed : name !== "R8") {
+            give()
+            return forbidden(name)
+          }
+          const held = holding(give)
+          const given: Local = { request, body: (max) => bounded(request, max) }
+          return Effect.gen(function*() {
+            const ended = yield* restore(held.within(work(given)))
+            if (ended._tag === "None") {
+              yield* note({ route: name, status: 503, error: "busy", fault: "deadline" })
+              return finish(errorAnswer("busy", { retryAfter: 1 }), origin, listed)
+            }
+            const exit = ended.value
+            if (Exit.isFailure(exit)) return finish(yield* failed(name, exit.cause), origin, listed)
+            return finish(exit.value, origin, listed)
+          }).pipe(Effect.onExit(() => Effect.sync(held.release)))
+        })))
+
+  return { route, none, socket, token, preflight, body, local, inFlight: () => taken, waiting: () => waiting }
 }

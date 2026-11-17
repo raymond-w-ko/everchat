@@ -5,11 +5,13 @@ The root `AGENTS.md` holds the rules for every file.
 
 - `packages/local/` (`@everchat/local`): the rest, the local build. Its
   modules, flat, are in `packages/local/src/`: the terminal, pipe mode, the
-  shell and the file functions, the inspector, the reading of the address
+  shell and the file functions, the inspector, the command
+  `everchat serve` (`packages/local/src/serve.ts`) and the stack of a
+  host's chat (`packages/local/src/hosted.ts`), the reading of the address
   and the key from the environment and a file, the worker thread's
   program (`packages/local/src/worker.ts`, see "Code mode is the only
   primary tool" in `packages/core/AGENTS.md`), and the entry of the
-  program. Its entries: `./limitfile`,
+  program. Its entries: `./hosted`, `./limitfile`,
   `./localfunctions`, `./shell`, `./testing` (`packages/local/tests/help.ts`),
   and the one for that reading.
 - `packages/local/tests/`: tests of the whole program, or of many modules
@@ -95,6 +97,28 @@ How to test it:
 - `packages/local/tests/inspect.test.ts` runs `everchat inspect` as a process,
   next to a launch of the chat. `just test-build` runs it on the executable
   too.
+
+## The command `everchat serve`
+
+- It is the host on this machine (`@everchat/server`), for the reference
+  client's page (`packages/server/src/client.html`), for development only:
+  the backend of the page, not a hosted deployment. `docs/host.md`, section
+  7, is its design.
+- Its port is 4681 (`--port <n>`; 0 for any free port). It listens on
+  127.0.0.1 only and takes only `127.0.0.1:<port>` as the `Host`. It
+  prints one line on the standard output, the page's address with a start
+  value that is new at each start, and its own diagnostics go to the
+  standard error.
+- Its file is `serve.db` in the home, next to `everchat.db`, with one
+  local tenant. Its secret is new at each start and held in memory only, so
+  a token of an earlier start opens nothing.
+- Run one `everchat serve` for a home: the command does not lock its file.
+  A second one on another port gets `409 chat_elsewhere` for a chat that the
+  first has loaded, and its clients get no live event of that chat.
+- `packages/local/src/main.ts` loads it by a dynamic import, as the
+  inspector: a launch of the chat or of the inspector loads no module of the
+  host. `packages/local/tests/serve.test.ts` runs it as a process, and
+  `just test-build` runs it on the executable too.
 
 ## Effect in the local build
 

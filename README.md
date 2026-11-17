@@ -38,6 +38,12 @@ You need [Bun](https://bun.sh) and [just](https://github.com/casey/just).
 
     just test                        # the tests of the new code
     cd ref && just test              # the tests of the old code
+    just run serve                   # the host and its page, on this machine
+
+`everchat serve` (`just run serve`) is for development: it serves the
+reference client's page and the chats of one local tenant, in `serve.db` in
+the home, on 127.0.0.1 port 4681 (`--port <n>`). It prints the page's
+address. Run one for a home.
 
 License
 -------
