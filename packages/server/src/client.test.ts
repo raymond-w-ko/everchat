@@ -1369,3 +1369,29 @@ test("(y) a Send while a hunt runs, for a chat of the list that is there and is 
   await page.open(B)
   expect(page.composer()).toBe("")
 })
+
+test("(z) ruling 1: two stored chats B and C, C open; the host has no B at the first R10 ([B, C] gets 404 no_chat) and has it from the N-th R10 on, for N = 2 and 3; the open chat alone gets 200, so the rest [B] is inferred to hold the gone chat: the page asks [B] alone, gets 200 and keeps B", async () => {
+  // N = 2 and N = 3 take one path: the second R10 is [C] alone, which does
+  // not name B, so its answer is the same whether the host has B by then or
+  // not; the first R10 that names B after the 404 is the hunt's [B] (the
+  // third), and the host has B there in both.
+  for (const n of [2, 3]) {
+    let seen = 0
+    const page = await load({
+      stored: JSON.stringify([B, C]),
+      chats: { [B]: {}, [C]: {} },
+      route: (call) => {
+        if (call.path !== token("token")) return undefined
+        seen += 1
+        return seen < n && (JSON.parse(call.body!) as { chats: Array<string> }).chats.includes(B) ? gone() : undefined
+      }
+    })
+    const asks = () => page.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats as Array<string>)
+    await page.clock.advance(60_000)
+    // The list, the open chat alone, the hunt's [B] alone, and one token for the chats left.
+    expect([n, asks()]).toEqual([n, [[B, C], [C], [B], [B, C]]])
+    expect([n, JSON.parse(page.stored()!), page.texts("#chats button")]).toEqual([n, [B, C], [C, B]])
+    expect([n, page.$("error").textContent]).toEqual([n, ""])
+    for (const browser of browsers.splice(0)) await browser.close()
+  }
+})
