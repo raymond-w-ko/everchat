@@ -19,9 +19,10 @@
 // - The program's result as one text: what it printed, then what it
 //   returned, or its error.
 // - A memory limit, always. Without one, a program can take 4 GiB.
-// - The compute limit, in place of a deadline for the whole program. A
-//   program may wait for a function as long as that function takes (a
-//   build, a test run), but it may not compute for more than COMPUTE with
+// - The compute limit, always, beside the deadline of a program (below,
+//   none by default). A program may wait for a function as long as that
+//   function takes (a build, a test run), within its deadline when it has
+//   one, but it may not compute for more than COMPUTE with
 //   no function at work. The sandbox has no timers, so a program that
 //   computes for that long is in a loop. The limit starts again after each
 //   function, so it bounds one stretch of compute, not the program.
@@ -32,10 +33,16 @@
 //   why the compute limit stays (packages/codemode/src/thread.ts gives the
 //   measures). The time that a program waits for a function counts for
 //   neither. The local use sets none; a hosted deployment sets it after a
-//   measure there. The one time wall while a function is at work will be
-//   the deadline of a program, which a hosted deployment will have
-//   (docs/design.md, "Limits for hosted programs": 10 minutes; not built
-//   yet).
+//   measure there. The one time wall while a function is at work is the
+//   deadline of a program (docs/design.md, "Limits for hosted programs"),
+//   an option of the thread engine (`deadline`, none by default): a time
+//   over the whole program, a function at work too. Beside it is the count
+//   of the calls of one program (`calls`, none by default): the call that
+//   would pass it is not made, and the program is stopped (thread.ts says
+//   both). A host's chat sets 10 minutes and 256 calls
+//   (packages/local/src/hosted.ts). The inline engine
+//   (packages/codemode/src/inline.ts) has neither: no limit in time, and
+//   no count of calls.
 // - No function is left at work. When a program ends, the functions that
 //   it did not wait for are stopped, and the result says so. When a
 //   program is stopped, its functions are stopped too. A function that was

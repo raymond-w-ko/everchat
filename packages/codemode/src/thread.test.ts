@@ -2,12 +2,14 @@
 // QuickJS engine in a worker thread of its own for each program. Then this
 // engine's own cases of its two bounds of compute: its compute budget, the
 // count of polls (the option `polls`), and its compute limit, which is not
-// armed while a function is still at work (the option `compute`).
+// armed while a function is still at work (the option `compute`). Last,
+// the deadline of a program (`deadline`) and the count of its calls
+// (`calls`).
 
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Functions } from "@everchat/core/functions"
-import { type Ran, Sandbox } from "@everchat/core/sandbox"
+import { type Ran, Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
 import { newFile, PICK, withStore } from "@everchat/sqlite/testing"
 import { cases } from "../tests/cases.ts"
@@ -158,4 +160,78 @@ test("thread: the compute limit is not armed while a function is still at work",
   const got = await run(`const a = slow(${3 * BOUND}); await slow(10); await a; return 'done'`, { compute: BOUND })
   expect({ output: got.output, failed: got.failed }).toEqual({ output: "done", failed: false })
   expect(got.ms).toBeGreaterThanOrEqual(3 * BOUND)
+}, 30_000)
+
+// The deadline of a program and the count of its calls (the options
+// `deadline` and `calls`; review ec-ihoya). Each case runs `program` and
+// reads the rows of the functions that it called.
+const withRows = (program: string, options: Options): Promise<Ran & { ms: number; rows: Array<{ status: string; output: string | null }> }> =>
+  withStore(
+    newFile(),
+    Effect.gen(function*() {
+      const store = yield* Store
+      const box = yield* Sandbox
+      const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+      const call = yield* store.startCall({ turn: turn.id, vendorId: "call_0", fn: "run", input: program })
+      const started = performance.now()
+      const got = yield* box.run(program, { turn: turn.id, call })
+      const ms = Math.round(performance.now() - started)
+      const rows = (yield* store.calls(turn.id)).filter((row) => row.parent === call).map((row) => ({ status: row.status, output: row.output }))
+      return { ...got, ms, rows }
+    }).pipe(Effect.provide(threadLayer(options).pipe(Layer.provide(slow))))
+  )
+
+const late = (working: number) =>
+  "The program was stopped: it ran for 1 s, the limit of one program, and functions were at work for " + working + " s of that time. Do less in one program."
+
+// (a)
+test("thread: with a deadline, a program that calls a slow function in a loop is stopped at it; the result says the limit and the time that functions were at work, and the function at work then is stopped, its row cut", async () => {
+  // Two calls that end at once, then one that outlasts the deadline by far:
+  // a function is at work when the deadline falls, at any load, with no two
+  // timers that must stay in step.
+  const got = await withRows("for (let i = 0; i < 2; i++) await slow(0)\nfor (;;) await slow(600000)", { deadline: 1000 })
+  expect(got.failed).toBe(true)
+  // The time that functions were at work is most of the second, by its form.
+  expect(got.output).toMatch(/^The program was stopped: it ran for 1 s, the limit of one program, and functions were at work for [01] s of that time\. Do less in one program\.$/)
+  // The function at work then is stopped, and its row is cut; the ones before it ended.
+  const last = got.rows[got.rows.length - 1]!
+  expect(last).toEqual({ status: "cut", output: STOPPED })
+  expect(got.rows.slice(0, -1).every((row) => row.status === "done" && row.output === "slept")).toBe(true)
+  expect(got.rows.length).toBeGreaterThanOrEqual(1)
+  expect(got.rows.length).toBeLessThanOrEqual(3)
+  expect(got.ms).toBeGreaterThanOrEqual(1000)
+  expect(got.ms).toBeLessThan(20_000)
+  // A loop with no function: the deadline stops it too, before the compute
+  // limit (60 s), with 0 s of functions.
+  const loop = await withRows("for (;;) {}", { deadline: 1000 })
+  expect({ output: loop.output, failed: loop.failed, rows: loop.rows }).toEqual({ output: late(0), failed: true, rows: [] })
+}, 30_000)
+
+// (b)
+test("thread: with a deadline, a program that ends before it has the result that it has with none", async () => {
+  const program = "const got = await slow(10)\nreturn got + ' ' + [1, 2].join()"
+  const bounded = await withRows(program, { deadline: 1000 })
+  const free = await withRows(program, {})
+  expect({ output: bounded.output, failed: bounded.failed, rows: bounded.rows }).toEqual({ output: free.output, failed: free.failed, rows: free.rows })
+  expect(bounded.output).toBe("slept 1,2")
+}, 30_000)
+
+// A loop of ten calls that ends by itself.
+const TEN = "for (let i = 0; i < 10; i++) await slow(1)\nreturn 'ten'"
+
+// (c)
+test("thread: with calls 3, a loop of calls makes 3 calls and writes 3 rows; the call past the count is not made, and the result says the limit", async () => {
+  const got = await withRows(TEN, { calls: 3 })
+  expect({ output: got.output, failed: got.failed }).toEqual({
+    output: "The program was stopped: it reached the limit of 3 calls of functions in one program. Call fewer functions in one program.",
+    failed: true
+  })
+  expect(got.rows).toEqual([1, 2, 3].map(() => ({ status: "done", output: "slept" })))
+}, 30_000)
+
+// (d)
+test("thread: with neither option, the same loop makes its ten calls and ends", async () => {
+  const got = await withRows(TEN, {})
+  expect({ output: got.output, failed: got.failed }).toEqual({ output: "ten", failed: false })
+  expect(got.rows.length).toBe(10)
 }, 30_000)

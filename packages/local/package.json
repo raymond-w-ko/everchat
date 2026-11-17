@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./gateway": "./src/gateway.ts",
+    "./hosted": "./src/hosted.ts",
     "./limitfile": "./src/limitfile.ts",
     "./localfunctions": "./src/localfunctions.ts",
     "./shell": "./src/shell.ts",

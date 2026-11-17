@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverChat</title>
+<style>
+/* The reference client (docs/host.md, section 7, "The page's rules"): one
+   file, for development. `everchat serve` serves it under its start value,
+   with a policy that names the one script below by its hash and lets the
+   page talk only to its own server. Every text that the server or the
+   browser's storage gives is put on the page as text, never as HTML. */
+:root { color-scheme: light dark; --border: #8886; --dim: #888; --bad: #d03b3b; }
+* { box-sizing: border-box; }
+html { font: 14px/1.45 system-ui, sans-serif; }
+body { margin: 0; }
+header { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+header h1 { margin: 0; font-size: 15px; }
+#state { color: var(--dim); flex: 1; }
+#error { margin: 8px 14px 0; padding: 6px 10px; border: 1px solid var(--bad); border-radius: 6px; white-space: pre-wrap; }
+#error:empty { display: none; }
+.cols { display: grid; grid-template-columns: 300px minmax(0, 1fr); }
+nav { padding: 10px 14px; border-right: 1px solid var(--border); }
+nav ul { list-style: none; margin: 10px 0 0; padding: 0; }
+nav li button { width: 100%; text-align: left; font: 12px ui-monospace, monospace; }
+nav li button[aria-current="true"] { font-weight: 700; }
+main { padding: 10px 14px 40px; min-width: 0; }
+.empty { color: var(--dim); }
+.entry { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.who { color: var(--dim); }
+.txt { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px ui-monospace, monospace; }
+.entry[data-kind="user"] .who { color: #2a78d6; }
+.entry[data-kind="asst"] .who { color: #eb6834; }
+.entry[data-kind="call"] .who, .entry[data-kind="tool"] .who { color: #1baf7a; }
+.entry[data-kind="end"][data-status="failed"] .who { color: var(--bad); }
+#live:empty { display: none; }
+#live { color: var(--dim); }
+#say { display: flex; gap: 8px; margin-top: 12px; }
+#text { flex: 1; min-height: 60px; font: inherit; }
+</style>
+</head>
+<body>
+<header>
+<h1>EverChat</h1>
+<span id="state"></span>
+<label>Events by <select id="way"><option value="stream">the stream (fetch)</option><option value="socket">the socket</option></select></label>
+</header>
+<div id="error" role="alert"></div>
+<div class="cols">
+<nav>
+<button id="new" type="button">New chat</button>
+<ul id="chats"></ul>
+</nav>
+<main>
+<p id="none" class="empty">No chat is open.</p>
+<div id="chat" hidden>
+<button id="older" type="button" hidden>Older messages</button>
+<div id="log"></div>
+<pre id="live" class="txt"></pre>
+<div id="say"><textarea id="text" aria-label="Message"></textarea><button id="send" type="button">Send</button></div>
+</div>
+</main>
+</div>
+<script>
+"use strict"
+
+// The reference client of the host (docs/host.md, sections 3, 4 and 7).
+//
+// Its addresses: the page is at /<start>/. It asks R9 (/<start>/chats) for
+// a new chat and R10 (/<start>/token) for a token, and reads and writes a
+// chat by R1 to R6 under /v1/chats/. Every request goes to the page's own
+// origin; the socket's address is built from `location`.
+//
+// Its rules: every value from the server or from the browser's storage is
+// put on the page by `textContent` or as a text node, and into no attribute
+// but a `data-` one or `title`. The token is held in memory only: never in
+// the storage and never in an address.
+
+const START = location.pathname.split("/")[1]
+const BASE = "/" + START + "/"
+const STORED = "everchat.chats" // the key of the chats' UUIDs in localStorage
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const MOST = 64 // the most chats of one token
+const EARLY = 60000 // a token is renewed this long before its `exp`
+const LONGEST = 30000 // the longest wait after `busy`, and the time between two connections after `internal`
+const OLDER = 50 // the messages that one click on "Older messages" asks for
+
+// Help
+// ----
+
+const $ = (id) => document.getElementById(id)
+
+// An element. `attrs` are the page's own names and values: a value from
+// outside goes only into a `data-` attribute or `title`. Every child that is
+// not an element becomes a text node.
+const h = (tag, attrs, ...children) => {
+  const node = document.createElement(tag)
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value !== null && value !== undefined) node.setAttribute(key, String(value))
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
+  }
+  return node
+}
+
+const showError = (text) => {
+  $("error").textContent = text
+}
+const showState = (text) => {
+  $("state").textContent = text
+}
+
+// A request to the page's own server. It never throws: a fault of the
+// network is the status 0. `retry` is the answer's `retry-after`, in ms.
+const call = async (method, path, options = {}) => {
+  const headers = {}
+  if (options.token !== undefined) headers.authorization = "Bearer " + options.token
+  if (options.body !== undefined) headers["content-type"] = "application/json"
+  if (options.key !== undefined) headers["idempotency-key"] = options.key
+  if (options.accept !== undefined) headers.accept = options.accept
+  let response
+  try {
+    response = await fetch(path, {
+      method,
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      signal: options.signal
+    })
+  } catch {
+    return { ok: false, status: 0, error: "network", message: "The host did not answer." }
+  }
+  if (options.raw && response.ok) return { ok: true, status: response.status, response }
+  const data = await response.json().catch(() => null)
+  if (response.ok) return { ok: true, status: response.status, data }
+  const seconds = Number(response.headers.get("retry-after"))
+  return {
+    ok: false,
+    status: response.status,
+    error: data !== null && typeof data.error === "string" ? data.error : "",
+    message: data !== null && typeof data.message === "string" ? data.message : "The host answered " + response.status + ".",
+    retry: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+  }
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// The chats
+// ---------
+
+// The stored UUIDs, the oldest first. A value that is no list of UUIDs is
+// dropped whole; a UUID twice is kept once.
+const loadChats = () => {
+  let value = null
+  try {
+    value = JSON.parse(localStorage.getItem(STORED))
+  } catch {
+    value = null
+  }
+  if (Array.isArray(value) && value.every((one) => typeof one === "string" && UUID.test(one))) return [...new Set(value)]
+  try {
+    localStorage.removeItem(STORED)
+  } catch {}
+  return []
+}
+let chats = loadChats()
+const saveChats = () => {
+  try {
+    localStorage.setItem(STORED, JSON.stringify(chats))
+  } catch {}
+}
+
+// The token
+// ---------
+
+// Held here only. `chats` is the list that it was asked for.
+let token = null
+let asking = null
+let renewal = null
+
+// The chats of a token: the newest 64, with the open chat among them.
+const tokenChats = () => {
+  const list = chats.slice(-MOST)
+  if (current !== null && chats.includes(current.chat) && !list.includes(current.chat)) list.splice(0, 1, current.chat)
+  return list
+}
+
+const forget = (chat) => {
+  chats = chats.filter((one) => one !== chat)
+  views.delete(chat)
+  saveChats()
+  if (current !== null && current.chat === chat) shut()
+  drawChats()
+}
+
+// Asks R10 for a token for `list`. A chat that R10 answers `404 no_chat`
+// for leaves the list. R10 does not say which chat it was, so the page asks
+// for each half of a list again, down to the one chat.
+const findGone = async (list) => {
+  if (list.length === 1) {
+    forget(list[0])
+    return
+  }
+  const half = Math.ceil(list.length / 2)
+  for (const part of [list.slice(0, half), list.slice(half)]) {
+    const answer = await call("POST", BASE + "token", { body: { chats: part } })
+    if (answer.status === 404 && answer.error === "no_chat") await findGone(part)
+    else if (!answer.ok) throw new Error(answer.message)
+  }
+}
+
+const ask = async () => {
+  for (let round = 0; round < 3; round++) {
+    const list = tokenChats()
+    if (list.length === 0) return null
+    const answer = await call("POST", BASE + "token", { body: { chats: list } })
+    if (answer.ok) {
+      const data = answer.data
+      if (data === null || typeof data.token !== "string" || !Number.isSafeInteger(data.exp)) throw new Error("The host gave no token.")
+      token = { value: data.token, exp: data.exp, chats: list }
+      clearTimeout(renewal)
+      renewal = setTimeout(() => {
+        renew().catch((error) => showError(error.message))
+      }, Math.max(0, data.exp * 1000 - EARLY - Date.now()))
+      return token.value
+    }
+    if (answer.status === 404 && answer.error === "no_chat") await findGone(list)
+    else throw new Error(answer.message)
+  }
+  throw new Error("The host gave no token for these chats.")
+}
+
+// A new token, once for all who ask at one time.
+const renew = () => {
+  if (asking === null) {
+    asking = ask().finally(() => {
+      asking = null
+    })
+  }
+  return asking
+}
+
+// The token for `chat`: one whose R10 request named it (lead, ec-uq21h, 3).
+// The one held, or a new one; a renewal that was under way when it asked was
+// for an older list, so when its token does not name the chat, the page asks
+// R10 again with the present list, one time. A second token without the chat
+// is an error (`unnamed`), not a loop. Null: the page has no chat at all.
+const names = (chat) => token !== null && token.chats.includes(chat)
+const tokenFor = async (chat) => {
+  if (names(chat)) return token.value
+  for (let tries = 0; tries < 2; tries++) {
+    const value = await renew()
+    if (value === null) return null
+    if (names(chat)) return token.value
+  }
+  const error = new Error("The host gave no token for this chat.")
+  error.unnamed = true
+  throw error
+}
+
+// A `401` or a `4401` for `value`: that token is done.
+const refused = (value) => {
+  if (token !== null && token.value === value) token = null
+}
+
+// A chat's view
+// -------------
+
+// Each chat's view, kept while the page is open: its entries and the last
+// event number that it got (null before its snapshot).
+const views = new Map()
+const viewOf = (chat) => {
+  if (!views.has(chat)) views.set(chat, { last: null, low: null, ids: new Set(), entries: [], live: "", turn: null })
+  return views.get(chat)
+}
+
+const messageEntry = (message) => ({ id: message.i, kind: String(message.kind), who: String(message.kind), text: String(message.text) })
+
+// Adds messages: those of a snapshot or an event at the end, older ones at
+// the start. A message that the view has is not added again.
+const addMessages = (view, messages, older) => {
+  const fresh = messages.filter((one) => one !== null && typeof one === "object" && Number.isSafeInteger(one.i) && !view.ids.has(one.i))
+  for (const one of fresh) {
+    view.ids.add(one.i)
+    if (view.low === null || one.i < view.low) view.low = one.i
+  }
+  const entries = fresh.map(messageEntry)
+  view.entries = older ? [...entries, ...view.entries] : [...view.entries, ...entries]
+}
+
+// One event of R4 or R6, by the rules of docs/host.md, section 3, "The
+// order and the numbers": a number at or below the last is a duplicate,
+// and a number past the last plus one is a gap ("gap": connect again).
+const take = (view, event) => {
+  if (event === null || typeof event !== "object") return "dropped"
+  if (Number.isSafeInteger(event.n)) {
+    if (event.n <= view.last) return "dropped"
+    if (event.n !== view.last + 1) return "gap"
+    view.last = event.n
+  }
+  const cut = event.cut === true ? " (cut)" : ""
+  switch (event.type) {
+    case "accepted":
+      addMessages(view, Array.isArray(event.messages) ? event.messages : [], false)
+      break
+    case "message":
+      view.live = ""
+      addMessages(view, [event.message], false)
+      break
+    case "start":
+      view.turn = event.turn
+      view.live = ""
+      break
+    case "call":
+      view.live = ""
+      view.entries.push({ id: null, kind: "call", who: "program" + cut, text: String(event.program) })
+      break
+    case "end":
+      view.turn = null
+      view.live = ""
+      view.entries.push({ id: null, kind: "end", status: String(event.status), who: "turn " + event.status + cut, text: event.why === null || event.why === undefined ? "" : String(event.why) })
+      break
+    case "text":
+    case "thought":
+    case "program":
+      view.live += String(event.delta)
+      break
+    default:
+      return "dropped"
+  }
+  if (current !== null && views.get(current.chat) === view) drawView()
+  return "taken"
+}
+
+// Drawing
+// -------
+
+const drawChats = () => {
+  const items = chats.slice().reverse().map((chat) => {
+    const button = h("button", { type: "button", title: chat, "data-chat": chat, "aria-current": current !== null && current.chat === chat ? "true" : "false" }, chat)
+    button.addEventListener("click", () => show(chat))
+    return h("li", null, button)
+  })
+  $("chats").replaceChildren(...items)
+}
+
+const drawView = () => {
+  if (current === null) {
+    $("chat").hidden = true
+    $("none").hidden = false
+    return
+  }
+  const view = viewOf(current.chat)
+  $("none").hidden = true
+  $("chat").hidden = false
+  $("older").hidden = view.low === null || view.low === 0
+  $("log").replaceChildren(...view.entries.map((entry) =>
+    h("div", { class: "entry", "data-kind": entry.kind, "data-status": entry.status, "data-i": entry.id }, h("span", { class: "who" }, entry.who), h("pre", { class: "txt" }, entry.text))
+  ))
+  $("live").textContent = view.live
+}
+
+// The connection of the open chat
+// -------------------------------
+
+// The open chat: its UUID, and the number of its present opening (`round`).
+// Each opening of the view has a number of its own: a click on a chat, a
+// switch of the way, and each connection again. After each wait, a result of
+// an opening that is not the present one is dropped before it changes the
+// view's last number, its entries, its error, its state or its timers (lead,
+// ec-uq21h, 2). `stop` ends the connection that runs.
+let current = null
+let rounds = 0
+let busyRow = 0 // the answers of `busy` in a row
+let internalAt = -Infinity // when the page last connected again after `internal`
+
+const shut = () => {
+  if (current !== null) {
+    if (current.stop !== null) current.stop()
+    clearTimeout(current.timer)
+  }
+  current = null
+  showState("")
+  drawView()
+}
+
+// How a connection ended, as section 3, "The order and the numbers", 3
+// sorts them: `busy`, `internal`, `token` (a new token, then at once),
+// `again` (at once), `down` (no connection was made: as `busy`, so that a
+// server that is gone is not asked in a loop), `gone` (404) and `error`
+// (the page's own fault: it shows the error and stops).
+const ended = (answer) => {
+  if (answer.status === 0) return { kind: "down" }
+  if (answer.status === 401) return { kind: "token" }
+  if (answer.status === 503 || answer.status === 408) return { kind: "busy", retry: answer.retry }
+  if (answer.status === 500) return { kind: "internal", message: answer.message }
+  if (answer.status === 404) return { kind: "gone", message: answer.message }
+  return { kind: "error", message: answer.message }
+}
+
+const CLOSES = { 4401: "token", 4503: "busy", 1011: "internal", 4404: "gone", 4400: "error", 1009: "error" }
+const REASONS = { token: "token", busy: "busy", internal: "internal" }
+// The page's own sentence for R4's `close` with `internal` (lead, ec-uq21h, 4).
+const INTERNAL = "The host had a fault. The page connects again."
+
+// R2: the snapshot of a chat that the view has not read yet. Null: taken.
+const snapshot = async (chat, view, value, live) => {
+  const answer = await call("GET", "/v1/chats/" + chat, { token: value })
+  if (!live()) return { kind: "old" }
+  if (!answer.ok) return ended(answer)
+  const data = answer.data
+  if (data === null || !Number.isSafeInteger(data.seq) || !Array.isArray(data.messages)) return { kind: "error", message: "The host gave no snapshot." }
+  view.last = data.seq
+  view.turn = data.turn === null || data.turn === undefined ? null : data.turn.id
+  addMessages(view, data.messages, false)
+  if (view.low === null && Number.isSafeInteger(data.count)) view.low = data.count
+  return null
+}
+
+// R4: the event stream, read by `fetch`, with the header `Authorization`.
+const stream = async (chat, view, value, live) => {
+  const abort = new AbortController()
+  current.stop = () => abort.abort()
+  const answer = await call("GET", "/v1/chats/" + chat + "/events?after=" + view.last, { token: value, accept: "text/event-stream", raw: true, signal: abort.signal })
+  if (!live()) {
+    abort.abort()
+    return null
+  }
+  if (!answer.ok) return ended(answer)
+  busyRow = 0
+  showState("connected by the stream")
+  const reader = answer.response.body.getReader()
+  current.stop = () => {
+    abort.abort()
+    reader.cancel().catch(() => {})
+  }
+  const decoder = new TextDecoder()
+  let buffer = ""
+  for (;;) {
+    let chunk
+    try {
+      chunk = await reader.read()
+    } catch {
+      return { kind: "again" }
+    }
+    if (!live()) return null
+    if (chunk.done) return { kind: "again" }
+    buffer = (buffer + decoder.decode(chunk.value, { stream: true })).replace(/\r\n?/g, "\n")
+    let end
+    while ((end = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, end)
+      buffer = buffer.slice(end + 2)
+      let type = "message"
+      const data = []
+      for (const line of frame.split("\n")) {
+        if (line.startsWith(":")) continue
+        const colon = line.indexOf(":")
+        const field = colon === -1 ? line : line.slice(0, colon)
+        const text = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "")
+        if (field === "event") type = text
+        else if (field === "data") data.push(text)
+      }
+      if (data.length === 0) continue
+      let event
+      try {
+        event = JSON.parse(data.join("\n"))
+      } catch {
+        continue
+      }
+      if (type === "close") {
+        current.stop()
+        const kind = (event !== null && REASONS[event.reason]) || "again"
+        return kind === "internal" ? { kind, message: INTERNAL } : { kind }
+      }
+      if (take(view, event) === "gap") {
+        current.stop()
+        return { kind: "again" }
+      }
+    }
+  }
+}
+
+// R6: the socket. Its first frame is `auth`, with the token and the last
+// number; the token is never in its address.
+const socket = (chat, view, value, live) =>
+  new Promise((resolve) => {
+    const address = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/v1/chats/" + chat + "/socket"
+    const ws = new WebSocket(address)
+    let opened = false
+    let done = false
+    const finish = (end) => {
+      if (done) return
+      done = true
+      try {
+        ws.close()
+      } catch {}
+      resolve(end)
+    }
+    current.stop = () => finish(null)
+    ws.addEventListener("open", () => {
+      opened = true
+      ws.send(JSON.stringify({ type: "auth", token: value, after: view.last }))
+    })
+    ws.addEventListener("message", (message) => {
+      if (done || !live() || typeof message.data !== "string") return
+      let frame
+      try {
+        frame = JSON.parse(message.data)
+      } catch {
+        return
+      }
+      if (frame === null || typeof frame !== "object") return
+      if (frame.type === "ready") {
+        busyRow = 0
+        showState("connected by the socket")
+        return
+      }
+      if (frame.type === "ping" || frame.type === "snapshot" || frame.type === "said" || frame.type === "error") return
+      if (take(view, frame) === "gap") finish({ kind: "again" })
+    })
+    ws.addEventListener("close", (closed) => {
+      if (done || !live()) return finish(null)
+      const kind = CLOSES[closed.code]
+      if (kind === "error" || kind === "gone") finish({ kind, message: "The host closed the socket: " + closed.reason + "." })
+      else if (kind === "internal") finish({ kind, message: "The host failed to give this chat's events." })
+      else finish({ kind: kind || (opened ? "again" : "down") })
+    })
+  })
+
+// One connection of the open chat, then the next one after its wait. Each
+// is an opening of its own: `live` says whether it is still the present one.
+const connect = async (opening) => {
+  if (current !== opening) return
+  const round = ++rounds
+  opening.round = round
+  const live = () => current === opening && opening.round === round
+  const chat = opening.chat
+  const view = viewOf(chat)
+  let end = null
+  let value = null
+  try {
+    value = await tokenFor(chat)
+  } catch (error) {
+    if (!live()) return
+    showError(error.message)
+    end = error.unnamed === true ? { kind: "error", message: error.message } : { kind: "down" }
+  }
+  if (!live()) return
+  if (end === null && value === null) return
+  if (end === null && view.last === null) end = await snapshot(chat, view, value, live)
+  if (!live()) return
+  if (end === null) {
+    drawView()
+    end = $("way").value === "socket" ? await socket(chat, view, value, live) : await stream(chat, view, value, live)
+  }
+  if (end === null || !live()) return
+  opening.stop = null
+  let ms = 0
+  if (end.kind === "busy" || end.kind === "down") {
+    busyRow++
+    ms = Math.max(Math.min(LONGEST, 1000 * 2 ** (busyRow - 1)), end.retry || 0)
+    showState("waiting " + Math.round(ms / 1000) + " s to connect again")
+  } else if (end.kind === "internal") {
+    showError(end.message)
+    ms = Math.max(0, internalAt + LONGEST - Date.now())
+    internalAt = Date.now() + ms
+    showState("waiting " + Math.round(ms / 1000) + " s to connect again")
+  } else if (end.kind === "token") {
+    refused(value)
+  } else if (end.kind === "gone" || end.kind === "error") {
+    showError(end.message)
+    showState("not connected")
+    return
+  }
+  opening.timer = setTimeout(() => connect(opening), ms)
+}
+
+// Opens a chat: its view, its composer, and its connection.
+const show = (chat) => {
+  if (current !== null) drafts.set(current.chat, $("text").value)
+  shut()
+  current = { chat, round: 0, stop: null, timer: null }
+  $("text").value = drafts.get(chat) || ""
+  drafts.delete(chat)
+  $("send").disabled = sending.has(chat)
+  showError("")
+  drawChats()
+  drawView()
+  connect(current)
+}
+
+// What the person does
+// --------------------
+
+// R9: a new chat, at the end of the list.
+$("new").addEventListener("click", async () => {
+  const answer = await call("POST", BASE + "chats")
+  if (!answer.ok) {
+    showError(answer.message)
+    return
+  }
+  const chat = answer.data === null ? null : answer.data.chat
+  if (typeof chat !== "string" || !UUID.test(chat)) {
+    showError("The host gave no chat.")
+    return
+  }
+  chats = [...chats.filter((one) => one !== chat), chat]
+  saveChats()
+  token = null
+  show(chat)
+})
+
+// R1: a message in. The message that has no answer yet keeps its key, for
+// each chat, in memory (lead, ec-uq21h, 1): the automatic tries (after
+// `busy`, a fault of the network, or a `401`) send it with that key, and so
+// does a Send of an equal text in that chat after they end. It is done at
+// `200`, or at an answer that a retry cannot change (`400`, `404`, `413`,
+// `415`); after a `429`, a `503`, a `408`, a `401` or a fault of the network
+// past the tries it stays kept. A Send of another text is a new message with
+// a new key, and the kept one is dropped. A key is never another chat's.
+const kept = new Map() // chat -> { text, key }
+const drafts = new Map() // chat -> the composer's text, while another chat is open
+const sending = new Set() // the chats with a message in under way
+const FINAL = [400, 404, 413, 415]
+
+const send = async (chat, text, key) => {
+  for (let tries = 1; ; tries++) {
+    let value
+    try {
+      value = await tokenFor(chat)
+    } catch (error) {
+      return { done: false, error: error.message }
+    }
+    if (value === null) return { done: false, error: "This chat has no token." }
+    const answer = await call("POST", "/v1/chats/" + chat + "/messages", { token: value, body: { text }, key })
+    if (answer.ok) return { done: true, error: null }
+    if (FINAL.includes(answer.status)) return { done: true, error: answer.message }
+    if (tries >= 5) return { done: false, error: answer.message }
+    if (answer.status === 401) refused(value)
+    else if (answer.status === 0 || answer.status === 503 || answer.status === 408) await wait(Math.max(1000 * 2 ** (tries - 1), answer.retry || 0))
+    else return { done: false, error: answer.message }
+  }
+}
+
+$("send").addEventListener("click", async () => {
+  if (current === null) return
+  const chat = current.chat
+  const text = $("text").value
+  if (text.trim() === "" || sending.has(chat)) return
+  const old = kept.get(chat)
+  const key = old !== undefined && old.text === text ? old.key : crypto.randomUUID()
+  kept.set(chat, { text, key })
+  $("text").value = ""
+  sending.add(chat)
+  $("send").disabled = true
+  const result = await send(chat, text, key)
+  sending.delete(chat)
+  if (result.done && kept.has(chat) && kept.get(chat).key === key) kept.delete(chat)
+  const here = current !== null && current.chat === chat
+  if (here) $("send").disabled = false
+  if (result.error === null) return
+  // The text goes back to the composer of its own chat: now, or when the
+  // person comes back to that chat.
+  if (here) {
+    showError(result.error)
+    if ($("text").value === "") $("text").value = text
+  } else if (!drafts.get(chat)) {
+    drafts.set(chat, text)
+  }
+})
+
+// R3: older messages, before the first that the view has.
+// After a `401` the page asks for a new token and reads again one time; a
+// second `401` shows the error and stops (lead, ec-uq21h, 5).
+$("older").addEventListener("click", async () => {
+  if (current === null) return
+  const opening = current
+  const round = opening.round
+  const live = () => current === opening && opening.round === round
+  const chat = opening.chat
+  const view = viewOf(chat)
+  const to = view.low
+  if (to === null || to === 0) return
+  let from = Math.max(0, to - OLDER)
+  let renewed = false
+  const got = []
+  while (from < to) {
+    let value
+    try {
+      value = await tokenFor(chat)
+    } catch (error) {
+      if (live()) showError(error.message)
+      return
+    }
+    const answer = await call("GET", "/v1/chats/" + chat + "/messages?from=" + from + "&to=" + to, { token: value })
+    if (!live()) return
+    if (answer.status === 401 && !renewed) {
+      renewed = true
+      refused(value)
+      continue
+    }
+    if (!answer.ok) {
+      if (answer.status === 401) refused(value)
+      showError(answer.message)
+      return
+    }
+    const messages = answer.data !== null && Array.isArray(answer.data.messages) ? answer.data.messages : []
+    if (messages.length === 0) break
+    got.push(...messages)
+    const next = messages[messages.length - 1].i + 1
+    if (!Number.isSafeInteger(next) || next <= from) break
+    from = next
+  }
+  addMessages(view, got.filter((one) => one.i < to), true)
+  drawView()
+})
+
+// Another way for the events: the open chat connects again by it.
+$("way").addEventListener("change", () => {
+  if (current !== null) show(current.chat)
+})
+
+drawChats()
+drawView()
+if (chats.length > 0) show(chats[chats.length - 1])
+</script>
+</body>
+</html>

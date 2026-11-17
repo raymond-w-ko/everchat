@@ -22,7 +22,7 @@
 //
 // The limits of memory and compute are parameters too, with defaults.
 //
-// The two bounds of compute:
+// The bounds of compute:
 //
 // - The compute limit (`compute`, COMPUTE by default): a time, 60 s for one
 //   stretch of compute with no function at work. Its clock starts when the
@@ -42,9 +42,25 @@
 // Neither bound stops work in a native while a function is at work: the
 // compute limit's clock is stopped then, and the count does not see work
 // between two polls. A review's probe, `slow(25000); for (;;)
-// 'x'.repeat(1e5)` with `{ polls: 1000 }`, ran for 85 s. The one bound in
-// time then is the deadline of a program, which a hosted deployment will
-// have (packages/core/src/sandbox.ts; not built yet).
+// 'x'.repeat(1e5)` with `{ polls: 1000 }`, ran for 85 s. Nor does either
+// bound a program that calls functions in a loop: each call stops the
+// compute limit's clock, and a wait for a function takes no poll. A
+// review's probe, `for (;;) { await result(1) }`, ran on for 8 s and wrote
+// 2,136 call rows (ec-ihoya). Two more bounds, none by default, so the
+// local use is unchanged:
+//
+// - The deadline of a program (`deadline`, docs/design.md, "Limits for
+//   hosted programs"): a time over the whole program, a function at work
+//   too. Its clock starts when the worker has booted (`onStarted`), as the
+//   compute limit's. At it the program is stopped as the compute limit
+//   stops it, and a function at work then is stopped as at every other end
+//   of a program (its row is closed as cut). The result says the limit and
+//   how long functions were at work in that time, so the model can tell a
+//   slow function from its own compute.
+// - The count of the calls of one program (`calls`): the call that would
+//   pass it is not made (no row of it is written), and the program is
+//   stopped. With it, the bytes of one program's calls are at most `calls`
+//   times the largest input and output of one call.
 //
 // The call rows of the functions and the result are calls.ts's code, which
 // both engines use.
@@ -72,6 +88,12 @@ export interface Options {
   // it then). None when not given: the worker then counts nothing. The
   // local use sets none; a hosted deployment sets it.
   readonly polls?: number | undefined
+  // The deadline of a program (the head comment), in milliseconds: none
+  // when not given. A hosted deployment sets it (10 minutes, the design's).
+  readonly deadline?: number | undefined
+  // The count of the calls of functions in one program (the head comment):
+  // none when not given.
+  readonly calls?: number | undefined
   readonly worker?: URL | undefined // the program of the worker thread
   readonly quickjs?: string | undefined // the path of the QuickJS file
 }
@@ -79,7 +101,7 @@ export interface Options {
 // The numeric fields of `Options`: the type check holds this list to them.
 // A name that is not on it (the old time budget, `budget`, too) is no
 // option: the type check refuses it, and the engine does not read it.
-const NUMBERS: Fields<Options> = { memory: true, compute: true, polls: true }
+const NUMBERS: Fields<Options> = { memory: true, compute: true, polls: true, deadline: true, calls: true }
 
 export const threadLayer = (options: Options = {}) => {
   // Read once, here: the engine uses only these.
@@ -92,6 +114,8 @@ export const threadLayer = (options: Options = {}) => {
       const memory = given.memory ?? MEMORY
       const compute = given.compute ?? COMPUTE
       const polls = given.polls
+      const deadline = given.deadline
+      const most = given.calls
       const worker = options.worker
       const quickjs = options.quickjs ?? QUICKJS
 
@@ -100,6 +124,15 @@ export const threadLayer = (options: Options = {}) => {
       // option. With no count, no program ends so.
       const spent = "The program was stopped: it computed for too long in all (" + polls +
         " polls of the engine). Do less in one program."
+
+      // The two texts of the deadline and the count: one for every use,
+      // with no word of the use and no name of a function. The deadline in
+      // whole seconds, rounded up (a limit is never "0 s"); the time of the
+      // functions at work rounded.
+      const late = (working: number) =>
+        "The program was stopped: it ran for " + Math.ceil((deadline ?? 0) / 1000) + " s, the limit of one program, and functions were at work for " +
+        Math.round(working / 1000) + " s of that time. Do less in one program."
+      const many = "The program was stopped: it reached the limit of " + most + " calls of functions in one program. Call fewer functions in one program."
 
       const run = Effect.fn("Sandbox.run")(function*(program: string, at: { readonly turn: number; readonly call: number }) {
         // The functions at work, and one call of a function: its row, its
@@ -113,6 +146,12 @@ export const threadLayer = (options: Options = {}) => {
         // work, and starts again at each arm. The count of polls is the
         // worker's, and no function stops it.
         const controller = new AbortController()
+        // The functions' time at work: the time while at least one ran.
+        let worked = 0
+        let since = 0
+        // The calls made, for the count.
+        let made = 0
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined
         let pending = 0
         let timer: ReturnType<typeof setTimeout> | undefined
         let over = false
@@ -127,6 +166,17 @@ export const threadLayer = (options: Options = {}) => {
           clearTimeout(timer)
           timer = undefined
         }
+        // At the boot's end (`onStarted`): the compute limit's clock, and the
+        // deadline's, which no function stops.
+        const started = () => {
+          arm()
+          if (deadline !== undefined) {
+            deadlineTimer = setTimeout(() => {
+              const now = performance.now()
+              controller.abort(new Error(late(worked + (pending > 0 ? now - since : 0))))
+            }, deadline)
+          }
+        }
 
         const vm = new CodemodeSandbox({
           timeoutMs: Number.POSITIVE_INFINITY,
@@ -139,10 +189,20 @@ export const threadLayer = (options: Options = {}) => {
             name,
             spread: true,
             execute: (given: unknown) => {
+              // The call past the count is not made: no row, and the
+              // program is stopped.
+              if (most !== undefined && made >= most) {
+                const stop = new Error(many)
+                controller.abort(stop)
+                return Promise.reject(stop)
+              }
+              made += 1
               disarm()
+              if (pending === 0) since = performance.now()
               pending += 1
               return calls.call(name, given).finally(() => {
                 pending -= 1
+                if (pending === 0) worked += performance.now() - since
                 if (pending === 0 && !over) arm()
               })
             }
@@ -160,11 +220,12 @@ export const threadLayer = (options: Options = {}) => {
           // scope that runs it, aborts `controller` (above), and the adopted
           // code then stops the worker. A worker that fails in its boot
           // ends the run with its crash.
-          return vm.execute(program, { signal: controller.signal, onStarted: arm })
+          return vm.execute(program, { signal: controller.signal, onStarted: started })
         }).pipe(
           Effect.ensuring(Effect.sync(() => {
             over = true
             disarm()
+            clearTimeout(deadlineTimer)
           }))
         )
         // With no deadline (`timeoutMs`), only the count ends a program as

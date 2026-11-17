@@ -976,14 +976,36 @@ test("a stream answer that started and is not pulled at the deadline (its client
 test("a stream answer's deadline counts from the request's head, not from the hand-off: a work that waits 900 ms of a request of 1,000 ms, then answers a stream that never ends, is stopped 100 ms after the hand-off, and its place goes back there", async () => {
   const gate = gateOf({ request: 1_000 })
   await run(Effect.gen(function*() {
+    // The case waits for states that it can see, never for a count of
+    // yields: under load the gate's checks (check 3 reads the store) can
+    // end after any count, and a clock moved before the work waits on it
+    // leaves the work waiting for good (ec-cu1re). So the work says when it
+    // runs (`entered`: the gate's deadline is armed then, at the head's
+    // time), the case moves the clock 900 ms, and only then lets the work
+    // answer (`go`).
+    const entered = yield* Deferred.make<number>()
+    const go = yield* Deferred.make<void>()
+    const head = yield* Clock.currentTimeMillis
+    let started = false
+    const never = Stream.unwrap(Effect.sync(() => {
+      started = true
+      return Stream.never
+    }))
     const calling = yield* Effect.forkChild(call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
-      Effect.as(Effect.sleep(900), HttpServerResponse.stream(Stream.never, { contentType: "text/plain" }))))
-    yield* settle
+      Effect.gen(function*() {
+        yield* Deferred.succeed(entered, yield* Clock.currentTimeMillis)
+        yield* Deferred.await(go)
+        return HttpServerResponse.stream(never, { contentType: "text/plain" })
+      })))
+    // The work began at the head's time: no clock moved before it.
+    expect((yield* Deferred.await(entered)) - head).toBe(0)
     yield* TestClock.adjust(900)
-    yield* settle
+    expect(gate.inFlight()).toBe(1)
+    yield* Deferred.succeed(go, undefined)
     const response = yield* Fiber.join(calling)
     expect(response.status).toBe(200)
-    // The stream starts, and waits for a byte that never comes.
+    // The stream starts, and waits for a byte that never comes. The case
+    // waits, in real time, until the stream has started.
     const reader = HttpServerResponse.toWeb(response).body!.getReader()
     const state = { read: "pending" as "pending" | "done" | "failed" }
     void reader.read().then((chunk) => {
@@ -991,16 +1013,16 @@ test("a stream answer's deadline counts from the request's head, not from the ha
     }, () => {
       state.read = "failed"
     })
-    yield* settle
+    expect(yield* until(() => started, 5_000)).toBe(true)
     expect([gate.inFlight(), state.read]).toEqual([1, "pending"])
     // 99 ms after the hand-off, 999 ms from the head: it still runs.
     yield* TestClock.adjust(99)
     yield* settle
     expect([gate.inFlight(), state.read]).toEqual([1, "pending"])
-    // At `request` from the head: stopped, and its place back.
+    // At `request` from the head: stopped, and its place back. The case
+    // waits, in real time, for that state, at most 5 s.
     yield* TestClock.adjust(1)
-    yield* settle
-    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)))
+    yield* until(() => gate.inFlight() === 0 && state.read !== "pending", 5_000)
     expect([gate.inFlight(), state.read]).toEqual([0, "failed"])
   }))
 })

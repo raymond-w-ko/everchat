@@ -108,9 +108,9 @@ The rest:
 
 ## Checks
 
-- Full check: `just full`, about 150 s (near 60 s of it are the adopted
-  tests under `packages/codemode/tests/pi`; 228 s was measured once, on a
-  loaded machine).
+- Full check: `just full`, about 220 s (the whole run at the landing of
+  `7b13f9c`: 1,517 tests in 219.62 s, at a load average of 4 to 10 with the
+  fleet at work; 263 s at the landing of `2e2c021`).
 - Scoped check: `just scoped <test files>`, for the files of one change,
   with their paths from the root (for example
   `just scoped packages/core/src/memory.test.ts` or

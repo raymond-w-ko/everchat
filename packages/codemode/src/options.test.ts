@@ -20,7 +20,7 @@ import { threadLayer, type Options as ThreadOptions } from "./thread.ts"
 // it that is no such field, fails the type check (`just check`), so a new
 // numeric option cannot be left out of this test.
 type Numeric<T> = { [K in keyof T]-?: NonNullable<T[K]> extends number ? K : never }[keyof T]
-const THREAD = { memory: 32 * 1024 * 1024, compute: 250, polls: 100_000 } satisfies Record<Numeric<ThreadOptions>, number>
+const THREAD = { memory: 32 * 1024 * 1024, compute: 250, polls: 100_000, deadline: 60_000, calls: 256 } satisfies Record<Numeric<ThreadOptions>, number>
 const INLINE = { memory: 32 * 1024 * 1024, polls: 10_000 } satisfies Record<Numeric<InlineOptions>, number>
 
 const wasm = loadQuickJSWasm()
