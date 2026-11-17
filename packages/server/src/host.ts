@@ -63,8 +63,12 @@
 // window that has ended, or whose start is after now, leaves the map. The
 // caller counts; `say` does not.
 //
-// The layer's end: each client of each channel ends with `stop`, then each
-// loaded chat is unloaded (the loader's end), so each launch ends. The host
+// The layer's end, in this order: the registry's `stop`, so that no request
+// becomes a client after it (one in its checks, a socket whose `auth` comes
+// late, an R5 that joins to wait: `ClientRefused`, as for a full host);
+// then each client of each channel ends with `stop`; then each loaded chat
+// is unloaded (the loader's end), so each launch ends (lead, ec-yculc,
+// ruling 2). So each client gets `stop`, and none comes after it. The host
 // keeps the channels of its registry for it: the registry that it gives
 // notes each channel that it holds.
 
@@ -208,7 +212,8 @@ const make = (options: HostOptions) =>
       letGo,
       held: (tenant, uuid) => Effect.acquireRelease(hold(tenant, uuid), letGo),
       find: base.find,
-      size: base.size
+      size: base.size,
+      stop: base.stop
     }
 
     const loader = yield* makeLoader({ stack: options.stack, launch: options.launch, limits, registry })
@@ -305,9 +310,11 @@ const make = (options: HostOptions) =>
         })))
       })
 
-    // The layer's end: each client ends with `stop`, then the loader's end.
+    // The layer's end: the registry's stop, then each client ends with
+    // `stop`, then the loader's end.
     yield* Effect.addFinalizer(() =>
       Effect.gen(function*() {
+        yield* base.stop
         for (const channel of [...channels]) {
           for (const client of channel.clients) yield* channel.removeClient(client, "stop")
         }

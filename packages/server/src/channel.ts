@@ -24,23 +24,36 @@
 // reader takes entries one at a time (`take`), which frees their room, and
 // sees its end with the reason. `waitForPage` waits until the buffer has
 // room for a page (`page` entries and `pageBytes` bytes): a first read's
-// step 1.
+// step 1. `whenEnded` waits for the client's end alone, with no take: the
+// watch of a stream's client that nothing pulls (R4).
 //
 // Each change of the clients and of their buffers runs under the give lock,
 // as one step that an interruption cannot split (`Effect.uninterruptible`),
 // and never waits on a client:
 //
-// - `addClient(given)` and `removeClient(client, reason)`. A chat has at
-//   most `chatClients` clients and the registry's channels together at most
-//   `hostClients`: one count, shared. Past either, `ClientRefused` (`busy`).
-//   A client's end gives its place back.
+// - `addClient(given, options)` and `removeClient(client, reason)`. A chat
+//   has at most `chatClients` clients and the registry's channels together
+//   at most `hostClients`: one count, shared. Past either, `ClientRefused`
+//   (`busy`). A client's end gives its place back. After the registry's
+//   `stop`, every channel of it refuses each new client with
+//   `ClientRefused` (`busy`, bound `host`), as a full host does. With `pieces: false` the
+//   client gets no piece (R5's, which answers numbered events only; lead,
+//   ec-cxuj5): the give of a piece passes it by. All else is as for any
+//   client: its numbered events, the host's frames, its join, its place in
+//   the counts and its ends.
 // - `give(entry)`, a numbered event: into the buffer of each client that
 //   joined and whose `given` is below the event's number; it sets that
 //   client's `given`, and sets `last`.
-// - `givePiece(entry)`: into the buffer of each client that joined; it
-//   moves no number.
+// - `givePiece(entry)`: into the buffer of each client that joined and gets
+//   pieces; it moves no number. A client with `pieces: false` is passed by:
+//   no entry, no byte, no wake of its reader and no end by it.
 // - `tell(client, text)`: one of the host's own frames, for one client,
 //   joined or not; it counts in both bounds and moves no number.
+// - `tellIfEmpty(client, text)`: a ping (R4, R6; lead, ec-ek7fa): the
+//   check that the buffer is empty and the put are one step, so no give
+//   that waits on the lock falls between them. It puts nothing into a
+//   buffer that holds a text, nor into one with no room for it (`waiting`),
+//   and never ends the client.
 // - `giveTo(client, entries)`: a page of a client's own first read, into
 //   that client's buffer. It checks the room here: a page that does not fit
 //   whole is not put, no part of it, and the client stays (`noRoom`).
@@ -202,6 +215,13 @@ export class Client {
     })
   }
 
+  // Waits until the client has ended, and gives its reason (`null`: removed
+  // with none). It takes no text and frees no room; a wait that is
+  // interrupted leaves no waiter (lead, ec-5njke, ruling 10).
+  get whenEnded(): Effect.Effect<Reason | null> {
+    return Effect.map(this.changed.until(() => (this.finished === null ? undefined : this.finished)), (end) => end.reason)
+  }
+
   // The parts below run only in a step of the channel, under its give lock.
 
   /** @internal */
@@ -229,14 +249,17 @@ export class Client {
 }
 
 // The count of the clients of the host, which all channels of a registry
-// share.
+// share, and whether the registry has stopped (its `stop`).
 interface HostCount {
   clients: number
+  stopped: boolean
 }
 
 export class Channel<L = unknown> {
   private holding = 0
   private readonly members = new Set<Client>()
+  // The clients that were added with `pieces: false`.
+  private readonly noPieces = new WeakSet<Client>()
   private latest: number | null = null
   // The loaded chat, or none.
   loaded: L | undefined = undefined
@@ -297,13 +320,18 @@ export class Channel<L = unknown> {
     return true
   }
 
-  // A new client of the chat, whose `given` is `given`.
-  addClient(given: number): Effect.Effect<Client, ClientRefused> {
+  // A new client of the chat, whose `given` is `given`; with `pieces: false`,
+  // one that gets no piece.
+  addClient(given: number, options?: { readonly pieces: boolean }): Effect.Effect<Client, ClientRefused> {
     return this.step(Effect.suspend(() => {
+      // The check and the add are one synchronous body: after the
+      // registry's `stop` has returned, no client is added.
+      if (this.host.stopped) return Effect.fail(new ClientRefused({ reason: "busy", bound: "host" }))
       if (this.members.size >= this.limits.chatClients) return Effect.fail(new ClientRefused({ reason: "busy", bound: "chat" }))
       if (this.host.clients >= this.limits.hostClients) return Effect.fail(new ClientRefused({ reason: "busy", bound: "host" }))
       const client = new Client(given, this.limits)
       this.members.add(client)
+      if (options?.pieces === false) this.noPieces.add(client)
       this.host.clients += 1
       return Effect.succeed(client)
     }))
@@ -338,7 +366,7 @@ export class Channel<L = unknown> {
     return this.step(Effect.suspend(() =>
       Effect.forEach(this.clients, (client) =>
         Effect.sync(() => {
-          if (client.joined) this.putOrEnd(client, entry.json, entry.bytes)
+          if (client.joined && !this.noPieces.has(client)) this.putOrEnd(client, entry.json, entry.bytes)
         }), { discard: true })
     ))
   }
@@ -349,6 +377,19 @@ export class Channel<L = unknown> {
     return this.step(Effect.sync(() => {
       if (client.ended !== null || !this.members.has(client)) return "ended"
       return this.putOrEnd(client, text, utf8(text)) ? "told" : "ended"
+    }))
+  }
+
+  // A ping for `client` (above): `told` (put into its empty buffer),
+  // `waiting` (its buffer holds a text, or has no room for it: nothing is
+  // put, and the client stays), or `ended` (the client had ended).
+  tellIfEmpty(client: Client, text: string): Effect.Effect<"told" | "waiting" | "ended"> {
+    return this.step(Effect.sync(() => {
+      if (client.ended !== null || !this.members.has(client)) return "ended"
+      const bytes = utf8(text)
+      if (client.size.entries > 0 || !client.hasRoom(1, bytes)) return "waiting"
+      client.put(text, bytes)
+      return "told"
     }))
   }
 
@@ -438,12 +479,18 @@ export interface Registry<L = unknown> {
   readonly find: (tenant: string, uuid: string) => Channel<L> | undefined
   // The count of channels, and of the clients of the host.
   readonly size: () => { readonly channels: number; readonly clients: number }
+  // From now on, every channel of the registry, one that it has and one
+  // that it makes later, refuses each new client with `ClientRefused`
+  // (`busy`, bound `host`). One step that nothing splits; it ends no client
+  // and changes no count, and a second `stop` does nothing (lead, ec-yculc,
+  // ruling 1). The host's end runs it first.
+  readonly stop: Effect.Effect<void>
 }
 
 // A new registry with the limits `limits`.
 export const makeRegistry = <L = unknown>(limits: ChannelLimits): Registry<L> => {
   const tenants = new Map<string, Map<string, Channel<L>>>()
-  const host: HostCount = { clients: 0 }
+  const host: HostCount = { clients: 0, stopped: false }
   const lock = Semaphore.makeUnsafe(1)
   const step = <A>(body: () => A) => Semaphore.withPermit(lock, Effect.uninterruptible(Effect.sync(body)))
   const find = (tenant: string, uuid: string) => tenants.get(tenant)?.get(uuid)
@@ -475,6 +522,9 @@ export const makeRegistry = <L = unknown>(limits: ChannelLimits): Registry<L> =>
     letGo,
     held: (tenant, uuid) => Effect.acquireRelease(hold(tenant, uuid), letGo),
     find,
+    stop: step(() => {
+      host.stopped = true
+    }),
     size: () => {
       let channels = 0
       for (const chats of tenants.values()) channels += chats.size

@@ -5,9 +5,9 @@
 // first read's page, and the bounds of clients.
 
 import { expect, test } from "bun:test"
-import { Effect, Exit, Fiber, Scheduler } from "effect"
+import { Effect, Exit, Fiber, Scheduler, Semaphore } from "effect"
 import { type Channel, type ChannelLimits, type Client, ClientRefused, makeRegistry, REASONS, type Taken } from "./channel.ts"
-import { type Entry, fit } from "./fit.ts"
+import { type Entry, fit, utf8 } from "./fit.ts"
 
 const LIMITS: ChannelLimits = {
   buffer: 4_096,
@@ -263,6 +263,111 @@ test("a piece into a full buffer ends that client as slow too", async () => {
   expect(got).toEqual({ reason: "slow" })
 })
 
+// A client with `pieces: false` (R5's; lead, ec-cxuj5)
+// ----------------------------------------------------
+
+test("a joined client with pieces: false gets each numbered event and frame as any client; a flood of pieces past both bounds of its buffer, with no pause, leaves it at 0 entries and 0 bytes and does not end it, while a client of the same channel with no option ends as slow", async () => {
+  const limits = { ...LIMITS, buffer: 4, bufferBytes: 1_000, entry: 400, page: 2, pageBytes: 800 }
+  const got = await run(Effect.gen(function*() {
+    const registry = makeRegistry(limits)
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const plain = yield* joined(channel, 0)
+    const none = yield* channel.addClient(0, { pieces: false })
+    expect(yield* channel.join(none)).toBe(true)
+    // Its reader waits in take while the pieces come.
+    const reader = yield* Effect.forkChild(none.take)
+    yield* Effect.yieldNow
+    // More entries than `buffer` (4) and more bytes than `bufferBytes`
+    // (1,000): 40 pieces of 300 bytes, one give after the other.
+    const sizes: Array<{ entries: number; bytes: number }> = []
+    for (let k = 0; k < 40; k += 1) {
+      yield* quick(channel.givePiece(sized(null, 300)))
+      sizes.push(none.size)
+    }
+    const flood = { plain: plain.ended, none: none.ended, reading: reader.pollUnsafe() === undefined, clients: channel.clients.length }
+    // The numbered events, and a frame of the host, as for any client.
+    yield* quick(channel.give(event(1)))
+    const first = yield* quick(Fiber.join(reader))
+    const told = yield* channel.tell(none, ": ping")
+    yield* quick(channel.give(event(2)))
+    yield* quick(channel.give(event(3)))
+    const sizeAfter = none.size
+    const rest = yield* drain(none)
+    return { sizes, flood, first, told, sizeAfter, rest, given: none.given, last: channel.last, ended: none.ended, clients: registry.size().clients }
+  }))
+  expect(got.sizes).toEqual(Array.from({ length: 40 }, () => ({ entries: 0, bytes: 0 })))
+  expect(got.flood).toEqual({ plain: { reason: "slow" }, none: null, reading: true, clients: 1 })
+  expect(got.first).toEqual({ _tag: "Text", text: event(1).json, bytes: event(1).bytes })
+  expect(got.told).toBe("told")
+  expect(got.sizeAfter).toEqual({ entries: 3, bytes: utf8(": ping") + event(2).bytes + event(3).bytes })
+  expect(got.rest.texts).toEqual([": ping", event(2).json, event(3).json])
+  expect(got.rest.end).toBeNull()
+  expect([got.given, got.last]).toEqual([3, 3])
+  expect(got.ended).toBeNull()
+  expect(got.clients).toBe(1)
+})
+
+test("a client with pieces: false is filled by numbered events alone: past its buffer it ends as slow, as any client", async () => {
+  const limits = { ...LIMITS, buffer: 2 }
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(limits).hold(TENANT_A, CHAT)
+    const none = yield* channel.addClient(0, { pieces: false })
+    expect(yield* channel.join(none)).toBe(true)
+    for (let k = 0; k < 10; k += 1) yield* quick(channel.givePiece(piece("p" + k)))
+    const before = none.ended
+    for (let n = 1; n <= 3; n += 1) yield* quick(channel.give(event(n)))
+    return { before, after: none.ended, given: none.given, taken: yield* none.take }
+  }))
+  expect(got).toEqual({ before: null, after: { reason: "slow" }, given: 2, taken: { _tag: "End", reason: "slow" } })
+})
+
+test("the clients' limits count a client with pieces: false as any client, and each of its ends gives its place back", async () => {
+  const limits = { ...LIMITS, buffer: 1, chatClients: 2, hostClients: 3 }
+  const registry = makeRegistry(limits)
+  const got = await run(Effect.gen(function*() {
+    const a = yield* registry.hold(TENANT_A, CHAT)
+    const b = yield* registry.hold(TENANT_B, CHAT)
+    const one = yield* a.addClient(0, { pieces: false })
+    yield* a.addClient(0, { pieces: false })
+    const pastChat = yield* Effect.flip(a.addClient(0))
+    const pastChatNone = yield* Effect.flip(a.addClient(0, { pieces: false }))
+    const three = yield* b.addClient(0, { pieces: false })
+    const pastHost = yield* Effect.flip(b.addClient(0))
+    const pastHostNone = yield* Effect.flip(b.addClient(0, { pieces: false }))
+    const counted = registry.size().clients
+    // A remove gives its place back.
+    yield* a.removeClient(one)
+    const afterRemove = registry.size().clients
+    const inA = yield* Effect.exit(a.addClient(0, { pieces: false }))
+    // So does a slow end by numbered events.
+    expect(yield* b.join(three)).toBe(true)
+    yield* b.give(event(1))
+    yield* b.give(event(2))
+    const afterSlow = registry.size().clients
+    const inB = yield* Effect.exit(b.addClient(0))
+    return {
+      bounds: [pastChat.bound, pastChatNone.bound, pastHost.bound, pastHostNone.bound],
+      counted,
+      afterRemove,
+      inA: Exit.isSuccess(inA),
+      slow: three.ended,
+      afterSlow,
+      inB: Exit.isSuccess(inB),
+      after: registry.size().clients
+    }
+  }))
+  expect(got).toEqual({
+    bounds: ["chat", "chat", "host", "host"],
+    counted: 3,
+    afterRemove: 2,
+    inA: true,
+    slow: { reason: "slow" },
+    afterSlow: 2,
+    inB: true,
+    after: 3
+  })
+})
+
 test("a reader that waits gets the next give, and the end of its client", async () => {
   const got = await run(Effect.gen(function*() {
     const channel = yield* makeRegistry(LIMITS).hold(TENANT_A, CHAT)
@@ -345,6 +450,79 @@ test("tell reaches a client that has not joined, counts in its bytes and moves n
   expect(got.over).toBe("ended")
   expect(got.ended).toEqual({ reason: "slow" })
   expect(got.clients).toBe(0)
+})
+
+test("tellIfEmpty puts a text into an empty buffer (told); into a buffer that holds a text it puts nothing (waiting), also when the text would fit; with no room in the empty buffer, waiting; for a client that ended, ended; it never ends a client", async () => {
+  const limits = { ...LIMITS, buffer: 2, bufferBytes: 100, entry: 50, page: 1, pageBytes: 50 }
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(limits).hold(TENANT_A, CHAT)
+    const client = yield* joined(channel, 0)
+    const into = yield* channel.tellIfEmpty(client, ": ping")
+    const first = client.size
+    // The ping is in the buffer: a second waits, though one more entry of
+    // 6 bytes fits.
+    const fits = client.hasRoom(1, utf8(": ping"))
+    const again = yield* channel.tellIfEmpty(client, ": ping")
+    const second = client.size
+    const taken = yield* drain(client)
+    // An event in the buffer: a ping waits.
+    yield* channel.give(event(1))
+    const behind = yield* channel.tellIfEmpty(client, ": ping")
+    const third = client.size
+    yield* drain(client)
+    // An empty buffer with no room for the text: nothing put, the client
+    // stays.
+    const big = yield* channel.tellIfEmpty(client, "x".repeat(101))
+    const fourth = client.size
+    const alive = { ended: client.ended, clients: channel.clients.length }
+    // A client that ended, one that had joined and one that had not.
+    const notJoined = yield* channel.addClient(0)
+    yield* channel.removeClient(client, "stop")
+    yield* channel.removeClient(notJoined, null)
+    const ended = [yield* channel.tellIfEmpty(client, ": ping"), yield* channel.tellIfEmpty(notJoined, ": ping")]
+    return { into, first, fits, again, second, taken, behind, third, big, fourth, alive, ended, sizes: [client.size, notJoined.size], ends: [client.ended, notJoined.ended] }
+  }))
+  expect(got.into).toBe("told")
+  expect(got.first).toEqual({ entries: 1, bytes: 6 })
+  expect(got.fits).toBe(true)
+  expect(got.again).toBe("waiting")
+  expect(got.second).toEqual({ entries: 1, bytes: 6 })
+  expect(got.taken.texts).toEqual([": ping"])
+  expect(got.behind).toBe("waiting")
+  expect(got.third).toEqual({ entries: 1, bytes: event(1).bytes })
+  expect(got.big).toBe("waiting")
+  expect(got.fourth).toEqual({ entries: 0, bytes: 0 })
+  expect(got.alive).toEqual({ ended: null, clients: 1 })
+  expect(got.ended).toEqual(["ended", "ended"])
+  expect(got.sizes).toEqual([{ entries: 0, bytes: 0 }, { entries: 0, bytes: 0 }])
+  expect(got.ends).toEqual([{ reason: "stop" }, { reason: null }])
+})
+
+test("with the give lock held, a give and a tellIfEmpty queued behind it in that order: the event is in the buffer, the answer is waiting, and the client has not ended (buffer 1, page 1)", async () => {
+  const limits = { ...LIMITS, buffer: 1, page: 1 }
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* makeRegistry(limits).hold(TENANT_A, CHAT)
+    const client = yield* joined(channel, 0)
+    const waiters = () => (channel.giveLock as unknown as { readonly waiters: Set<unknown> }).waiters.size
+    yield* Semaphore.take(channel.giveLock, 1)
+    const giving = yield* Effect.forkChild(channel.give(event(1)))
+    while (waiters() < 1) yield* Effect.yieldNow
+    const telling = yield* Effect.forkChild(channel.tellIfEmpty(client, ": ping"))
+    while (waiters() < 2) yield* Effect.yieldNow
+    // Both wait on the lock, and the buffer is still empty.
+    const before = client.size
+    yield* Semaphore.release(channel.giveLock, 1)
+    yield* Fiber.join(giving)
+    const told = yield* Fiber.join(telling)
+    return { before, told, size: client.size, given: client.given, ended: client.ended, clients: channel.clients.length, texts: (yield* drain(client)).texts }
+  }))
+  expect(got.before).toEqual({ entries: 0, bytes: 0 })
+  expect(got.told).toBe("waiting")
+  expect(got.size).toEqual({ entries: 1, bytes: event(1).bytes })
+  expect(got.given).toBe(1)
+  expect(got.ended).toBeNull()
+  expect(got.clients).toBe(1)
+  expect(got.texts).toEqual([event(1).json])
 })
 
 test("giveTo puts a page that fits whole and sets given; with less room than its page it puts no part of it and leaves the client", async () => {
@@ -516,6 +694,69 @@ test("a slow end gives the host's place back too, and the reasons are the closed
   }))
   expect(got).toEqual({ refused: "host", ended: { reason: "slow" }, next: true })
   expect([...REASONS]).toEqual(["slow", "token", "busy", "stop", "internal"])
+})
+
+test("after the registry's stop, addClient on a channel that it had and on one that it holds later fails with ClientRefused busy host, with and without pieces: false; the clients that were there are as they were, and the counts too; a second stop changes nothing", async () => {
+  const limits = { ...LIMITS, buffer: 8 }
+  const registry = makeRegistry(limits)
+  // Each `addClient`, with no option and with `pieces: false`: its refusal,
+  // or "a client".
+  const refusedBy = (channel: Channel) =>
+    Effect.forEach([undefined, { pieces: false }], (options) =>
+      Effect.map(Effect.result(channel.addClient(0, options)), (result) =>
+        result._tag === "Success"
+          ? "a client"
+          : { refused: result.failure instanceof ClientRefused, reason: result.failure.reason, bound: result.failure.bound }))
+  const host = { refused: true, reason: "busy", bound: "host" } as const
+  const got = await run(Effect.gen(function*() {
+    const had = yield* registry.hold(TENANT_A, CHAT)
+    const member = yield* joined(had, 0)
+    const quiet = yield* had.addClient(0, { pieces: false })
+    yield* had.give(event(1))
+    yield* had.givePiece(piece("p"))
+    const state = () => ({
+      size: registry.size(),
+      clients: had.clients.length,
+      member: { size: member.size, given: member.given, ended: member.ended, joined: member.joined },
+      quiet: { size: quiet.size, given: quiet.given, ended: quiet.ended, joined: quiet.joined },
+      last: had.last,
+      holders: had.holders
+    })
+    const before = state()
+    yield* registry.stop
+    const afterStop = state()
+    const onHad = yield* refusedBy(had)
+    // A channel that the registry makes after its stop.
+    const later = yield* registry.hold(TENANT_B, CHAT)
+    const onLater = yield* refusedBy(later)
+    const afterRefusals = state()
+    yield* registry.stop
+    const afterSecond = state()
+    const again = [...(yield* refusedBy(had)), ...(yield* refusedBy(later))]
+    // The clients that were there go on: a give reaches the member, and an
+    // end gives its place back.
+    yield* had.give(event(2))
+    const read = (yield* drain(member)).texts
+    yield* had.removeClient(quiet)
+    return { before, afterStop, onHad, onLater, afterRefusals, afterSecond, again, read, end: registry.size(), laterClients: later.clients.length }
+  }))
+  expect(got.before).toEqual({
+    size: { channels: 1, clients: 2 },
+    clients: 2,
+    member: { size: { entries: 2, bytes: event(1).bytes + piece("p").bytes }, given: 1, ended: null, joined: true },
+    quiet: { size: { entries: 0, bytes: 0 }, given: 0, ended: null, joined: false },
+    last: 1,
+    holders: 1
+  })
+  expect(got.afterStop).toEqual(got.before)
+  expect(got.onHad).toEqual([host, host])
+  expect(got.onLater).toEqual([host, host])
+  expect(got.afterRefusals).toEqual({ ...got.before, size: { channels: 2, clients: 2 } })
+  expect(got.afterSecond).toEqual(got.afterRefusals)
+  expect(got.again).toEqual([host, host, host, host])
+  expect(got.read).toEqual([event(1).json, piece("p").json, event(2).json])
+  expect(got.end).toEqual({ channels: 2, clients: 1 })
+  expect(got.laterClients).toBe(0)
 })
 
 // The rules that hold the counts and the order
@@ -749,4 +990,82 @@ test("a wait that is interrupted leaves no waiter in the list, and a later wait 
     taken: { _tag: "Text", text: event(1).json, bytes: event(1).bytes },
     afterTake: 0
   })
+})
+
+// The wait for a client's end (lead, ec-5njke, ruling 10)
+// --------------------------------------------------------
+
+test("whenEnded gives the reason of an end by a give (slow), by the host's stop, by cannotGive (internal), and null for a remove with none", async () => {
+  const got = await run(Effect.gen(function*() {
+    const registry = makeRegistry(SMALL)
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const slow = yield* joined(channel, 0)
+    const stop = yield* joined(channel, 0)
+    const internal = yield* joined(channel, 0)
+    const gone = yield* joined(channel, 0)
+    const waits = yield* Effect.forEach([slow, stop, internal, gone], (client) => Effect.forkChild(client.whenEnded))
+    yield* Effect.yieldNow
+    const before = yield* Effect.forEach(waits, settled)
+    // A give with no room ends `slow` alone: the others have read theirs.
+    for (let n = 1; n <= SMALL.buffer + 1; n++) {
+      yield* channel.give(event(n))
+      for (const client of [stop, internal, gone]) yield* drain(client)
+    }
+    yield* channel.removeClient(stop, "stop")
+    yield* channel.removeClient(gone)
+    yield* channel.cannotGive(SMALL.buffer + 2)
+    const after = yield* Effect.forEach(waits, settled)
+    yield* registry.letGo(channel)
+    return { before, after }
+  }))
+  expect(got).toEqual({ before: ["waiting", "waiting", "waiting", "waiting"], after: ["slow", "stop", "internal", null] })
+})
+
+test("whenEnded after the end answers at once; a wait takes no text: the buffer's size and the next take are as before", async () => {
+  const got = await run(Effect.gen(function*() {
+    const registry = makeRegistry(SMALL)
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const client = yield* joined(channel, 0)
+    yield* channel.give(event(1))
+    yield* channel.give(event(2))
+    const wait = yield* Effect.forkChild(client.whenEnded)
+    yield* Effect.yieldNow
+    // Each give wakes the wait, and it takes nothing.
+    yield* channel.give(event(3))
+    yield* Effect.yieldNow
+    const waiting = { state: yield* settled(wait), size: client.size, waiters: waiters(client) }
+    const next = yield* client.take
+    yield* Fiber.interrupt(wait)
+    const ended = yield* channel.addClient(0)
+    yield* channel.removeClient(ended, "token")
+    const late = yield* Effect.forkChild(ended.whenEnded)
+    const lateGot = yield* settled(late)
+    yield* channel.removeClient(client)
+    yield* registry.letGo(channel)
+    return { waiting, next: next._tag === "Text" ? numbers([next.text]) : next, lateGot }
+  }))
+  expect(got).toEqual({
+    waiting: { state: "waiting", size: { entries: 3, bytes: 3 * event(1).bytes }, waiters: 1 },
+    next: [1],
+    lateGot: "token"
+  })
+})
+
+test("a wait for the end that is interrupted leaves no waiter, and the client's reader still gets its texts and its end", async () => {
+  const got = await run(Effect.gen(function*() {
+    const registry = makeRegistry(SMALL)
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const client = yield* joined(channel, 0)
+    const wait = yield* Effect.forkChild(client.whenEnded)
+    yield* Effect.yieldNow
+    const parked = waiters(client)
+    yield* Fiber.interrupt(wait)
+    const afterInterrupt = waiters(client)
+    yield* channel.give(event(1))
+    yield* channel.removeClient(client, "stop")
+    const read = yield* drain(client)
+    yield* registry.letGo(channel)
+    return { parked, afterInterrupt, read: { texts: numbers(read.texts), end: read.end } }
+  }))
+  expect(got).toEqual({ parked: 1, afterInterrupt: 0, read: { texts: [], end: { _tag: "End", reason: "stop" } } })
 })

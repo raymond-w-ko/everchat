@@ -8,7 +8,7 @@
 // TestClock, with a stack of the core's hosted set over the tests' fake wire.
 
 import { expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Scheduler, Scope, Semaphore } from "effect"
 import { TestClock } from "effect/testing"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
@@ -21,7 +21,7 @@ import { Chats, LaunchLive, NoChat, SENDER_KEY, Store, StoreError } from "@everc
 import { Turns } from "@everchat/core/turn"
 import { compactor, fakeWire, newFile, PICK, reply, rows } from "@everchat/local/testing"
 import { chatsLayer, ProcessAlive } from "@everchat/sqlite/bun"
-import type { Channel } from "./channel.ts"
+import { type Channel, type Client, ClientRefused } from "./channel.ts"
 import { ChatBusy, Host, type HostOptions, MessageRefused, SecretTooShort, TooMany } from "./host.ts"
 import { DEFAULTS, type Limits, LimitsRefused } from "./limits.ts"
 import { type LoadedChat, LoadedFull } from "./loaded.ts"
@@ -838,6 +838,117 @@ test("a deadline that comes while the commit's step runs gives Sent: the message
     })
   )
 })
+
+// The end and the registry's stop (lead, ec-yculc)
+// ------------------------------------------------
+// The layer's end stops the registry first: after it, no `addClient` of a
+// channel of the host's registry adds a client; then each client ends with
+// `stop`; then the loader's end.
+
+// An `addClient` of `channel`, as its outcome: a client, or the refusal's
+// reason and bound.
+const tryAdd = (channel: Channel<LoadedChat>) =>
+  Effect.map(Effect.result(channel.addClient(0)), (result) =>
+    result._tag === "Success"
+      ? { _tag: "Client" as const, client: result.success }
+      : { _tag: "Refused" as const, refused: result.failure instanceof ClientRefused, reason: result.failure.reason, bound: result.failure.bound })
+const refusedByHost = { _tag: "Refused", refused: true, reason: "busy", bound: "host" } as const
+
+test("after the layer's end, and inside it (after the registry's stop, while a load under way holds the loader's end), addClient on a channel of the host's registry is refused; the clients of before end with stop, and no client is left", async () => {
+  // A failed check lets the load go too, so the case's scope can close.
+  const gate = Deferred.makeUnsafe<void>()
+  await run(() =>
+    Effect.gen(function*() {
+      const w = world()
+      const b = yield* build(w)
+      const loaded = yield* b.real.make(TENANT_A, PICK)
+      const cold = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, loaded, "load it", null)
+      yield* loadedOf(b, TENANT_A, loaded).turns.idle
+      const channel = channelOf(b, TENANT_A, loaded)
+      const before = yield* channel.addClient(0)
+      // A load of the cold chat whose `Chats.store` waits for the gate with no
+      // interruption: the loader's end waits for it.
+      w.open = Effect.uninterruptible(Deferred.await(gate))
+      const loading = yield* Effect.forkChild(b.host.say(TENANT_A, cold, "a cold chat", null))
+      yield* until(() => w.opens > 1)
+      const ending = yield* Effect.forkChild(b.close)
+      // Inside the end: the client of before got `stop`, and the end waits.
+      yield* until(() => before.ended !== null)
+      yield* settle
+      expect(ending.pollUnsafe()).toBeUndefined()
+      expect(before.ended).toEqual({ reason: "stop" })
+      const inside = yield* tryAdd(channel)
+      const coldChannel = channelOf(b, TENANT_A, cold)
+      const insideCold = yield* tryAdd(coldChannel)
+      // A channel that the registry makes inside the end.
+      const other = yield* b.real.make(TENANT_B, PICK)
+      const made = yield* b.host.registry.hold(TENANT_B, other)
+      const insideMade = yield* tryAdd(made)
+      const during = b.host.registry.size().clients
+      yield* b.host.registry.letGo(made)
+      yield* Deferred.succeed(gate, undefined)
+      yield* Fiber.join(ending)
+      yield* Fiber.await(loading)
+      // After the end.
+      const after = yield* tryAdd(channel)
+      expect({ inside, insideCold, insideMade, during, after }).toEqual({
+        inside: refusedByHost,
+        insideCold: refusedByHost,
+        insideMade: refusedByHost,
+        during: 0,
+        after: refusedByHost
+      })
+      expect(b.host.registry.size()).toEqual({ channels: 0, clients: 0 })
+    }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))
+  )
+})
+
+test("an addClient that races the layer's end, at each order that a Deferred and the steps between make: the client gets stop or is refused, never a client with no end", async () => {
+  const tally = { stop: 0, refused: 0 }
+  await run(() =>
+    Effect.gen(function*() {
+      const uuid = yield* (yield* Chats).make(TENANT_A, PICK)
+      for (const first of ["add", "end"] as const) {
+        for (let k = 0; k <= 120; k++) {
+          const b = yield* build(world())
+          const channel = yield* b.host.registry.hold(TENANT_A, uuid)
+          // A client of before, so that the end's loop over the clients has
+          // steps of its own.
+          const old = yield* channel.addClient(0)
+          const goAdd = yield* Deferred.make<void>()
+          const goEnd = yield* Deferred.make<void>()
+          // Few steps before each yield: each step of the two fibers can
+          // fall between two of the other.
+          const few = Effect.provideService(Scheduler.MaxOpsBeforeYield, 3)
+          const adder = yield* Effect.forkChild(few(Effect.andThen(Deferred.await(goAdd), tryAdd(channel))))
+          const ender = yield* Effect.forkChild(few(Effect.andThen(Deferred.await(goEnd), b.close)))
+          yield* Deferred.succeed(first === "add" ? goAdd : goEnd, undefined)
+          for (let n = 0; n < k; n++) yield* Effect.yieldNow
+          yield* Deferred.succeed(first === "add" ? goEnd : goAdd, undefined)
+          const added = yield* Fiber.join(adder)
+          yield* Fiber.join(ender)
+          expect(old.ended).toEqual({ reason: "stop" })
+          if (added._tag === "Client") {
+            const client: Client = added.client
+            expect([first, k, client.ended]).toEqual([first, k, { reason: "stop" }])
+            tally.stop += 1
+          } else {
+            expect([first, k, added]).toEqual([first, k, refusedByHost])
+            tally.refused += 1
+          }
+          expect(b.host.registry.size().clients).toBe(0)
+          yield* b.host.registry.letGo(channel)
+        }
+      }
+    })
+  )
+  console.log("the race of addClient and the end:", JSON.stringify(tally))
+  // Both outcomes happen.
+  expect(tally.stop).toBeGreaterThan(0)
+  expect(tally.refused).toBeGreaterThan(0)
+  expect(tally.stop + tally.refused).toBe(2 * 121)
+}, 20_000)
 
 // The loader's errors
 // -------------------

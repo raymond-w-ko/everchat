@@ -9,18 +9,33 @@
 
 import { afterAll, expect, test } from "bun:test"
 import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
-import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Stream } from "effect"
+import { Cause, Clock, Context, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Scheduler, Scope, Stream } from "effect"
 import { Mac, SecureRandom } from "effect/crypto"
 import { Base64Url } from "effect/encoding"
-import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
+import { HttpEffect, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { type Jwk, Jws } from "effect/jose"
 import { TestClock } from "effect/testing"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { Chats, type Pick } from "@everchat/core/store"
+import { Chats, type Pick, StoreError } from "@everchat/core/store"
 import { chatsLayer } from "@everchat/sqlite/bun"
-import { CODES, ERRORS, errorAnswer, type Found, type Gate, jsonAnswer, makeGate, Refused } from "./http.ts"
+import {
+  type Authorized,
+  CODES,
+  ERRORS,
+  errorAnswer,
+  type Found,
+  type Gate,
+  jsonAnswer,
+  makeGate,
+  Refused,
+  type Route,
+  type SocketRefused,
+  type Steps,
+  type Upgrading,
+  wholeNumber
+} from "./http.ts"
 import { DEFAULTS, type Limits } from "./limits.ts"
 import { type Claims, makeToken } from "./token.ts"
 
@@ -131,12 +146,14 @@ const ok = (found: Found) =>
     return jsonAnswer({ chat: found.chat, tenant: found.tenant })
   })
 
+// The route of a request: R1 for a `POST`, else R2 (each route has one
+// method).
 const call = (
   gate: Gate,
   req: HttpServerRequest.HttpServerRequest,
   chat: string | undefined,
   work: (found: Found) => Effect.Effect<HttpServerResponse.HttpServerResponse, unknown> = ok
-) => gate.route("R2", chat, work).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req))
+) => gate.route(req.method === "POST" ? "R1" : "R2", chat, work).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req))
 
 // An answer as the web sees it. Each answer has the three headers and no
 // `access-control-allow-credentials`.
@@ -774,7 +791,10 @@ const countingClock = () => {
   return { clock, counter }
 }
 
-test("over a connection: a HEAD to a route whose work answers with a stream, one that ends and one that never ends, gives each place back by the deadline at the latest", async () => {
+// A `HEAD` is no route's method (lead, ec-hmsqu, ruling 1): Bun pulls no
+// stream answer for a `HEAD`, so the gate answers it before any check and any
+// work, with the answer of no route.
+test("over a connection: a HEAD to a route whose work would answer a stream, one that ends and one that never ends, gets 404 with no body, runs no check and no work, and holds no place; a GET to it runs its work", async () => {
   const gate = gateOf({ request: 300 })
   let worked = 0
   const streaming = (stream: Stream.Stream<Uint8Array>) =>
@@ -792,21 +812,26 @@ test("over a connection: a HEAD to a route whose work answers with a stream, one
   await serving(gate, routes, (port) =>
     Effect.gen(function*() {
       const from = lines.length
-      const head = (url: string) => `HEAD ${url} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\n\r\n`
-      // Each client keeps its connection open past the deadline, and reads
-      // no body: nothing pulls the stream.
-      const answers = Promise.all([
-        ...Array.from({ length: 3 }, () => raw(port, head(`/v1/chats/${A1}/ends`), 1_000)),
-        ...Array.from({ length: 3 }, () => raw(port, head(`/v1/chats/${A1}/never`), 1_000))
-      ])
-      expect(yield* until(() => worked === 6, 5_000)).toBe(true)
-      // Every place back while the connections are still open: at the
-      // deadline, not at their close.
-      expect(yield* until(() => gate.inFlight() === 0, 900)).toBe(true)
-      const got = yield* Effect.promise(() => answers)
-      for (const answer of got) expect(answer.got).toStartWith("HTTP/1.1 200")
-      // The deadline's line for each, with the route and no more.
-      expect(deadlineLines(from).map((line) => line.annotations["route"])).toEqual(Array(6).fill("R4"))
+      const head = (url: string, auth: string) => `HEAD ${url} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${auth}\r\n\r\n`
+      // A good token and a bad one: the same 404, before check 2.
+      const got = yield* Effect.promise(() =>
+        Promise.all([
+          ...[token, "a.b"].map((auth) => raw(port, head(`/v1/chats/${A1}/ends`, auth), 300)),
+          ...[token, "a.b"].map((auth) => raw(port, head(`/v1/chats/${A1}/never`, auth), 300))
+        ])
+      )
+      for (const answer of got) {
+        expect(answer.got).toStartWith("HTTP/1.1 404")
+        expect(answer.got.toLowerCase()).toContain("cache-control: no-store")
+        expect(answer.got.toLowerCase()).not.toContain("access-control-")
+      }
+      expect(worked).toBe(0)
+      expect(gate.inFlight()).toBe(0)
+      expect(parsed().slice(from).map((line) => line.annotations)).toEqual(Array(4).fill({ route: "R4", status: 404 }))
+      const text = yield* Effect.promise(() => fetch(`http://127.0.0.1:${port}/v1/chats/${A1}/ends`, { headers: { authorization: "Bearer " + token } }).then((r) => r.text()))
+      expect(text).toBe("one")
+      expect(worked).toBe(1)
+      expect(yield* until(() => gate.inFlight() === 0, 2_000)).toBe(true)
     }))
 })
 
@@ -970,6 +995,1035 @@ test("a stream answer that nothing starts gives its place back at the deadline, 
     expect(ran).toBe(false)
     expect(gate.inFlight()).toBe(0)
   }))
+})
+
+// No route, and the method (lead, ec-hmsqu, ruling 1)
+// ----------------------------------------------------
+
+const routed = (
+  gate: Gate,
+  name: Route,
+  req: HttpServerRequest.HttpServerRequest,
+  chat: string | undefined,
+  work: (found: Found, steps: Steps) => Effect.Effect<HttpServerResponse.HttpServerResponse, unknown> = ok
+) => gate.route(name, chat, work).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req))
+
+// A work that holds its place until `latch` is done; `started` when it runs.
+const holder = (gate: Gate) =>
+  Effect.gen(function*() {
+    const latch = yield* Deferred.make<void>()
+    const started = yield* Deferred.make<void>()
+    const fiber = yield* Effect.forkChild(call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
+      Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(latch), jsonAnswer({})))))
+    yield* Deferred.await(started)
+    return { release: Effect.andThen(Deferred.succeed(latch, undefined), Fiber.join(fiber)) }
+  })
+
+test("a request that is no route gets 404 with the three headers, no body and no CORS header, and takes a place and gives it back; with `requests` 1 and the place taken it gets 503 busy with retry-after 1", async () => {
+  const gate = gateOf({ requests: 1 })
+  const none = (headers: Record<string, string>) =>
+    gate.none.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, request("/v1/nothing/here", { headers })))
+  await run(Effect.gen(function*() {
+    const from = lines.length
+    for (const headers of [{}, { origin: ORIGIN }, authorized({ origin: "https://evil.example" })]) {
+      const answer = yield* Effect.flatMap(none(headers), (r) => Effect.promise(() => seen(r)))
+      expect(answer.status).toBe(404)
+      expect(answer.text).toBe("")
+      expect(Object.keys(answer.headers).filter((name) => name.startsWith("access-control-") || name === "vary")).toEqual([])
+      expect(gate.inFlight()).toBe(0)
+    }
+    expect(parsed().slice(from).map((line) => line.annotations)).toEqual(Array(3).fill({ route: "none", status: 404 }))
+    // The one place taken: no room for it.
+    const held = yield* holder(gate)
+    const busy = yield* Effect.flatMap(none({ origin: ORIGIN }), (r) => Effect.promise(() => seen(r)))
+    expect(busy.status).toBe(503)
+    expect(busy.headers["retry-after"]).toBe("1")
+    expect(busy.text).toBe(errorText("busy"))
+    expect(busy.headers["access-control-allow-origin"]).toBe(ORIGIN)
+    expect(gate.inFlight()).toBe(1)
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+    expect((yield* none({})).status).toBe(404)
+  }))
+})
+
+test("a method that is not its route's (HEAD, PUT, DELETE to R2 to R5, GET to R1) gets the 404 of no route after its place, and runs no check and no work: a bad token and an origin off the list get it too", async () => {
+  const { chats, calls } = counting()
+  const gate = gateOf({}, chats)
+  const before = worked
+  const cases: ReadonlyArray<readonly [Route, string]> = [
+    ...(["R2", "R3", "R4", "R5"] as const).flatMap((name) => ["HEAD", "PUT", "DELETE"].map((method) => [name, method] as const)),
+    ["R1", "GET"],
+    ["R1", "HEAD"]
+  ]
+  for (const [name, method] of cases) {
+    for (const headers of [authorized(), { authorization: "Bearer a.b" }, authorized({ origin: "https://evil.example" }), { authorization: "Bearer " + FAILING[2]?.[1] }]) {
+      lines.length = 0
+      const answer = await seen(await run(routed(gate, name, request("/v1/chats/" + A1, { method, headers }), A1)))
+      expect(answer.status).toBe(404)
+      expect(answer.text).toBe("")
+      expect(Object.keys(answer.headers).filter((key) => key.startsWith("access-control-"))).toEqual([])
+      expect(parsed().map((line) => line.annotations)).toEqual([{ route: name, status: 404 }])
+      expect(gate.inFlight()).toBe(0)
+    }
+  }
+  expect(worked).toBe(before)
+  expect(calls).toEqual([])
+  // Each route's own method passes to its checks: a bad token is 401 there.
+  for (const [name, method] of [["R1", "POST"], ["R2", "GET"], ["R3", "GET"], ["R4", "GET"], ["R5", "GET"]] as const) {
+    expect((await run(routed(gate, name, request("/v1/chats/" + A1, { method, headers: { authorization: "Bearer a.b" } }), A1))).status).toBe(401)
+    expect((await run(routed(gate, name, request("/v1/chats/" + A1, { method, headers: authorized() }), A1))).status).toBe(200)
+  }
+  expect(worked).toBe(before + 5)
+})
+
+// A client's answer (R4; lead, ec-hmsqu, ruling 2)
+// ------------------------------------------------
+
+const encode = (text: string) => new TextEncoder().encode(text)
+const get = (headers: Record<string, string> = authorized()) => request("/v1/chats/" + A1 + "/events", { headers })
+
+// R4's work in the tests: the checks passed, it says "a client now" with an
+// `abandon` that counts, and answers `stream`.
+const clientWork = (abandoned: { count: number }, stream: Stream.Stream<Uint8Array, unknown>) => (_found: Found, steps: Steps) =>
+  Effect.andThen(
+    steps.client(Effect.sync(() => {
+      abandoned.count += 1
+    })),
+    Effect.succeed(HttpServerResponse.stream(stream, { contentType: "text/event-stream" }))
+  )
+
+test("after the client's step its place goes back, once, while its stream runs; the stream runs past `request` and the gate does not end it; `abandon` runs one time at the stream's end", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const held = yield* holder(gate)
+    const abandoned = { count: 0 }
+    let made = 0
+    const counts: Array<number> = []
+    const response = yield* routed(gate, "R4", get(), A1, (found, steps) =>
+      Effect.andThen(Effect.sync(() => counts.push(gate.inFlight())), clientWork(abandoned, Stream.fromEffectRepeat(Effect.sync(() => encode(String(made++)))))(found, steps)).pipe(
+        // A second step changes nothing.
+        Effect.tap(() => steps.client(Effect.sync(() => abandoned.count += 100))),
+        Effect.tap(() => Effect.sync(() => counts.push(gate.inFlight())))
+      ))
+    expect(counts).toEqual([2, 1])
+    expect(gate.inFlight()).toBe(1)
+    const reader = HttpServerResponse.toWeb(response).body!.getReader()
+    expect((yield* Effect.promise(() => reader.read())).done).toBe(false)
+    expect(gate.inFlight()).toBe(1)
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+    const from = lines.length
+    yield* TestClock.adjust(3 * DEFAULTS.request)
+    yield* settle
+    const before = made
+    expect((yield* Effect.promise(() => reader.read())).done).toBe(false)
+    yield* settle
+    expect(made).toBeGreaterThan(before)
+    expect(deadlineLines(from)).toEqual([])
+    expect(abandoned.count).toBe(0)
+    expect(gate.inFlight()).toBe(0)
+    yield* Effect.promise(() => reader.cancel())
+    yield* settle
+    expect(abandoned.count).toBe(1)
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("a client's stream that has not started at the deadline: `abandon` runs one time there, and a start after it fails at once and runs none of its work", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const abandoned = { count: 0 }
+    let ran = false
+    const from = lines.length
+    const response = yield* routed(gate, "R4", get(), A1, clientWork(abandoned, Stream.fromEffect(Effect.sync(() => {
+      ran = true
+      return encode("late")
+    }))))
+    expect(gate.inFlight()).toBe(0)
+    yield* TestClock.adjust(DEFAULTS.request - 1)
+    yield* settle
+    expect(abandoned.count).toBe(0)
+    yield* TestClock.adjust(1)
+    yield* settle
+    expect(abandoned.count).toBe(1)
+    expect(deadlineLines(from).map((line) => line.annotations)).toEqual([{ route: "R4", status: 200, fault: "deadline" }])
+    const read = yield* Effect.promise(() => HttpServerResponse.toWeb(response).text().then(() => "read", () => "failed"))
+    yield* settle
+    expect(read).toBe("failed")
+    expect(ran).toBe(false)
+    expect(abandoned.count).toBe(1)
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("a work that fails after the client's step gets its error answer, or 500 internal; `abandon` runs one time and its place does not go back twice; an answer that is no stream runs `abandon` too", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const held = yield* holder(gate)
+    const works: ReadonlyArray<readonly [number, (abandoned: { count: number }) => (found: Found, steps: Steps) => Effect.Effect<HttpServerResponse.HttpServerResponse, unknown>]> = [
+      [429, (a) => (f, s) => Effect.andThen(clientWork(a, Stream.never)(f, s), Effect.fail(new Refused({ code: "too_many", retryAfter: 3 })))],
+      [500, (a) => (f, s) => Effect.andThen(clientWork(a, Stream.never)(f, s), Effect.fail("a fault"))],
+      [500, (a) => (f, s) => Effect.andThen(clientWork(a, Stream.never)(f, s), Effect.die("a defect"))],
+      [200, (a) => (f, s) => Effect.andThen(clientWork(a, Stream.never)(f, s), Effect.succeed(jsonAnswer({})))]
+    ]
+    for (const [status, work] of works) {
+      const abandoned = { count: 0 }
+      const answer = yield* Effect.flatMap(routed(gate, "R4", get(), A1, work(abandoned)), (r) => Effect.promise(() => seen(r)))
+      expect(answer.status).toBe(status)
+      yield* settle
+      expect(abandoned.count).toBe(1)
+      expect(gate.inFlight()).toBe(1)
+    }
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("an interruption between the client's step and its stream's start (its client went away) runs `abandon` one time; so does the deadline in that span, with 503 busy", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const held = yield* holder(gate)
+    const abandoned = { count: 0 }
+    const stepped = yield* Deferred.make<void>()
+    const waits = (found: Found, steps: Steps) =>
+      Effect.andThen(clientWork(abandoned, Stream.never)(found, steps), Effect.andThen(Deferred.succeed(stepped, undefined), Effect.never))
+    const fiber = yield* Effect.forkChild(routed(gate, "R4", get(), A1, waits))
+    yield* Deferred.await(stepped)
+    expect(gate.inFlight()).toBe(1)
+    yield* Fiber.interrupt(fiber)
+    expect(abandoned.count).toBe(1)
+    expect(gate.inFlight()).toBe(1)
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+    // The deadline: the work is interrupted, and the answer is 503.
+    const late = { count: 0 }
+    const latch = yield* Deferred.make<void>()
+    const timed = yield* Effect.forkChild(routed(gate, "R4", get(), A1, (found, steps) =>
+      Effect.andThen(clientWork(late, Stream.never)(found, steps), Effect.andThen(Deferred.succeed(latch, undefined), Effect.never))))
+    yield* Deferred.await(latch)
+    yield* settle
+    yield* TestClock.adjust(DEFAULTS.request)
+    const answer = yield* Effect.flatMap(Fiber.join(timed), (r) => Effect.promise(() => seen(r)))
+    expect(answer.status).toBe(503)
+    expect(answer.headers["retry-after"]).toBe("1")
+    expect(late.count).toBe(1)
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("a stream answer of a work that did not run the client's step keeps its place and its deadline", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    let made = 0
+    const response = yield* routed(gate, "R4", get(), A1, () =>
+      Effect.succeed(HttpServerResponse.stream(Stream.fromEffectRepeat(Effect.sync(() => encode(String(made++)))), { contentType: "text/event-stream" })))
+    expect(gate.inFlight()).toBe(1)
+    const reader = HttpServerResponse.toWeb(response).body!.getReader()
+    expect((yield* Effect.promise(() => reader.read())).done).toBe(false)
+    expect(gate.inFlight()).toBe(1)
+    yield* TestClock.adjust(DEFAULTS.request)
+    yield* settle
+    expect(gate.inFlight()).toBe(0)
+    const rest = yield* Effect.promise(async () => {
+      try {
+        for (;;) if ((await reader.read()).done) return "done"
+      } catch {
+        return "failed"
+      }
+    })
+    expect(rest).toBe("failed")
+  }))
+})
+
+// On a real server a client's stream that nothing pulls does not occur: Effect
+// starts the stream of a `Response` at once, a web stream pulls once by
+// itself, and Effect's Bun server interrupts the request's fiber, or the
+// stream, when its client goes away. So a client that goes away before its
+// head ends its client at once, through the work's interruption or the
+// stream's end; the deadline's case is the TestClock's, above.
+test("over a connection: a client that goes away after its step and before its head: `abandon` runs one time, and not again at the deadline; no place and no timer of it is left", async () => {
+  const gate = gateOf({ request: 300 })
+  const { clock, counter } = countingClock()
+  const abandoned = { count: 0 }
+  let stepped = false
+  const routes = [
+    HttpRouter.route("GET", "/v1/chats/:chat/events", Effect.flatMap(chatOf, (chat) =>
+      gate.route("R4", chat, (found, steps) =>
+        Effect.andThen(clientWork(abandoned, Stream.never)(found, steps), Effect.andThen(Effect.sync(() => {
+          stepped = true
+        }), Effect.never)))).pipe(Effect.provideService(Clock.Clock, clock)))
+  ]
+  const token = await realToken()
+  await serving(gate, routes, (port) =>
+    Effect.gen(function*() {
+      let got = ""
+      const closed = new Promise<void>((resolve) => {
+        void Bun.connect({
+          hostname: "127.0.0.1",
+          port,
+          socket: {
+            open(socket) {
+              socket.write(`GET /v1/chats/${A1}/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\n\r\n`)
+              const wait = setInterval(() => {
+                if (!stepped) return
+                clearInterval(wait)
+                socket.end()
+              }, 2)
+            },
+            data(_socket, data) {
+              got += new TextDecoder().decode(data)
+            },
+            close() {
+              resolve()
+            }
+          }
+        })
+      })
+      yield* Effect.promise(() => closed)
+      expect(got).toBe("")
+      expect(yield* until(() => abandoned.count === 1, 2_000)).toBe(true)
+      expect(gate.inFlight()).toBe(0)
+      // Past the deadline: no second run, and no timer waits.
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 500)))
+      expect(abandoned.count).toBe(1)
+      expect(counter.pending).toBe(0)
+    }))
+})
+
+// A place again (R5; lead, ec-hmsqu, ruling 3)
+// --------------------------------------------
+
+test("R5's `leave` gives the place back and stops the deadline: its wait runs past `request`; `again` takes a place with a new deadline of `request` from that moment", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const left = yield* Deferred.make<void>()
+    const woke = yield* Deferred.make<void>()
+    const taken = yield* Deferred.make<void>()
+    const fiber = yield* Effect.forkChild(routed(gate, "R5", get(), A1, (_found, steps) =>
+      Effect.gen(function*() {
+        yield* steps.leave
+        yield* steps.leave
+        yield* Deferred.succeed(left, undefined)
+        yield* Deferred.await(woke)
+        yield* steps.again
+        yield* steps.again
+        yield* Deferred.succeed(taken, undefined)
+        return yield* Effect.as(Effect.never, jsonAnswer({}))
+      })))
+    yield* Deferred.await(left)
+    expect(gate.inFlight()).toBe(0)
+    yield* settle
+    yield* TestClock.adjust(3 * DEFAULTS.request)
+    yield* settle
+    expect(fiber.pollUnsafe()).toBeUndefined()
+    yield* Deferred.succeed(woke, undefined)
+    yield* Deferred.await(taken)
+    expect(gate.inFlight()).toBe(1)
+    yield* settle
+    yield* TestClock.adjust(DEFAULTS.request - 1)
+    yield* settle
+    expect(fiber.pollUnsafe()).toBeUndefined()
+    yield* TestClock.adjust(1)
+    yield* settle
+    expect(fiber.pollUnsafe()).toBeDefined()
+    const answer = yield* Effect.flatMap(Fiber.join(fiber), (r) => Effect.promise(() => seen(r)))
+    expect(answer.status).toBe(503)
+    expect(answer.headers["retry-after"]).toBe("1")
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("R5's `again` with no place free gets 503 busy with retry-after 1 at once, with no queue; with one free, the work goes on", async () => {
+  const gate = gateOf({ requests: 1 })
+  await run(Effect.gen(function*() {
+    const left = yield* Deferred.make<void>()
+    const woke = yield* Deferred.make<void>()
+    const fiber = yield* Effect.forkChild(routed(gate, "R5", get(), A1, (_found, steps) =>
+      Effect.gen(function*() {
+        yield* steps.leave
+        yield* Deferred.succeed(left, undefined)
+        yield* Deferred.await(woke)
+        yield* steps.again
+        return jsonAnswer({ again: true })
+      })))
+    yield* Deferred.await(left)
+    // Another request takes the one place while the R5 waits.
+    const held = yield* holder(gate)
+    yield* Deferred.succeed(woke, undefined)
+    yield* settle
+    expect(fiber.pollUnsafe()).toBeDefined()
+    const answer = yield* Effect.flatMap(Fiber.join(fiber), (r) => Effect.promise(() => seen(r)))
+    expect(answer.status).toBe(503)
+    expect(answer.headers["retry-after"]).toBe("1")
+    expect(answer.text).toBe(errorText("busy"))
+    expect(gate.inFlight()).toBe(1)
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+    // With the place free, `again` takes it.
+    const free = yield* Effect.flatMap(routed(gate, "R5", get(), A1, (_found, steps) =>
+      Effect.andThen(Effect.andThen(steps.leave, steps.again), Effect.sync(() => jsonAnswer({ inFlight: gate.inFlight() })))), (r) => Effect.promise(() => seen(r)))
+    expect(JSON.parse(free.text)).toEqual({ inFlight: 1 })
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("an interruption between `leave` and `again` leaves `inFlight` at 0, and one after `again` gives the place back once", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const held = yield* holder(gate)
+    for (const takeAgain of [false, true]) {
+      const waiting = yield* Deferred.make<void>()
+      const fiber = yield* Effect.forkChild(routed(gate, "R5", get(), A1, (_found, steps) =>
+        Effect.gen(function*() {
+          yield* steps.leave
+          if (takeAgain) yield* steps.again
+          yield* Deferred.succeed(waiting, undefined)
+          return yield* Effect.as(Effect.never, jsonAnswer({}))
+        })))
+      yield* Deferred.await(waiting)
+      expect(gate.inFlight()).toBe(takeAgain ? 2 : 1)
+      yield* Fiber.interrupt(fiber)
+      expect(gate.inFlight()).toBe(1)
+    }
+    yield* held.release
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+// The socket's admission (R6; lead, ec-hmsqu, ruling 4)
+// -----------------------------------------------------
+
+const upgradeRequest = (headers: Record<string, string> = {}, method = "GET") =>
+  request("/v1/chats/" + A1 + "/socket", { method, headers: { upgrade: "websocket", ...headers } })
+
+const socketCall = (
+  gate: Gate,
+  req: HttpServerRequest.HttpServerRequest,
+  work: (upgrading: Upgrading) => Effect.Effect<HttpServerResponse.HttpServerResponse, unknown>
+) => gate.socket(A1, work).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req))
+
+test("R6: no Upgrade header, another upgrade or another method gets the 404 of no route; an origin off the list gets 403 before the work; a header Authorization, good or bad, changes nothing", async () => {
+  const { chats, calls } = counting()
+  const gate = gateOf({}, chats)
+  let ran = 0
+  const work = (upgrading: Upgrading) =>
+    Effect.sync(() => {
+      ran += 1
+      return jsonAnswer({ chat: upgrading.chat })
+    })
+  for (const req of [
+    request("/v1/chats/" + A1 + "/socket", { headers: authorized() }),
+    upgradeRequest({ upgrade: "h2c" }),
+    upgradeRequest({}, "POST"),
+    upgradeRequest({}, "HEAD"),
+    upgradeRequest({}, "PUT")
+  ]) {
+    lines.length = 0
+    const answer = await seen(await run(socketCall(gate, req, work)))
+    expect(answer.status).toBe(404)
+    expect(answer.text).toBe("")
+    expect(parsed().map((line) => line.annotations)).toEqual([{ route: "R6", status: 404 }])
+  }
+  expect(ran).toBe(0)
+  lines.length = 0
+  const off = await seen(await run(socketCall(gate, upgradeRequest({ origin: "https://evil.example" }), work)))
+  expect(off.status).toBe(403)
+  expect(off.text).toBe(errorText("forbidden_origin"))
+  expect(parsed().map((line) => line.annotations)).toEqual([{ route: "R6", status: 403, error: "forbidden_origin" }])
+  expect(ran).toBe(0)
+  const answers = []
+  for (const headers of [{}, authorized(), { authorization: "Bearer a.b" }, { authorization: "Basic x" }, { upgrade: "WebSocket", origin: ORIGIN }]) {
+    answers.push(await seen(await run(socketCall(gate, upgradeRequest(headers), work))))
+  }
+  for (const answer of answers) {
+    expect(answer.status).toBe(200)
+    expect(JSON.parse(answer.text)).toEqual({ chat: A1 })
+  }
+  expect(ran).toBe(5)
+  expect(calls).toEqual([])
+  expect(gate.inFlight()).toBe(0)
+})
+
+test("R6's `admit` takes a waiting place and gives the request's place back in one step, and ends the gate's deadline; past `waiting` it gets 503 busy with no retry-after, keeps its place until its answer and holds no waiting place; the second step gives the waiting place back one time, also run twice", async () => {
+  const gate = gateOf({ waiting: 1 })
+  await run(Effect.gen(function*() {
+    const admitted = yield* Deferred.make<Effect.Effect<void>>()
+    const hold = yield* Deferred.make<void>()
+    const counts: Array<readonly [number, number]> = []
+    const first = yield* Effect.forkChild(socketCall(gate, upgradeRequest(), (upgrading) =>
+      Effect.gen(function*() {
+        counts.push([gate.inFlight(), gate.waiting()])
+        const done = yield* upgrading.admit
+        counts.push([gate.inFlight(), gate.waiting()])
+        // Again: the same second step, and nothing taken.
+        const same = yield* upgrading.admit
+        counts.push([gate.inFlight(), gate.waiting()])
+        expect(same).toBeDefined()
+        yield* Deferred.succeed(admitted, done)
+        yield* Deferred.await(hold)
+        return HttpServerResponse.empty()
+      })))
+    const done = yield* Deferred.await(admitted)
+    expect(counts).toEqual([[1, 0], [0, 1], [0, 1]])
+    // From the upgrade the gate's deadline is over.
+    yield* settle
+    yield* TestClock.adjust(3 * DEFAULTS.request)
+    yield* settle
+    expect(first.pollUnsafe()).toBeUndefined()
+    // A second socket: no waiting place.
+    let atRefusal: number | undefined
+    let after = false
+    const refused = yield* Effect.flatMap(socketCall(gate, upgradeRequest(), (upgrading) =>
+      Effect.gen(function*() {
+        const tried = yield* Effect.exit(upgrading.admit)
+        atRefusal = gate.inFlight()
+        yield* tried
+        after = true
+        return HttpServerResponse.empty()
+      })), (r) => Effect.promise(() => seen(r)))
+    expect(refused.status).toBe(503)
+    expect(refused.text).toBe(errorText("busy"))
+    expect(refused.headers["retry-after"]).toBeUndefined()
+    expect(atRefusal).toBe(1)
+    expect(after).toBe(false)
+    expect(gate.waiting()).toBe(1)
+    expect(gate.inFlight()).toBe(0)
+    // The second step, twice: the waiting place goes back once.
+    yield* done
+    yield* done
+    expect(gate.waiting()).toBe(0)
+    yield* Deferred.succeed(hold, undefined)
+    yield* Fiber.join(first)
+    expect(gate.waiting()).toBe(0)
+    expect(gate.inFlight()).toBe(0)
+    // A socket whose work ends with no second step gives its waiting place
+    // back at its end; one that never admits is ended at the deadline.
+    yield* socketCall(gate, upgradeRequest(), (upgrading) => Effect.as(upgrading.admit, HttpServerResponse.empty()))
+    expect(gate.waiting()).toBe(0)
+    const slow = yield* Effect.forkChild(socketCall(gate, upgradeRequest(), () => Effect.as(Effect.never, HttpServerResponse.empty())))
+    yield* settle
+    yield* TestClock.adjust(DEFAULTS.request)
+    const timed = yield* Fiber.join(slow)
+    expect(timed.status).toBe(503)
+    expect(gate.inFlight()).toBe(0)
+  }))
+})
+
+test("over a connection: a socket admitted by the gate upgrades, waits in a waiting place for its first frame, and gives it back", async () => {
+  const gate = gateOf()
+  const routes = [
+    HttpRouter.route("GET", "/v1/chats/:chat/socket", Effect.flatMap(chatOf, (chat) =>
+      gate.socket(chat, (upgrading) =>
+        Effect.scoped(Effect.gen(function*() {
+          const done = yield* upgrading.admit
+          const socket = yield* upgrading.request.upgrade
+          const reader = yield* socket.reader
+          const writer = yield* socket.writer
+          yield* reader.pull
+          yield* done
+          yield* writer.write("ready")
+          yield* Effect.ignore(reader.pull)
+          return HttpServerResponse.empty()
+        })))))
+  ]
+  await serving(gate, routes, (port) =>
+    Effect.gen(function*() {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/chats/${A1}/socket`)
+      const got: Array<string> = []
+      ws.onmessage = (event) => got.push(String(event.data))
+      yield* Effect.promise(() => new Promise((resolve) => (ws.onopen = resolve)))
+      expect(yield* until(() => gate.waiting() === 1, 2_000)).toBe(true)
+      expect(gate.inFlight()).toBe(0)
+      ws.send(JSON.stringify({ type: "auth" }))
+      expect(yield* until(() => got.length === 1, 2_000)).toBe(true)
+      expect(got).toEqual(["ready"])
+      expect(gate.waiting()).toBe(0)
+      ws.close()
+      expect(yield* until(() => gate.inFlight() === 0 && gate.waiting() === 0, 2_000)).toBe(true)
+    }))
+})
+
+// The socket's token (R6; lead, ec-hmsqu, ruling 5)
+// -------------------------------------------------
+
+const checkToken = (gate: Gate, text: string, chat: string | undefined, at = NOW) =>
+  Effect.runPromise(Effect.andThen(TestClock.setTime(at), Effect.exit(gate.token(text, chat))).pipe(Effect.provide(Layer.merge(TestClock.layer(), capture))))
+
+const refusalOf = (exit: Exit.Exit<Authorized, SocketRefused>) => Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause))?.code : "passed"
+
+test("R6's token: each cause of a failure gives `unauthorized` and one log line with its check's number and no part of the token; an `exp` that passed on the TestClock too", async () => {
+  const gate = gateOf()
+  const cases: ReadonlyArray<readonly [number, string]> = [...FAILING, [2, ""], [2, "Bearer " + TOKEN], [2, TOKEN + " "]]
+  for (const [check, text] of cases) {
+    lines.length = 0
+    expect(refusalOf(await checkToken(gate, text, A1))).toBe("unauthorized")
+    expect(parsed().map((line) => line.annotations)).toEqual([{ route: "R6", status: 401, error: "unauthorized", check }])
+    for (const piece of text.split(/[ .]/).filter((p) => p.length >= 8)) expect(lines[0]).not.toContain(piece)
+  }
+  // `exp` is S + 600: good one second before, refused at it.
+  expect(refusalOf(await checkToken(gate, TOKEN, A1, (S + 599) * 1000))).toBe("passed")
+  lines.length = 0
+  expect(refusalOf(await checkToken(gate, TOKEN, A1, (S + 600) * 1000))).toBe("unauthorized")
+  expect(parsed().map((line) => line.annotations)).toEqual([{ route: "R6", status: 401, error: "unauthorized", check: 6 }])
+  expect(gate.inFlight()).toBe(0)
+})
+
+test("R6's token: a chat outside the token, B's chat with a token of A (named or not) and a text that is no UUID give the same `no_chat`; nothing of B's chat is read but the lookup that finds none, and B's rows stay; a good token gives the four fields", async () => {
+  const { chats, calls, used } = counting()
+  const gate = gateOf({}, chats)
+  const rowsOfB = () => Effect.runPromise(Effect.flatMap(sqlChats.reads(TENANT_B, B1), (reads) => Effect.map(Effect.all([reads.chat, reads.messages(0, 1000), reads.eventsAfter(0, 1000)]), (all) => JSON.stringify(all))))
+  const before = await rowsOfB()
+  const refusals = [
+    await checkToken(gate, ONLY_A1, A2),
+    await checkToken(gate, ONLY_A1, B1),
+    await checkToken(gate, TOKEN, B1),
+    await checkToken(gate, TOKEN, "not-a-uuid"),
+    await checkToken(gate, TOKEN, A1.toUpperCase()),
+    await checkToken(gate, TOKEN, undefined)
+  ]
+  for (const exit of refusals) expect(refusalOf(exit)).toBe("no_chat")
+  expect(calls).toEqual([{ tenant: TENANT_A, chat: B1 }])
+  expect(used).toEqual([])
+  expect(await rowsOfB()).toBe(before)
+  const good = await checkToken(gate, TOKEN, A1)
+  expect(Exit.isSuccess(good)).toBe(true)
+  const found = Exit.isSuccess(good) ? good.value : undefined
+  expect(Object.keys(found ?? {}).sort()).toEqual(["chat", "claims", "reads", "tenant"])
+  expect(found?.tenant).toBe(TENANT_A)
+  expect(found?.chat).toBe(A1)
+  expect(found?.claims).toEqual(GOOD)
+  expect((await Effect.runPromise(found!.reads.chat)).uuid).toBe(A1)
+})
+
+test("R6's token: a fault of the store gives `internal` with its log line", async () => {
+  const broken: typeof Chats.Service = { ...sqlChats, reads: () => Effect.fail(new StoreError({ op: "reads", cause: new Error("headervalue1234") })) }
+  const gate = gateOf({}, broken)
+  lines.length = 0
+  expect(refusalOf(await checkToken(gate, TOKEN, A1))).toBe("internal")
+  expect(parsed().map((line) => line.annotations)).toEqual([{ route: "R6", status: 500, error: "internal", fault: "StoreError" }])
+})
+
+// A whole number of a query (lead, ec-hmsqu, ruling 6)
+// ----------------------------------------------------
+
+test("wholeNumber: decimal digits only, at most 16, at most 2**53 - 1", () => {
+  for (const [text, value] of [["0", 0], ["7", 7], ["9007199254740991", 9007199254740991], ["0000000000000042", 42], ["0000000000000000", 0]] as const) {
+    expect(wholeNumber(text)).toBe(value)
+  }
+  for (const text of ["9007199254740992", "9999999999999999", "00000000000000001", "12345678901234567", "-1", "+1", "1.5", "1e3", " 1", "1 ", "", "١", "0x10", "1_000", "Infinity", "NaN"]) {
+    expect(wholeNumber(text)).toBeUndefined()
+  }
+  expect(wholeNumber(undefined)).toBeUndefined()
+})
+
+// No timer or fiber of a request is left after its end
+// ----------------------------------------------------
+
+test("no timer of a request is left after its end: a plain answer, a client's stream read to its end, one that never starts, R5's leave and again, and a socket", async () => {
+  const gate = gateOf({ request: 200 })
+  const { clock, counter } = countingClock()
+  const live = <A, E>(effect: Effect.Effect<A, E, HttpServerRequest.HttpServerRequest>, req: HttpServerRequest.HttpServerRequest) =>
+    Effect.runPromise(effect.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req), Effect.provideService(Clock.Clock, clock), Effect.provide(capture)))
+  const token = await realToken()
+  const auth = { authorization: "Bearer " + token }
+  const real = (url: string) => request(url, { headers: auth })
+  const idle = () => new Promise((resolve) => setTimeout(resolve, 20))
+  // A plain answer.
+  expect((await live(gate.route("R2", A1, ok), real("/v1/chats/" + A1))).status).toBe(200)
+  await idle()
+  expect(counter.pending).toBe(0)
+  // A client's stream read to its end.
+  const abandoned = { count: 0 }
+  const streamed = await live(gate.route("R4", A1, clientWork(abandoned, Stream.make(encode("one")))), real("/v1/chats/" + A1))
+  expect(counter.pending).toBe(1)
+  expect(await HttpServerResponse.toWeb(streamed).text()).toBe("one")
+  await idle()
+  expect(counter.pending).toBe(0)
+  expect(abandoned.count).toBe(1)
+  // A client's stream that never starts: its timer until the deadline.
+  const never = { count: 0 }
+  await live(gate.route("R4", A1, clientWork(never, Stream.make(encode("one")))), real("/v1/chats/" + A1))
+  expect(counter.pending).toBe(1)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  expect(counter.pending).toBe(0)
+  expect(never.count).toBe(1)
+  // R5's leave and again.
+  expect((await live(gate.route("R5", A1, (_found, steps) => Effect.andThen(Effect.andThen(steps.leave, steps.again), Effect.succeed(jsonAnswer({})))), real("/v1/chats/" + A1))).status).toBe(200)
+  await idle()
+  expect(counter.pending).toBe(0)
+  // A socket.
+  await live(gate.socket(A1, (upgrading) => Effect.flatMap(upgrading.admit, (done) => Effect.as(done, HttpServerResponse.empty()))), upgradeRequest())
+  await idle()
+  expect(counter.pending).toBe(0)
+  expect(gate.inFlight()).toBe(0)
+  expect(gate.waiting()).toBe(0)
+})
+
+// Interruption at each step (lead, ec-w86sz)
+// ------------------------------------------
+// A request is run on Effect's ordinary scheduler, whose `shouldYield` is
+// stepped: it counts the operations of the request's own fiber (the first
+// that runs) and, at the operation `stop`, yields there and interrupts that
+// fiber while it waits, as a client that goes away does. A run with no stop
+// counts the operations of each kind of request; the sweep then stops at each
+// of them. The clock is fixed at `NOW` and its sleeps are real timers that
+// it counts, so a timer of the request that is left shows.
+
+// A clock at `NOW` whose sleeps are real timers, with a count of those that
+// have started and not ended.
+const timerClock = () => {
+  const counter = { pending: 0 }
+  const live = Effect.runSync(Clock.clockWith(Effect.succeed))
+  const clock: Clock.Clock = {
+    currentTimeMillisUnsafe: () => NOW,
+    currentTimeMillis: Effect.succeed(NOW),
+    currentTimeNanosUnsafe: () => BigInt(NOW) * 1_000_000n,
+    currentTimeNanos: Effect.succeed(BigInt(NOW) * 1_000_000n),
+    monotonicTimeNanosUnsafe: () => live.monotonicTimeNanosUnsafe(),
+    monotonicTimeNanos: live.monotonicTimeNanos,
+    sleep: (duration) =>
+      Effect.callback<void>((resume) => {
+        let active = true
+        counter.pending += 1
+        const timer = setTimeout(() => {
+          active = false
+          counter.pending -= 1
+          resume(Effect.void)
+        }, Duration.toMillis(duration))
+        return Effect.sync(() => {
+          if (!active) return
+          active = false
+          counter.pending -= 1
+          clearTimeout(timer)
+        })
+      })
+  }
+  return { clock, counter }
+}
+
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+// The kinds of a request of the sweep: no route; a route's work with a JSON
+// answer; the socket's member with no `admit`, and with `admit` and its second
+// step; a client's step with a stream answer; R5's `leave` and `again`.
+const KINDS = ["none", "route", "socket", "admit", "client", "again"] as const
+type Kind = (typeof KINDS)[number]
+
+// The `request` of the sweep's gate, in real ms: the deadline of an answer
+// that the server took and that nothing starts, and of a client of a direct
+// call at the one point of ruling 2 (ec-u1yzx).
+const SWEEP_REQUEST = 150
+
+// What is left of a request: the places, the timers and the fibers, and the
+// runs of `abandon`.
+interface Rest {
+  readonly requests: number
+  readonly waiting: number
+  readonly timers: number
+  readonly fibers: number
+  readonly abandoned: number
+}
+
+// How a trial runs the gate (lead, ec-u1yzx, 4). `server`: as Effect's
+// server runs it, the router's handler of the request's path under
+// `HttpEffect.toHandled`, which runs it in the request's scope and closes
+// that scope when the handler's fiber ends; the answer is taken as Bun's
+// server takes it (`scopeTransferToStream`: a stream answer's end closes the
+// scope), and read to its end, as Bun's server starts each stream answer.
+// `direct`: the gate's effect alone, with no scope in the context.
+type Way = "server" | "direct"
+
+// `handler` for the request `req` as Effect's server runs it: the router's
+// handler of one route at the request's path, under `HttpEffect.toHandled`
+// (no middleware), with the answer taken as Bun's server takes it. The
+// router is built in the scope of the context.
+const asServer = (handler: Effect.Effect<HttpServerResponse.HttpServerResponse>, req: HttpServerRequest.HttpServerRequest) =>
+  Effect.map(HttpRouter.toHttpEffect(HttpRouter.addAll([HttpRouter.route("*", req.url as `/${string}`, handler)])), (app) => {
+    const answer: { sent: Response | undefined } = { sent: undefined }
+    const program = HttpEffect.toHandled(app, (taken, response) =>
+      Effect.sync(() => {
+        answer.sent = HttpServerResponse.omitsBody(response, taken.method === "HEAD")
+          ? HttpServerResponse.toWeb(response, { withoutBody: true })
+          : HttpServerResponse.toWeb(HttpEffect.scopeTransferToStream(response))
+      })).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req)) as Effect.Effect<void>
+    return { program, answer }
+  })
+
+interface Trial {
+  readonly stop: number | undefined
+  // The request's fiber: its operations, whether it was interrupted, and its
+  // exit.
+  readonly ops: number
+  readonly interrupted: boolean
+  readonly exit: Exit.Exit<unknown, unknown>
+  // Whether the request's fiber could be interrupted at the stop (Effect's
+  // fiber holds that flag; it is not in the `Fiber` interface): false in an
+  // uncut step, where the interruption waits for the step's end.
+  readonly cutAtStop: boolean | undefined
+  // The operation at which the client's step had run (0: it did not run).
+  readonly steppedAt: number
+  // Whether the first continuation of the gate's result ran (its answer left
+  // the gate), and the operation at which it ran.
+  readonly delivered: boolean
+  readonly leftAt: number
+  // What was left when the request's fiber had ended (two turns of the event
+  // loop: no wait, no timer's end), and then after the answer that the server
+  // took was read to its end.
+  readonly atEnd: Rest
+  readonly after: Rest
+  // For each run of `abandon`, whether the request's fiber still ran.
+  readonly abandonedWhileRunning: ReadonlyArray<boolean>
+  readonly gate: Gate
+  readonly rest: () => Rest
+}
+
+const trial = async (kind: Kind, stop: number | undefined, way: Way = "server"): Promise<Trial> => {
+  const gate = gateOf({ requests: 1, request: SWEEP_REQUEST })
+  const { clock, counter } = timerClock()
+  let ops = 0
+  let interrupted = false
+  let cutAtStop: boolean | undefined
+  let steppedAt = 0
+  let delivered = false
+  let leftAt = 0
+  let abandoned = 0
+  const abandonedWhileRunning: Array<boolean> = []
+  let request: Fiber.Fiber<unknown, unknown> | undefined
+  const fibers = new Set<Fiber.Fiber<unknown, unknown>>()
+  const scheduler = new Scheduler.MixedScheduler()
+  scheduler.shouldYield = (fiber) => {
+    fibers.add(fiber)
+    request ??= fiber
+    if (fiber !== request) return fiber.currentOpCount >= 64
+    ops += 1
+    if (!interrupted && ops === stop) {
+      interrupted = true
+      cutAtStop = (fiber as unknown as { readonly interruptible: boolean }).interruptible
+      queueMicrotask(() => fiber.interruptUnsafe())
+      return true
+    }
+    return fiber.currentOpCount >= 64
+  }
+  const abandon = Effect.sync(() => {
+    abandoned += 1
+    abandonedWhileRunning.push(request?.pollUnsafe() === undefined)
+  })
+  const req = kind === "socket" || kind === "admit" ? upgradeRequest() : get()
+  const action: Effect.Effect<HttpServerResponse.HttpServerResponse> = kind === "none"
+    ? gate.none.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, req))
+    : kind === "route"
+    ? routed(gate, "R2", req, A1, () => Effect.succeed(jsonAnswer({})))
+    : kind === "socket"
+    ? socketCall(gate, req, () => Effect.succeed(HttpServerResponse.empty()))
+    : kind === "admit"
+    ? socketCall(gate, req, (upgrading) => Effect.flatMap(upgrading.admit, (done) => Effect.as(done, HttpServerResponse.empty())))
+    : kind === "client"
+    ? routed(gate, "R4", req, A1, (_found, steps) =>
+      Effect.andThen(
+        Effect.andThen(steps.client(abandon), Effect.sync(() => {
+          steppedAt = ops
+        })),
+        Effect.succeed(HttpServerResponse.stream(Stream.make(encode("one")), { contentType: "text/event-stream" }))
+      ))
+    : routed(gate, "R5", req, A1, (_found, steps) => Effect.andThen(Effect.andThen(steps.leave, steps.again), Effect.succeed(jsonAnswer({}))))
+  // The marker: the first continuation of the gate's result.
+  const marked = Effect.map(action, (response) => {
+    delivered = true
+    leftAt = ops
+    return response
+  })
+  const routers = Scope.makeUnsafe()
+  const served = way === "server" ? await Effect.runPromise(asServer(marked, req).pipe(Effect.provideService(Scope.Scope, routers))) : undefined
+  const program: Effect.Effect<unknown> = served?.program ?? marked
+  const fiber = Effect.runFork(program.pipe(Effect.provideService(Clock.Clock, clock), Effect.provide(capture)), { scheduler })
+  const exit = await Effect.runPromise(Fiber.await(fiber))
+  const rest = (): Rest => ({
+    requests: gate.inFlight(),
+    waiting: gate.waiting(),
+    timers: counter.pending,
+    fibers: [...fibers].filter((each) => each.pollUnsafe() === undefined).length,
+    abandoned
+  })
+  await turn()
+  await turn()
+  const atEnd = rest()
+  let sent = served?.answer.sent
+  if (way === "direct" && Exit.isSuccess(exit) && delivered) {
+    const response = exit.value as HttpServerResponse.HttpServerResponse
+    if (response.body._tag === "Stream") sent = HttpServerResponse.toWeb(response)
+  }
+  if (sent?.body != null) await sent.text().catch(() => "")
+  await turn()
+  await turn()
+  const after = rest()
+  await Effect.runPromise(Scope.close(routers, Exit.void))
+  return { stop, ops, interrupted, cutAtStop, exit, steppedAt, delivered, leftAt, atEnd, after, abandonedWhileRunning, gate, rest }
+}
+
+// The operations of a request of `kind` with no stop.
+const dryRun = async (kind: Kind, way: Way = "server") => {
+  const dry = await trial(kind, undefined, way)
+  expect(dry.interrupted).toBe(false)
+  expect(Exit.isSuccess(dry.exit)).toBe(true)
+  expect(dry.delivered).toBe(true)
+  return dry
+}
+
+const cleanOf = (abandoned: number): Rest => ({ requests: 0, waiting: 0, timers: 0, fibers: 0, abandoned })
+
+test("an interruption at each operation of a request run as Effect's server runs it (no route, a route, the socket's member, its admit, the client's step, leave and again): when the gate's answer has not left it, nothing of the request is left when its fiber ends, and abandon has run one time while it ran if the client's step ran; with any stop, nothing is left after the answer's end; the next request is answered", async () => {
+  const failures: Array<unknown> = []
+  const before: Record<string, number> = {}
+  for (const kind of KINDS) {
+    const total = (await dryRun(kind)).ops
+    before[kind] = 0
+    for (let stop = 1; stop <= total + 1; stop++) {
+      const t = await trial(kind, stop)
+      const clean = cleanOf(kind === "client" && t.steppedAt > 0 ? 1 : 0)
+      if (!t.delivered) {
+        before[kind] += 1
+        // No wait and no deadline: all ended with the request's fiber.
+        if (JSON.stringify(t.atEnd) !== JSON.stringify(clean)) failures.push({ kind, stop, ops: total, exit: t.exit._tag, atEnd: t.atEnd })
+        if (!t.abandonedWhileRunning.every((running) => running)) failures.push({ kind, stop, abandonedAfterTheEnd: t.abandonedWhileRunning })
+      }
+      if (JSON.stringify(t.after) !== JSON.stringify(clean)) failures.push({ kind, stop, ops: total, exit: t.exit._tag, after: t.after })
+      // The next request gets its answer, not 503.
+      const next = await Effect.runPromise(t.gate.none.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, get()), Effect.provide(capture)))
+      if (next.status !== 404) failures.push({ kind, stop, next: next.status })
+    }
+  }
+  expect(failures).toEqual([])
+  // Each kind had stops before its answer left the gate.
+  for (const kind of KINDS) expect([kind, before[kind]! > 0]).toEqual([kind, true])
+}, 20_000)
+
+test("an interruption at each operation from the client's step to the first continuation of the gate's result, run as Effect's server runs it, runs abandon one time while the request's fiber runs, and leaves no timer and no fiber when it has ended, before any timer's end", async () => {
+  const dry = await dryRun("client")
+  expect(dry.steppedAt).toBeGreaterThan(0)
+  let seen = 0
+  for (let stop = dry.steppedAt + 1; stop <= dry.leftAt; stop++) {
+    const t = await trial("client", stop)
+    expect([stop, t.interrupted, t.delivered, Exit.isFailure(t.exit)]).toEqual([stop, true, false, true])
+    expect([stop, t.abandonedWhileRunning]).toEqual([stop, [true]])
+    expect([stop, t.atEnd]).toEqual([stop, cleanOf(1)])
+    seen += 1
+  }
+  expect(seen).toBe(dry.leftAt - dry.steppedAt)
+}, 20_000)
+
+test("with no scope in the context (a direct call of the gate, not Effect's server), the one point of ruling 2: an interruption in the gate's last uncut step, after its end saw its answer, leaves the client to the request's deadline, where abandon runs one time and no timer is left; every other stop from the client's step ends it at once, also one that the gate's end sees", async () => {
+  const dry = await dryRun("client", "direct")
+  const points: Array<number> = []
+  const atOnce: Array<number> = []
+  for (let stop = dry.steppedAt + 1; stop <= dry.leftAt; stop++) {
+    const t = await trial("client", stop, "direct")
+    expect([stop, t.interrupted, t.delivered]).toEqual([stop, true, false])
+    if (JSON.stringify(t.atEnd) === JSON.stringify(cleanOf(1))) {
+      atOnce.push(stop)
+      continue
+    }
+    // The point: the gate's end handed the client to an answer that no one
+    // gets; its timer holds it. The stop is in an uncut step: the
+    // interruption lands as it ends, after the gate's end.
+    expect([stop, t.atEnd]).toEqual([stop, { requests: 0, waiting: 0, timers: 1, fibers: 1, abandoned: 0 }])
+    expect([stop, t.cutAtStop]).toEqual([stop, false])
+    points.push(stop)
+    for (let k = 0; k < 100 && t.rest().timers > 0; k++) await new Promise((resolve) => setTimeout(resolve, 5))
+    await turn()
+    expect([stop, t.rest()]).toEqual([stop, cleanOf(1)])
+  }
+  expect(points.length).toBeGreaterThan(0)
+  expect(atOnce.length).toBeGreaterThan(0)
+  // It is the last uncut step: each stop before it ends the client at once.
+  expect(Math.max(...atOnce)).toBeLessThan(Math.min(...points))
+}, 20_000)
+
+test("abandon is the client's one end: a client's stream that ran to its end, one that failed and one that was interrupted each run abandon one time, called directly and as Effect's server runs it (the request's scope then closes at the stream's end); a deadline with no start and a late start after it run it one time in all", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    const streams = {
+      end: Stream.make(encode("one"), encode("two")),
+      failed: Stream.concat(Stream.make(encode("one")), Stream.fail(new Error("the stream's fault"))),
+      interrupted: Stream.concat(Stream.make(encode("one")), Stream.never)
+    }
+    const routers = yield* Scope.make()
+    for (const [way, [name, stream]] of (["direct", "server"] as const).flatMap((way) => Object.entries(streams).map((each) => [way, each] as const))) {
+      const abandoned = { count: 0 }
+      let cleaned = 0
+      const req = get()
+      const handler = routed(gate, "R4", req, A1, clientWork(abandoned, stream.pipe(Stream.ensuring(Effect.sync(() => cleaned++)))))
+      let web: Response
+      if (way === "direct") web = HttpServerResponse.toWeb(yield* handler)
+      else {
+        const served = yield* asServer(Effect.orDie(handler), req).pipe(Effect.provideService(Scope.Scope, routers))
+        yield* served.program
+        web = served.answer.sent!
+      }
+      const label = way + ": " + name
+      const reader = web.body!.getReader()
+      expect((yield* Effect.promise(() => reader.read())).done).toBe(false)
+      expect([label, abandoned.count]).toEqual([label, 0])
+      if (name === "interrupted") yield* Effect.promise(() => reader.cancel())
+      else yield* Effect.promise(async () => {
+        while (true) {
+          const got = await reader.read().catch(() => ({ done: true }))
+          if (got.done) return
+        }
+      })
+      yield* settle
+      expect([label, abandoned.count, cleaned]).toEqual([label, 1, 1])
+      expect(gate.inFlight()).toBe(0)
+    }
+    // A deadline with no start: one time there, none at a late start.
+    const abandoned = { count: 0 }
+    const response = yield* routed(gate, "R4", get(), A1, clientWork(abandoned, Stream.make(encode("one"))))
+    yield* TestClock.adjust(DEFAULTS.request)
+    yield* settle
+    expect(abandoned.count).toBe(1)
+    const late = yield* Effect.promise(() => HttpServerResponse.toWeb(response).text().then(() => "read", () => "failed"))
+    expect(late).toBe("failed")
+    yield* settle
+    expect(abandoned.count).toBe(1)
+    yield* Scope.close(routers, Exit.void)
+  }))
+})
+
+// Samples the gate's two counts at each point where a fiber of the socket's
+// request yields (the scheduler steps each fiber: the work runs in a child of
+// the request's fiber), and gives the samples with repeats dropped.
+const admissionSamples = async (gate: Gate) => {
+  const samples: Array<string> = []
+  const calls = new WeakMap<object, number>()
+  const scheduler = new Scheduler.MixedScheduler()
+  scheduler.shouldYield = (fiber) => {
+    // A yield before each operation: after a yield, the resumed fiber's first
+    // step only ends that yield, and its second is the operation.
+    const count = (calls.get(fiber) ?? 0) + 1
+    calls.set(fiber, count)
+    if (count % 3 !== 0) return false
+    queueMicrotask(() => {
+      const sample = `${gate.inFlight()},${gate.waiting()}`
+      if (samples[samples.length - 1] !== sample) samples.push(sample)
+    })
+    return true
+  }
+  const fiber = Effect.runFork(socketCall(gate, upgradeRequest(), (upgrading) =>
+    Effect.flatMap(upgrading.admit, (done) => Effect.andThen(Effect.repeat(Effect.yieldNow, { times: 3 }), Effect.as(done, HttpServerResponse.empty())))).pipe(Effect.provide(capture)), { scheduler })
+  const exit = await Effect.runPromise(Fiber.await(fiber))
+  expect(Exit.isSuccess(exit)).toBe(true)
+  return samples
+}
+
+test("R6's admit, seen at each point where its request yields: the request's place, then the waiting place, never both and never neither between them", async () => {
+  const gate = gateOf()
+  const samples = await admissionSamples(gate)
+  // `1,0` before the step, `0,1` after it, `0,0` at the end: in this order,
+  // with nothing between the first two.
+  expect(samples.filter((sample) => sample !== "0,0")).toEqual(["1,0", "0,1"])
+  expect(samples.slice(samples.indexOf("1,0"), samples.indexOf("0,1") + 1)).toEqual(["1,0", "0,1"])
+  expect(samples).not.toContain("1,1")
+  expect([gate.inFlight(), gate.waiting()]).toEqual([0, 0])
 })
 
 // The log

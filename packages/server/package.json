@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/host.ts",
+    ".": "./src/index.ts",
     "./token": "./src/token.ts",
     "./backend": "./src/backend.ts"
   },
