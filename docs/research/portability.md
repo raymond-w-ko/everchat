@@ -207,11 +207,14 @@ import graph, not the logic.
 | Text assets | A TypeScript module that exports the text | An import attribute that Node refuses | src/head.ts:24 |
 
 The smallest smoke test, one body for each host: a fake wire (no model) answers
-with one program that calls one fake function, then with a text. One message
-with an outside key goes in; the log has `user`, `tool`, `echo`, `asst`; the
-call row is `done`; the events are `accepted`, `start`, `call`, three `message`s
-and `end`, numbered 1 to 7 in that order; a listener that reads again from 3
-gets 3 to 7 and drops none as a duplicate; the same message again adds nothing.
+with one program that calls one function, `date(0)` (the person's message is
+message 0), then with a text. One message with an outside key goes in; the log
+has `user`, `tool`, `echo`, `asst`; the call rows are two, both `done`, since a
+function that a program calls has its own row: the program's
+`[1, null, run, done]` and the function's `[2, 1, date, done]`; the events are
+`accepted`, `start`, `call`, three `message`s and `end`, numbered 1 to 7 in that
+order; a listener that reads again from 3 gets 3 to 7 and drops none as a
+duplicate; the same message again adds nothing.
 Bun: `bun test`. Node: E1 and S2. `workerd`: a chat object with S3 that calls a
 sandbox object of a second Worker by RPC (E3), both under a local `workerd`
 (`wrangler dev --local`: not run with two Workers), or Cloudflare's Vitest pool,
