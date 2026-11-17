@@ -2,6 +2,13 @@
 // program. What the process writes goes to a terminal emulator in memory
 // (xterm.js), which also answers the process's queries as a terminal does.
 // A test types with `type`, and reads the rows that a person would see.
+//
+// With `stderr`, a file's path, the process's standard error goes to that
+// file, not to the terminal: a shell sets it and then `exec`s the process,
+// so no process stays between the pseudo-terminal and it (the same pid, the
+// leader of its session, with the terminal as its controlling one, on its
+// standard input and output). What it writes there after the terminal has
+// closed is then kept. With none, the process starts as itself.
 
 import xterm from "@xterm/headless"
 
@@ -13,9 +20,10 @@ export class Pty {
   code: number | null = null
   signal: string | null = null
 
-  constructor(argv: ReadonlyArray<string>, env: Record<string, string | undefined>, cwd: string, columns = 100, rows = 30) {
+  constructor(argv: ReadonlyArray<string>, env: Record<string, string | undefined>, cwd: string, columns = 100, rows = 30, stderr?: string) {
     this.emulator = new xterm.Terminal({ cols: columns, rows, allowProposedApi: true, scrollback: 5000 })
-    this.proc = Bun.spawn([...argv], {
+    const started = stderr === undefined ? [...argv] : ["/bin/sh", "-c", 'exec 2>"$1"; shift; exec "$@"', "everchat", stderr, ...argv]
+    this.proc = Bun.spawn(started, {
       cwd,
       env: { ...env, TERM: "xterm-ghostty" },
       terminal: {

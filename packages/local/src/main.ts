@@ -60,6 +60,19 @@
 //   stop of a program is only a request to its thread (sandbox.ts).
 // - A second signal while the parts close ends the process at once. The
 //   next launch then finds a crash, and cleans up.
+// - The terminal is lost (its window closed): one event with two signs,
+//   in either order. The read of the standard input fails, and the system
+//   sends SIGHUP. The program ends once, as for SIGHUP: the parts close
+//   (the screen cannot be given back to it, and that is no failure), the
+//   launch ends by a signal, and the code is 130. The read's failure
+//   is no signal: it asks for the stop if none was asked, and it never
+//   counts as the first of two signals, so a SIGHUP before it or after it
+//   lets the parts close (`ending` holds the rule). In the terminal's mode
+//   only: elsewhere a failed read of the standard input is that mode's own.
+// - Only the error of a terminal that is gone is its loss (`terminalLost`).
+//   Any other error of the terminal's input is a failure of the program
+//   (`InputFailed`): the parts close, the launch ends with an error, the
+//   reason is on the standard error, and the code is 1.
 //
 // Effect's own runner for Bun (`BunRuntime.runMain`) is not used, for
 // those rules: it does not hear SIGHUP, it has no second signal, and after
@@ -82,7 +95,7 @@
 // Only this module of the package: its index loads all of it (an HTTP
 // server, sockets, a cluster), and each start would pay for that.
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Cause, Config, Console, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
+import { Cause, Config, Console, Deferred, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
 import { CliConfig, CliError, Command, Flag, GlobalFlag } from "effect/cli"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -181,6 +194,19 @@ export const layer = (given: { readonly home: string; readonly file: string; rea
 // the turn's note, so nothing more is said: only the exit code tells it.
 export class TurnFailed extends Schema.TaggedError<TurnFailed>()("TurnFailed", {}) {}
 
+// The read of the terminal's input failed, and the terminal is there.
+export class InputFailed extends Schema.TaggedError<InputFailed>()("InputFailed", { message: Schema.String }) {}
+
+// Whether an error of the standard input is the loss of the terminal: the
+// error of a terminal that is gone. A pseudo-terminal whose other end has
+// closed gives `EIO` to a read and to `tcsetattr`, so the two forms are the
+// read's error, whose `code` is `EIO`, and the give-back's, which Bun emits
+// on the stream with no code: `setRawMode failed with errno: 5` (5 is
+// `EIO`). Every other error is a failure of the program.
+export const terminalLost = (error: unknown): boolean =>
+  typeof error === "object" && error !== null &&
+  ((error as { readonly code?: unknown }).code === "EIO" || (error instanceof Error && error.message === "setRawMode failed with errno: 5"))
+
 // The first of `<file>.old`, `<file>.old.2`, ..., `<file>.old.1000` that
 // names nothing in its directory now, or undefined when none of them is
 // free. A link that points nowhere is in use, and so is a name that cannot
@@ -257,7 +283,25 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
   const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor })
 
   if ((yield* stdio.stdinIsTerminal) && (yield* stdio.stdoutIsTerminal)) {
-    return yield* Terminal.use((terminal) => terminal.quit).pipe(Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts))))
+    // The failures of the terminal's input, until the process ends
+    // (`setRawMode` tells its failure on the stream, and throws it only when
+    // nothing listens). The loss of the terminal (`terminalLost`) asks for
+    // the stop as a signal does. Any other is a failure of the program: the
+    // first one ends it as a failure of its own effect does, so the parts
+    // close and the launch ends with an error; one that comes while the
+    // parts close after a quit fails the program when they have closed.
+    const failed = yield* Deferred.make<never, InputFailed>()
+    yield* Effect.sync(() =>
+      process.stdin.on("error", (error: unknown) => {
+        if (terminalLost(error)) lost()
+        else Deferred.doneUnsafe(failed, Exit.fail(new InputFailed({ message: "the read of the terminal failed: " + (error instanceof Error ? error.message : String(error)) })))
+      })
+    )
+    yield* Effect.raceFirst(Terminal.use((terminal) => terminal.quit), Deferred.await(failed)).pipe(
+      Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts)))
+    )
+    if (yield* Deferred.isDone(failed)) return yield* Deferred.await(failed)
+    return
   }
   const well = yield* Pipe.use((pipe) => pipe.end).pipe(Effect.provide(Pipe.layer.pipe(Layer.provideMerge(parts))))
   if (!well) {
@@ -339,20 +383,44 @@ const BUILT_INS = [GlobalFlag.Help, GlobalFlag.Version, GlobalFlag.Completions, 
 // the console.
 const QUIET = Logger.layer([])
 
-// Runs `program` as the process: a signal interrupts it, and the process
-// exits when it has ended.
-const runMain = Runtime.makeRunMain(({ fiber, teardown }) => {
-  let asked = false
-  const stop = () => {
-    if (asked) {
-      process.exit(1)
+// The rule of the end (the head comment), for one run: `interrupt` starts
+// the close of the parts, once, and `exit` ends the process at once.
+export const ending = (interrupt: () => void, exit: (code: number) => void) => {
+  let stopping = false
+  const end = () => {
+    if (!stopping) {
+      stopping = true
+      interrupt()
     }
-    asked = true
-    fiber.interruptUnsafe(fiber.id)
   }
-  process.on("SIGTERM", stop)
-  process.on("SIGHUP", stop)
-  process.on("SIGINT", stop)
+  let asked = false
+  return {
+    // SIGTERM, SIGHUP or SIGINT: the second one ends the process at once.
+    signal: () => {
+      if (asked) {
+        exit(1)
+        return
+      }
+      asked = true
+      end()
+    },
+    // The read of the terminal's input failed: no signal, and never the
+    // first of two.
+    lost: end
+  }
+}
+
+// The loss of the terminal in this run (runMain's `ending`).
+let lost = () => {}
+
+// Runs `program` as the process: a signal or the loss of the terminal
+// interrupts it, once, and the process exits when it has ended.
+const runMain = Runtime.makeRunMain(({ fiber, teardown }) => {
+  const ends = ending(() => fiber.interruptUnsafe(fiber.id), (code) => process.exit(code))
+  lost = ends.lost
+  process.on("SIGTERM", ends.signal)
+  process.on("SIGHUP", ends.signal)
+  process.on("SIGINT", ends.signal)
   fiber.addObserver((exit) => teardown(exit, (code) => process.exit(code)))
 })
 

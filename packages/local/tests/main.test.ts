@@ -8,6 +8,7 @@
 import { afterEach, expect, test } from "bun:test"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { ending, terminalLost } from "../src/main.ts"
 import { rows } from "./help.ts"
 import { Pty } from "./pty.ts"
 import { env, place, PROGRAM, program, text, vendor } from "./vendor.ts"
@@ -19,8 +20,9 @@ afterEach(async () => {
   }
 })
 
-const start = (at: ReturnType<typeof place>, address: string | undefined, args: ReadonlyArray<string> = ["--model", "gpt-test"]) => {
-  const pty = new Pty([...PROGRAM, ...args], env(at, address), at.work)
+// `stderr`: a file for the program's standard error (pty.ts); with none, the terminal.
+const start = (at: ReturnType<typeof place>, address: string | undefined, args: ReadonlyArray<string> = ["--model", "gpt-test"], stderr?: string) => {
+  const pty = new Pty([...PROGRAM, ...args], env(at, address), at.work, 100, 30, stderr)
   open.push(async () => {
     if (pty.code === null) {
       pty.kill("SIGKILL")
@@ -156,15 +158,201 @@ test("the keys of a real terminal: Esc stops the turn, the input can be edited, 
   expect(messages(at.file).map((one) => one.kind)).toEqual(["user", "note"])
 })
 
+// What a red run of the window-close case needs to name its cause: how the
+// child ended, the launch rows as read after its exit, what it wrote to its
+// standard error (a file, so what came after the close is kept; lead,
+// ec-vj0kn, 1), and the last of what the terminal got.
+const closeReport = (pty: Pty, launched: ReturnType<typeof launches>, stderr: string) =>
+  "the child ended with the code " + pty.code + " and the signal " + pty.signal + "; the launch rows as read after its exit: " +
+  JSON.stringify(launched) + "; its standard error: " + JSON.stringify(fs.existsSync(stderr) ? fs.readFileSync(stderr, "utf8") : "(no file)") +
+  "; the last of what the terminal got: " + JSON.stringify(pty.raw.slice(-1500))
+
 test("the terminal's window closes: the launch still ends cleanly", async () => {
   const at = place()
   const server = fake(() => text("Hello."))
-  const pty = start(at, server.address)
+  const stderr = path.join(at.root, "stderr")
+  const pty = start(at, server.address, undefined, stderr)
+  await pty.sees(IDLE)
+  pty.close()
+  // `ends` gives back only when the system has reported the child's exit.
+  await pty.ends()
+  const rows = launches(at.file)
+  const seen = closeReport(pty, rows, stderr)
+  // The system tells the process with SIGHUP, and the read of the input
+  // fails, in either order: one end, by a signal.
+  expect(rows.map((one) => [one.ended !== null, one.why]), seen).toEqual([[true, "signal"]])
+  // The screen cannot be given back to a lost terminal, and that is no failure.
+  expect(pty.code, seen).toBe(130)
+})
+
+// The proof of that message (lead, ec-vj0kn, 4): a child that writes a named
+// line to its standard error after the terminal closed, and ends with the
+// launch open. A file that the program loads first (`--preload`) does it at
+// the first sign of the close (SIGHUP, the input's end or its error), before
+// the program's own handlers. It holds the helper, and nothing of main.ts.
+const AFTER = "a named line after the close"
+const LEAVES = `import * as fs from "node:fs"
+const leave = () => {
+  fs.writeSync(2, ${JSON.stringify(AFTER)} + "\\n")
+  process.exit(1)
+}
+process.on("SIGHUP", leave)
+process.stdin.once("end", leave)
+process.stdin.once("error", leave)`
+
+test("the window-close case's message keeps the child's standard error: a child that writes a named line to it after the terminal closed, and ends with its launch open, gives that line, the code and the open row", async () => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const preload = path.join(at.root, "leaves.ts")
+  fs.writeFileSync(preload, LEAVES)
+  const stderr = path.join(at.root, "stderr")
+  const pty = new Pty([process.execPath, "--preload", preload, path.join(import.meta.dir, "..", "src", "main.ts"), "--model", "gpt-test"], env(at, server.address), at.work, 100, 30, stderr)
+  open.push(async () => {
+    if (pty.code === null) {
+      pty.kill("SIGKILL")
+      await pty.ends()
+    }
+  })
   await pty.sees(IDLE)
   pty.close()
   await pty.ends()
-  // The system tells the process with SIGHUP.
+  const rows = launches(at.file)
+  const seen = closeReport(pty, rows, stderr)
+  expect([pty.code, rows.map((one) => [one.ended !== null, one.why])], seen).toEqual([1, [[false, null]]])
+  expect(seen).toContain(JSON.stringify(AFTER + "\n"))
+  expect(seen).toContain("the code 1 ")
+  expect(seen).toContain(JSON.stringify(rows))
+  expect(seen).toContain('"ended":null')
+  // Not on the terminal: it had closed.
+  expect(pty.raw).not.toContain(AFTER)
+})
+
+// The loss of the terminal with the read's failure first, for sure, and not
+// by the luck of a load. A parent that ignores SIGHUP runs the program in a
+// session of its own, so the closed terminal is not its controlling one and
+// no SIGHUP comes; the parent exits with the program's code. The read of a
+// closed terminal fails (EIO) or ends (EOF), as the system's race falls; a
+// file that the program loads first (`--preload`) makes an end that failure.
+// It notes each SIGHUP that the process hears in the file `heard`. The
+// program runs from its source.
+const DETACHED = `process.on("SIGHUP", () => {})
+const child = Bun.spawn(process.argv.slice(1), { stdio: ["inherit", "inherit", "inherit"], detached: true })
+process.exit(await child.exited)`
+const FAILS = `import * as fs from "node:fs"
+process.stdin.once("end", () => process.stdin.emit("error", Object.assign(new Error("EIO: i/o error, read"), { code: "EIO", errno: -5, syscall: "read" })))
+process.on("SIGHUP", () => fs.appendFileSync(process.env.HEARD!, "SIGHUP\\n"))`
+
+test("the terminal is lost, and the read of its input fails first: the launch ends by a signal, with 130", async () => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const preload = path.join(at.root, "fails.ts")
+  fs.writeFileSync(preload, FAILS)
+  const heard = path.join(at.root, "heard")
+  const main = path.join(import.meta.dir, "..", "src", "main.ts")
+  const pty = new Pty([process.execPath, "-e", DETACHED, process.execPath, "--preload", preload, main, "--model", "gpt-test"], { ...env(at, server.address), HEARD: heard }, at.work)
+  open.push(async () => {
+    if (pty.code === null) {
+      pty.kill("SIGKILL")
+      await pty.ends()
+    }
+    // The program, in its own session, if its parent left it.
+    for (const one of fs.existsSync(at.file) ? rows<{ pid: number; ended: number | null }>(at.file, "select pid, ended from everchat_launch") : []) {
+      if (one.ended === null) {
+        try {
+          process.kill(one.pid, "SIGKILL")
+        } catch {}
+      }
+    }
+  })
+  await pty.sees(IDLE)
+  pty.close()
+  await pty.ends()
+  // No SIGHUP came: the read's failure alone ended the launch.
+  expect(fs.existsSync(heard)).toBe(false)
   expect(launches(at.file).map((one) => [one.ended !== null, one.why])).toEqual([[true, "signal"]])
+  expect(pty.code).toBe(130)
+})
+
+// The two signs in a row, on the rule of the end itself (`ending`, which
+// runMain uses). In the whole program a SIGHUP that comes while the parts
+// close is heard only after they closed: the close runs to the exit with no
+// turn of the event loop, so no signal handler runs in it. The one sign
+// inside the close is the give-back's failure, on the input's stream: the
+// two cases above hold that one.
+test("the read of the input fails, and then SIGHUP comes while the parts close: the parts still close; a second signal ends at once", () => {
+  const did: Array<string> = []
+  const ends = ending(() => did.push("interrupt"), (code) => did.push("exit " + code))
+  ends.lost()
+  ends.signal()
+  // The failure asked for the close; SIGHUP was the first signal, so nothing more.
+  expect(did).toEqual(["interrupt"])
+  ends.lost()
+  expect(did).toEqual(["interrupt"])
+  ends.signal()
+  expect(did).toEqual(["interrupt", "exit 1"])
+  // SIGHUP first, and then the failure: one close too.
+  const other: Array<string> = []
+  const second = ending(() => other.push("interrupt"), (code) => other.push("exit " + code))
+  second.signal()
+  second.lost()
+  expect(other).toEqual(["interrupt"])
+  second.signal()
+  expect(other).toEqual(["interrupt", "exit 1"])
+})
+
+// An error of the terminal's input while the terminal is there, with no
+// signal: a file that the program loads first (`--preload`) emits it on the
+// input's stream when the person types MARK. Only `EIO`, the error of a
+// terminal that is gone, is the terminal's loss.
+const MARK = "fail-the-read"
+const failing = (code: string) =>
+  `process.stdin.on("data", (data) => { if (String(data).includes(${JSON.stringify(MARK)})) process.stdin.emit("error", Object.assign(new Error(${
+    JSON.stringify(code + ": read failed")
+  }), { code: ${JSON.stringify(code)}, syscall: "read" })) })`
+
+const failAt = async (code: string) => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const preload = path.join(at.root, "failing.ts")
+  fs.writeFileSync(preload, failing(code))
+  const pty = new Pty([process.execPath, "--preload", preload, path.join(import.meta.dir, "..", "src", "main.ts"), "--model", "gpt-test"], env(at, server.address), at.work)
+  open.push(async () => {
+    if (pty.code === null) {
+      pty.kill("SIGKILL")
+      await pty.ends()
+    }
+  })
+  await pty.sees(IDLE)
+  pty.type(MARK)
+  await pty.ends()
+  return { pty, launches: launches(at.file) }
+}
+
+for (const code of ["EBADF", "EACCES"]) {
+  test(`at a terminal that is there, a read of its input that fails with ${code} is a failure of the program: the code 1, its text on the standard error, the launch ended with an error`, async () => {
+    const { pty, launches: got } = await failAt(code)
+    expect(pty.code).toBe(1)
+    expect(pty.raw).toContain(`everchat: the read of the terminal failed: ${code}: read failed`)
+    // The parts closed: the launch ended, and not by a signal.
+    expect(got.map((one) => [one.ended !== null, one.why])).toEqual([[true, "error"]])
+    // The screen was given back.
+    for (const sequence of RESTORED) expect(pty.raw).toContain(sequence)
+  })
+}
+
+test("a read of the terminal's input that fails with EIO, with no signal, is the terminal's loss: the launch ends by a signal, with 130", async () => {
+  const { pty, launches: got } = await failAt("EIO")
+  expect(got.map((one) => [one.ended !== null, one.why])).toEqual([[true, "signal"]])
+  expect(pty.code).toBe(130)
+  expect(pty.raw).not.toContain("everchat:")
+})
+
+test("the loss of the terminal is the error of a terminal that is gone: EIO, or the give-back's errno 5, and no other", () => {
+  expect(terminalLost(Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }))).toBe(true)
+  expect(terminalLost(new Error("setRawMode failed with errno: 5"))).toBe(true)
+  for (const other of [Object.assign(new Error("EBADF: read failed"), { code: "EBADF" }), Object.assign(new Error("x"), { code: "EACCES" }), new Error("setRawMode failed with errno: 9"), new Error("EIO"), "EIO", null, undefined]) {
+    expect(terminalLost(other)).toBe(false)
+  }
 })
 
 test("a second process on the same home is refused, in one row, with no screen", async () => {
