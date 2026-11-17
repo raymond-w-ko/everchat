@@ -188,9 +188,11 @@ export const threadLayer = (options: Options = {}) => {
           // Read and compiled once: the adopted code keeps it by its path.
           wasm: loadQuickJSWasm(quickjs),
           ...(worker === undefined ? {} : { workerUrl: worker }),
-          globals: calls.names.map((name) => ({
+          // Each global of the program's functions goes through this
+          // wrapper, spread or not: the count of calls and the time at work.
+          globals: calls.globals.map(({ name, spread }) => ({
             name,
-            spread: true,
+            spread,
             execute: (given: unknown) => {
               // The call past the count is not made: no row, and the
               // program is stopped.

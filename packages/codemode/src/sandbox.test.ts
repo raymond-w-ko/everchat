@@ -17,7 +17,7 @@ import { Effect, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
-import { type Caller, FunctionError, Functions } from "@everchat/core/functions"
+import { type Caller, ENGINE_GLOBALS, FunctionError, Functions, INHERITED, make, RESERVED } from "@everchat/core/functions"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
@@ -81,9 +81,9 @@ const fakes = () => {
 // One launch with the sandbox. `run` runs a program in a new call of one turn.
 const withSandbox = <A, E>(
   file: string,
-  fake: ReturnType<typeof fakes>,
+  fake: { readonly layer: ReturnType<typeof fakes>["layer"] },
   effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
-  over: { memory?: number; compute?: number; polls?: number; worker?: URL } = {}
+  over: { memory?: number; compute?: number; polls?: number; calls?: number; worker?: URL } = {}
 ) => {
   const store = storeLayer(file, options())
   const sandbox = threadLayer(over).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
@@ -107,6 +107,35 @@ const functionRows = (file: string) =>
     file,
     "select parent, fn, input, output, status from everchat_call where parent is not null order by n"
   )
+
+// Fake functions with schemas beside ones with signatures (lead,
+// ec-qakol): `ns.member` gives back the list that it got, `ns.slow` sleeps
+// its object's `ms`, `echo` is spread. `seen` holds what each call got.
+const schemaFakes = () => {
+  const seen: Array<{ name: string; args: ReadonlyArray<unknown> }> = []
+  const table: Record<string, Fake> = {
+    "ns.member": (args) => Effect.succeed(args),
+    "ns.slow": (args) => Effect.sleep((args[0] as { ms: number }).ms).pipe(Effect.as("slept")),
+    echo: (args) => Effect.succeed(args)
+  }
+  const object = { type: "object", properties: { a: { type: "number" } } }
+  const layer = Layer.succeed(
+    Functions,
+    Functions.of({
+      declarations: [
+        { name: "ns.member", description: "member", inputSchema: object },
+        { name: "ns.slow", description: "slow", inputSchema: { type: "object", properties: { ms: { type: "number" } }, required: ["ms"] } },
+        { name: "echo", description: "echo", signature: "(...args: unknown[]): Promise<unknown[]>" }
+      ],
+      names: Object.keys(table),
+      call: (name, args) => {
+        seen.push({ name, args })
+        return table[name]!(args, { turn: 0, program: 0, call: 0 })
+      }
+    })
+  )
+  return { seen, layer }
+}
 
 // A program's result
 // ------------------
@@ -172,6 +201,108 @@ test("a function gets the program's arguments, and each call is a row under the 
     { parent: 5, fn: "nothing", input: "[]", output: "", status: "done" }
   ])
   expect(rows(file, "select count(*) as n from everchat_call where parent is not null and (ended is null or size is null)")).toEqual([{ n: 0 }])
+})
+
+test("a function with an input schema gets the program's one object as [object], and its row's input is [{\"a\":1}]; a second argument is dropped by the adopted prelude (pi/runtime/prelude-source.ts:204, `spread ? args : args[0]`), so the function and its row get [first]; a spread function still gets its list", async () => {
+  const file = newFile()
+  const fake = schemaFakes()
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect((yield* run("return JSON.stringify(await ns.member({ a: 1 }))")).output).toBe("[{\"a\":1}]")
+      expect((yield* run("return JSON.stringify(await ns.member({ a: 2 }, { a: 3 }))")).output).toBe("[{\"a\":2}]")
+      expect((yield* run("return JSON.stringify(await ns.member(null))")).output).toBe("[null]")
+      expect((yield* run("return JSON.stringify(await echo({ a: 1 }, 2))")).output).toBe("[{\"a\":1},2]")
+      expect((yield* run("return JSON.stringify(await echo())")).output).toBe("[]")
+    }))
+  expect(fake.seen).toEqual([
+    { name: "ns.member", args: [{ a: 1 }] },
+    { name: "ns.member", args: [{ a: 2 }] },
+    { name: "ns.member", args: [null] },
+    { name: "echo", args: [{ a: 1 }, 2] },
+    { name: "echo", args: [] }
+  ])
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "ns.member", input: "[{\"a\":1}]", output: "[{\"a\":1}]", status: "done" },
+    { parent: 3, fn: "ns.member", input: "[{\"a\":2}]", output: "[{\"a\":2}]", status: "done" },
+    { parent: 5, fn: "ns.member", input: "[null]", output: "[null]", status: "done" },
+    { parent: 7, fn: "echo", input: "[{\"a\":1},2]", output: "[{\"a\":1},2]", status: "done" },
+    { parent: 9, fn: "echo", input: "[]", output: "[]", status: "done" }
+  ])
+  // A later run of a recorded call takes its input as it is: the list.
+  expect(functionRows(file).map((row) => JSON.parse(row.input))).toEqual(fake.seen.map((one) => one.args))
+})
+
+test("a function with an input schema called with no argument (or undefined) is a FunctionError that names it in the program, and a failed row; the function is not run", async () => {
+  const file = newFile()
+  const fake = schemaFakes()
+  const none = "ns.member takes one argument, an object: it was called with none."
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("try { await ns.member() } catch (error) { return 'caught: ' + error.message }")).toEqual({ output: "caught: " + none, failed: false })
+      expect(yield* run("try { await ns.member(undefined) } catch (error) { return 'caught: ' + error.message }")).toEqual({ output: "caught: " + none, failed: false })
+      const loose = yield* run("await ns.member()")
+      expect(loose.failed).toBe(true)
+      expect(loose.output).toStartWith("Error: " + none)
+    }))
+  expect(fake.seen).toEqual([])
+  expect(functionRows(file)).toEqual([1, 3, 5].map((parent) => ({ parent, fn: "ns.member", input: "[]", output: none, status: "failed" })))
+})
+
+test("the wrapper of a global holds for a function with an input schema: the count of calls counts its call, and its time at work is no compute", async () => {
+  const file = newFile()
+  const fake = schemaFakes()
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      // The count: 2 calls; the third, of a schema function, is not made.
+      expect(yield* run("await ns.member({ a: 1 }); await echo(1); await ns.member({ a: 2 }); return 'done'")).toEqual({
+        output: "The program was stopped: it reached the limit of 2 calls of functions in one program. Call fewer functions in one program.",
+        failed: true
+      })
+      expect(fake.seen.map((one) => one.name)).toEqual(["ns.member", "echo"])
+      // A wait for a schema function longer than the compute limit is no compute.
+      expect(yield* run("return await ns.slow({ ms: 600 })")).toEqual({ output: "slept", failed: false })
+    }), { compute: 250, calls: 2 })
+  expect(functionRows(file).map((row) => [row.fn, row.status])).toEqual([["ns.member", "done"], ["echo", "done"], ["ns.slow", "done"]])
+})
+
+test("the core's reserved names (functions.ts, RESERVED) are the sandbox's, RESERVED_GLOBALS of the adopted code (pi/runtime/execution.ts)", async () => {
+  const source = await Bun.file(new URL("./pi/runtime/execution.ts", import.meta.url)).text()
+  const list = /const RESERVED_GLOBALS: ReadonlySet<string> = new Set\(\[([^\]]*)\]\)/.exec(source)?.[1]
+  expect(list).toBeDefined()
+  const sandbox = [...list!.matchAll(/"([^"]*)"/g)].map((one) => one[1]!)
+  expect(sandbox.length).toBeGreaterThan(5)
+  expect(list!.replace(/"[^"]*"|[\s,]/g, "")).toBe("")
+  expect([...RESERVED]).toEqual(sandbox)
+})
+
+test("the core's list covers the engine: each own name of the global object at a program's boot is in ENGINE_GLOBALS, in RESERVED or a function of the chat (here the namespace ns), and each own name of each prototype of the global object is in INHERITED; and ns.JSON, ns.toString and ns.valueOf, members named as a global and as inherited names, pass make and are called", async () => {
+  const file = newFile()
+  const member = (name: string) => ({ declaration: { name, description: "A member.", inputSchema: { type: "object" } }, run: (args: ReadonlyArray<unknown>) => Effect.succeed([name, ...args]) })
+  const layer = Layer.succeed(Functions, make([member("ns.JSON"), member("ns.toString"), member("ns.valueOf")]))
+  const got = await withSandbox(file, { layer }, (run) =>
+    run(
+      "const chain = []\n" +
+        "for (let p = Object.getPrototypeOf(globalThis); p !== null; p = Object.getPrototypeOf(p)) chain.push({ object: p === Object.prototype, names: Object.getOwnPropertyNames(p), symbols: Object.getOwnPropertySymbols(p).length })\n" +
+        "return JSON.stringify({ names: Object.getOwnPropertyNames(globalThis), chain, got: await ns.JSON({ a: 1 }), more: [await ns.toString({ b: 2 }), await ns.valueOf({ c: 3 })], text: String(globalThis) })"
+    ))
+  expect(got.failed).toBe(false)
+  const { names, chain, got: value, more, text } = JSON.parse(got.output) as {
+    names: Array<string>
+    chain: Array<{ object: boolean; names: Array<string>; symbols: number }>
+    got: unknown
+    more: unknown
+    text: string
+  }
+  expect(value).toEqual(["ns.JSON", { a: 1 }])
+  expect(more).toEqual([["ns.toString", { b: 2 }], ["ns.valueOf", { c: 3 }]])
+  expect(text).toBe("[object global]")
+  // The global object's prototypes: one, Object.prototype, whose 12 own names are each in the core's list.
+  expect(chain.map((one) => [one.object, one.names.length, one.symbols])).toEqual([[true, 12, 0]])
+  expect(chain.flatMap((one) => one.names.filter((name) => !INHERITED.includes(name)))).toEqual([])
+  expect(names).toContain("JSON")
+  expect(names).toContain("ns")
+  expect(names.length).toBeGreaterThan(60)
+  expect(names.filter((name) => !ENGINE_GLOBALS.includes(name) && !RESERVED.includes(name) && name !== "ns")).toEqual([])
 })
 
 test("functions run at the same time", async () => {

@@ -17,22 +17,52 @@
 // its functions (functions.ts), in their order. A compaction has the tool
 // in its head and does not use it: the prompt says so.
 //
+// A declaration has a hand-written signature (the program's own functions:
+// the program calls them with a list of arguments) or JSON schemas (a
+// function from outside: the program calls it with one object). The core
+// checks a list where it is built (functions.ts, `refusals`).
+//
 // The head is text that the program owns, so it is part of the executable.
 // The person's own rules (a file that the config names) go at its end.
 
 import { renderDeclarations } from "./codemode/declarations.ts"
+import type { CodemodeJsonSchema, CodemodeTool } from "./codemode/types.ts"
 import { PROMPT as prompt } from "./prompt.ts"
 import type { Head } from "./request.ts"
 
 // The name of the one tool.
 export const TOOL = "run"
 
-// A function as the head shows it (functions.ts).
+// A JSON Schema, as the renderer takes it.
+export type JsonSchema = CodemodeJsonSchema
+
+// A function as the head shows it (functions.ts). It has a `signature` or an
+// `inputSchema`, not both and not neither (functions.ts, `refusals`).
 export interface Declaration {
   readonly name: string
-  readonly signature: string // the parameter list and the return type, in TypeScript
   readonly description: string
+  // The parameter list and the return type, in TypeScript: the program
+  // gives the function a list of arguments.
+  readonly signature?: string
+  // The schema of the one argument, an object, and the schema of the
+  // result (`unknown` when there is none): shown as
+  // `(args: <input>): Promise<<output>>`.
+  readonly inputSchema?: JsonSchema
+  readonly outputSchema?: JsonSchema
 }
+
+// A declaration as the sandbox's global: with a signature its arguments come
+// as a list (`spread`), with schemas as the one object.
+export const globalOf = (declaration: Declaration): Omit<CodemodeTool, "execute"> =>
+  declaration.signature !== undefined
+    ? { name: declaration.name, description: declaration.description, signature: declaration.signature, spread: true }
+    : {
+      name: declaration.name,
+      description: declaration.description,
+      ...(declaration.inputSchema === undefined ? {} : { inputSchema: declaration.inputSchema }),
+      ...(declaration.outputSchema === undefined ? {} : { outputSchema: declaration.outputSchema }),
+      spread: false
+    }
 
 const describe = (declarations: ReadonlyArray<Declaration>) =>
   `Runs a JavaScript program that you write, and returns its result.
@@ -45,7 +75,7 @@ The program is the body of an async function: use \`await\` and \`return\`.
 - A program starts with nothing from the programs before it: no variables, no state.
 - There are no timers, no fetch(), no require() and no modules. A program reaches the world only through these functions:
 
-${renderDeclarations({ globals: declarations.map((one) => ({ ...one, spread: true, execute: () => undefined })) })}`
+${renderDeclarations({ globals: declarations.map((one) => ({ ...globalOf(one), execute: () => undefined })) })}`
 
 // The head for a chat. `declarations`: the functions that a program can
 // call. `rules`: the person's own instructions, if any.

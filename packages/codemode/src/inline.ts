@@ -92,7 +92,7 @@ export const inlineLayer = (options: Options) => {
           memoryLimitBytes: memory,
           interruptBudget: polls,
           wasm,
-          globals: calls.names.map((name) => ({ name, spread: true, execute: (given: unknown) => calls.call(name, given) }))
+          globals: calls.globals.map(({ name, spread }) => ({ name, spread, execute: (given: unknown) => calls.call(name, given) }))
         })
         const controller = new AbortController()
         const result = yield* Effect.promise((signal) => {

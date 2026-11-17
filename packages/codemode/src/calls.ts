@@ -22,6 +22,22 @@ const text = (value: unknown): string => (typeof value === "string" ? value : va
 // its row under the program's call, its work, its row again. `working`
 // holds the functions at work, by their row. The scope's end stops each one that is
 // left, and waits until its row is closed.
+//
+// `globals`: each function's name, and how the program gives it its
+// arguments, from its declaration (the rule of `globalOf`, head.ts). A
+// function with a `signature` is `spread`: the engine gives the list of the
+// arguments. One with an `inputSchema` is not: the engine gives the one
+// argument, an object (whether it fits the schema is not checked here).
+// The adopted prelude gives only the first argument of such a call
+// (pi/runtime/prelude-source.ts, `caller`, `spread ? args : args[0]`), so a
+// second one is dropped, as JavaScript drops an argument that a function
+// does not name: no error.
+//
+// The arguments are always a list, for the function (`Functions.call`) and
+// in the row's `input`: a schema function's is `[object]`. A call whose
+// arguments came in another form (a spread function's that is no list, a
+// schema function's with no argument) is a `FunctionError` that names the
+// function, and its row is `failed` with it, with `input` `[]`.
 export const functionCalls = (at: { readonly turn: number; readonly call: number }) =>
   Effect.gen(function*() {
     const functions = yield* Functions
@@ -31,14 +47,30 @@ export const functionCalls = (at: { readonly turn: number; readonly call: number
     const working = new Map<number, string>()
     const broken = (op: string) => new FunctionError({ message: "EverChat's database failed (" + op + ")." })
 
+    const globals = functions.declarations.map((one) => ({ name: one.name, spread: one.signature !== undefined }))
+    const spread = new Map(globals.map((one) => [one.name, one.spread]))
+
+    // The call's arguments as a list, or the error of a call whose
+    // arguments came in another form.
+    const listOf = (name: string, given: unknown): ReadonlyArray<unknown> | FunctionError => {
+      if (spread.get(name) === false) {
+        return given === undefined ? new FunctionError({ message: name + " takes one argument, an object: it was called with none." }) : [given]
+      }
+      return Array.isArray(given) ? given : new FunctionError({ message: "The arguments of " + name + " came in no list." })
+    }
+
     const invoke = (name: string, given: unknown) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function*() {
-          const args: ReadonlyArray<unknown> = Array.isArray(given) ? given : []
+          const args = listOf(name, given)
           const id = yield* Effect.mapError(
-            store.startCall({ turn: at.turn, parent: at.call, fn: name, input: JSON.stringify(args) }),
+            store.startCall({ turn: at.turn, parent: at.call, fn: name, input: JSON.stringify(args instanceof FunctionError ? [] : args) }),
             () => broken("startCall")
           )
+          if (args instanceof FunctionError) {
+            yield* Effect.mapError(store.endCall(id, { status: "failed", output: args.message }), () => broken("endCall"))
+            return yield* Effect.fail(args)
+          }
           working.set(id, name)
           const work = restore(functions.call(name, args, { turn: at.turn, program: at.call, call: id })).pipe(
             Effect.catchDefect((defect) => Effect.fail(new FunctionError({ message: "EverChat failed in this function: " + String(defect) }))),
@@ -57,6 +89,7 @@ export const functionCalls = (at: { readonly turn: number; readonly call: number
 
     return {
       names: functions.names,
+      globals,
       call: (name: string, given: unknown): Promise<unknown> => promise(invoke(name, given)),
       working
     }

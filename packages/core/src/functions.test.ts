@@ -1,13 +1,15 @@
 // Tests of the core's functions, the whole list of a host's chat: `zoom`,
 // `date` and `result`, over the store and the memory. The core imports no
 // file system (tools/graph.ts); that a host's `result` makes no file is
-// checked with one, in packages/local/src/functions.test.ts.
+// checked with one, in packages/local/src/functions.test.ts. Then the check
+// of a list (`refusals`, `make`) and a declaration with schemas in the head.
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { type Caller, Functions, HOSTED, hostedLayer } from "./functions.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, TYPE_MAX, ZOOM } from "./functions.ts"
+import { globalOf, head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "./store.ts"
@@ -64,4 +66,168 @@ test("result gives a call's whole output from the store, and says when there is 
     assert.equal(yield* fails("result", 99), "No call 99.")
     assert.equal(yield* fails("result", "1"), "Wrong arguments: Expected number at [0]. Use result(id: number): Promise<string>.")
   }))
+})
+
+// The check of a list, and a declaration with schemas
+// ---------------------------------------------------
+
+// A function from outside: `ns.member`, with both schemas.
+const SEARCH: Declaration = {
+  name: "docs.search",
+  description: "Searches the docs.",
+  inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  outputSchema: { type: "object", properties: { hits: { type: "array", items: { type: "string" } } } }
+}
+
+// A declaration with schemas, of `name`.
+const schemaOf = (name: string, more: Partial<Declaration> = {}): Declaration => ({ name, description: "A function.", inputSchema: { type: "object" }, ...more })
+
+// The functions of a head, as its tool's description lists them.
+const listed = (declarations: ReadonlyArray<Declaration>) => head(declarations).tools[0]!.description.split("these functions:\n\n")[1] ?? ""
+
+test("a function ns.member with both schemas renders in the head as declare const ns: { member(args: <input>): Promise<<output>> }, after the built-ins, which keep their bytes; its global takes one object (spread false), a built-in's a list (spread true)", () => {
+  assert.deepEqual(refusals([...HOSTED, SEARCH]), [])
+  const shown = listed([...HOSTED, SEARCH])
+  assert.equal(shown, listed(HOSTED) + "\n\ndeclare const docs: {\n  /** Searches the docs. */\n  search(args: { query: string; }): Promise<{ hits?: Array<string>; }>;\n};")
+  // No output schema: the result is `unknown`.
+  assert.match(listed([schemaOf("lookup")]), /^\/\*\* A function\. \*\/\ndeclare function lookup\(args: \{ \[key: string\]: unknown; \}\): Promise<unknown>;$/)
+  assert.deepEqual(globalOf(SEARCH), { name: "docs.search", description: "Searches the docs.", inputSchema: SEARCH.inputSchema, outputSchema: SEARCH.outputSchema, spread: false })
+  assert.deepEqual(globalOf(ZOOM), { name: "zoom", description: ZOOM.description, signature: ZOOM.signature, spread: true })
+})
+
+test("each refusal of a list, with its name and its sentence: two entries of one name, a-b beside a_b, a.b.c, store, a namespace x beside a global x, a signature with a schema, neither, a rendered type past the cap", () => {
+  const cases: ReadonlyArray<readonly [string, ReadonlyArray<Declaration>, ReadonlyArray<{ name: string; reason: string }>]> = [
+    ["two entries of one name", [ZOOM, DATE, DATE], [{ name: "date", reason: "Another function before it has this name." }]],
+    ["a-b beside a_b", [schemaOf("a_b"), schemaOf("a-b")], [
+      { name: "a-b", reason: "A name is an identifier, or a namespace and a member with one dot between them." },
+      { name: "a-b", reason: 'Its identifier a_b is that of "a_b", before it.' }
+    ]],
+    ["a.b.c", [schemaOf("a.b.c")], [{ name: "a.b.c", reason: "A name is an identifier, or a namespace and a member with one dot between them." }]],
+    ["an empty name, a dot at an end", [schemaOf(""), schemaOf("a."), schemaOf(".b")], [
+      { name: "", reason: "A name is an identifier, or a namespace and a member with one dot between them." },
+      { name: "a.", reason: "A name is an identifier, or a namespace and a member with one dot between them." },
+      { name: ".b", reason: "A name is an identifier, or a namespace and a member with one dot between them." }
+    ]],
+    ["store", [schemaOf("store")], [{ name: "store", reason: '"store" is a global of the sandbox.' }]],
+    ["a namespace of a global of the sandbox", [schemaOf("tools.search"), schemaOf("console.log")], [
+      { name: "tools.search", reason: '"tools" is a global of the sandbox.' },
+      { name: "console.log", reason: '"console" is a global of the sandbox.' }
+    ]],
+    ["a namespace x beside a global x", [schemaOf("x"), schemaOf("x.y")], [{ name: "x.y", reason: 'Its namespace "x" is the name of another function.' }]],
+    ["a global x after a namespace x", [schemaOf("x.y"), schemaOf("x")], [{ name: "x.y", reason: 'Its namespace "x" is the name of another function.' }]],
+    ["a signature with a schema", [{ ...ZOOM, inputSchema: { type: "object" } }, { ...DATE, outputSchema: { type: "string" } }], [
+      { name: "zoom", reason: "It has a signature and a schema: give one of them." },
+      { name: "date", reason: "It has a signature and a schema: give one of them." }
+    ]],
+    ["neither", [{ name: "bare", description: "No form." }, { name: "only", description: "An output alone.", outputSchema: { type: "string" } }], [
+      { name: "bare", reason: "It has no signature and no input schema: give one of them." },
+      { name: "only", reason: "It has no signature and no input schema: give one of them." }
+    ]],
+    // A `const` of n characters renders as n + 2 (its quotes).
+    ["a rendered type past the cap", [
+      schemaOf("at_cap", { inputSchema: { const: "a".repeat(TYPE_MAX - 2) }, outputSchema: { const: "b".repeat(TYPE_MAX - 2) } }),
+      schemaOf("long_in", { inputSchema: { const: "a".repeat(TYPE_MAX - 1) } }),
+      schemaOf("long_out", { outputSchema: { const: "b".repeat(TYPE_MAX - 1) } })
+    ], [
+      { name: "long_in", reason: `Its input type is ${TYPE_MAX + 1} characters, more than ${TYPE_MAX}.` },
+      { name: "long_out", reason: `Its output type is ${TYPE_MAX + 1} characters, more than ${TYPE_MAX}.` }
+    ]]
+  ]
+  for (const [what, list, expected] of cases) {
+    assert.deepEqual([what, refusals(list).map((one) => ({ ...one }))], [what, expected])
+  }
+  assert.equal(TYPE_MAX, 16_000)
+  assert.deepEqual(RESERVED, ["tools", "ALL_TOOLS", "console", "text", "image", "exit", "globalThis", "store", "load"])
+  for (const name of RESERVED) assert.deepEqual([name, refusals([schemaOf(name)]).length], [name, 1])
+  // The built-in lists pass, and a member may share a reserved name.
+  assert.deepEqual(refusals(HOSTED), [])
+  assert.deepEqual(refusals([schemaOf("docs.store"), schemaOf("x.y"), schemaOf("x.z"), schemaOf("$a_1")]), [])
+  // A schema that cannot be rendered is refused, and the check throws nothing.
+  const deep: Record<string, unknown> = {}
+  let at = deep
+  for (let k = 0; k < 100_000; k++) {
+    const next: Record<string, unknown> = {}
+    at["type"] = "array"
+    at["items"] = next
+    at = next
+  }
+  assert.deepEqual(refusals([schemaOf("deep", { inputSchema: deep })]).map((one) => ({ ...one })), [{ name: "deep", reason: "Its input schema cannot be shown as a type." }])
+})
+
+test("a function named as a global of the sandbox's engine, or in its namespace, is refused with the sentence: JSON.member, Math.x, a global Object, each of ENGINE_GLOBALS, and by trial __proto__ and constructor (not prototype); a member's name is free: ns.JSON passes; make dies for one", async () => {
+  const engine = (name: string) => `"${name}" is a global of the sandbox's engine.`
+  assert.deepEqual(refusals([schemaOf("JSON.member"), schemaOf("Math.x"), schemaOf("Object"), { name: "undefined", description: "A spread one.", signature: "(): Promise<void>" }]).map((one) => ({ ...one })), [
+    { name: "JSON.member", reason: engine("JSON") },
+    { name: "Math.x", reason: engine("Math") },
+    { name: "Object", reason: engine("Object") },
+    { name: "undefined", reason: engine("undefined") }
+  ])
+  // Each name of the list, as a global and as a namespace, once (no other refusal comes with it).
+  assert.equal(ENGINE_GLOBALS.length, 70)
+  assert.deepEqual(ENGINE_GLOBALS.filter((name) => RESERVED.includes(name)), [])
+  for (const name of ENGINE_GLOBALS) {
+    assert.deepEqual([name, refusals([schemaOf(name)]).map((one) => one.reason)], [name, [engine(name)]])
+    assert.deepEqual([name, refusals([schemaOf(name + ".m")]).map((one) => one.reason)], [name, [engine(name)]])
+  }
+  // Ruling 3's trial (ec-kcn81): __proto__ and constructor hide what the global object inherits; prototype hides nothing.
+  assert.deepEqual(ENGINE_GLOBALS.slice(-2), ["__proto__", "constructor"])
+  assert.deepEqual([refusals([schemaOf("prototype")]), refusals([schemaOf("prototype.m")])], [[], []])
+  // A member's name after the dot is free.
+  assert.deepEqual(refusals([schemaOf("ns.JSON"), schemaOf("ns.Object"), schemaOf("ns.__proto__"), schemaOf("docs.constructor")]), [])
+  const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([{ declaration: schemaOf("JSON.member"), run: () => Effect.succeed(null) }])))))
+  assert.equal(Exit.isFailure(exit) && Cause.hasDies(exit.cause), true)
+  assert.equal(String((Cause.squash(Exit.isFailure(exit) ? exit.cause : Cause.empty) as Error).message), 'The list of functions is refused: "JSON.member": "JSON" is a global of the sandbox\'s engine.')
+})
+
+test("a function named as a name that the global object inherits, or that the engine calls by itself, as a global or as a namespace, is refused with the sentence: toString, toString.m, valueOf, hasOwnProperty, then, toJSON, each of INHERITED and CALLED; a member after the dot is free: ns.toString and ns.valueOf pass; make dies for one", async () => {
+  const inherited = (name: string) => `"${name}" is a name that the sandbox's global object inherits.`
+  const called = (name: string) => `"${name}" is a name that the sandbox's engine calls by itself.`
+  const named = ["toString", "toString.m", "valueOf", "valueOf.m", "hasOwnProperty", "hasOwnProperty.m", "then", "then.m", "toJSON", "toJSON.m"]
+  assert.deepEqual(refusals(named.map((name) => schemaOf(name))).map((one) => ({ ...one })), [
+    { name: "toString", reason: inherited("toString") },
+    { name: "toString.m", reason: inherited("toString") },
+    { name: "valueOf", reason: inherited("valueOf") },
+    { name: "valueOf.m", reason: inherited("valueOf") },
+    { name: "hasOwnProperty", reason: inherited("hasOwnProperty") },
+    { name: "hasOwnProperty.m", reason: inherited("hasOwnProperty") },
+    { name: "then", reason: called("then") },
+    { name: "then.m", reason: called("then") },
+    { name: "toJSON", reason: called("toJSON") },
+    { name: "toJSON.m", reason: called("toJSON") }
+  ])
+  // Each name of the two lists, as a global and as a namespace, once. The
+  // two that ENGINE_GLOBALS has too keep its sentence (ec-kcn81).
+  assert.deepEqual(INHERITED, ["toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "__proto__", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__", "constructor"])
+  assert.deepEqual(CALLED, ["then", "toJSON"])
+  for (const name of [...INHERITED, ...CALLED]) {
+    const reason: string = ENGINE_GLOBALS.includes(name) ? `"${name}" is a global of the sandbox's engine.` : INHERITED.includes(name) ? inherited(name) : called(name)
+    assert.deepEqual([name, refusals([schemaOf(name)]).map((one) => one.reason)], [name, [reason]])
+    assert.deepEqual([name, refusals([schemaOf(name + ".m")]).map((one) => one.reason)], [name, [reason]])
+  }
+  assert.deepEqual(INHERITED.filter((name) => ENGINE_GLOBALS.includes(name)), ["__proto__", "constructor"])
+  // A member after the dot is free.
+  assert.deepEqual(refusals([schemaOf("ns.toString"), schemaOf("ns.valueOf"), schemaOf("ns.hasOwnProperty"), schemaOf("ns.toJSON")]), [])
+  for (const name of ["toString", "then"]) {
+    const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([{ declaration: schemaOf(name), run: () => Effect.succeed(null) }])))))
+    assert.equal(Exit.isFailure(exit) && Cause.hasDies(exit.cause), true)
+    assert.equal(String((Cause.squash(Exit.isFailure(exit) ? exit.cause : Cause.empty) as Error).message), `The list of functions is refused: "${name}": ${name === "then" ? called(name) : inherited(name)}`)
+  }
+})
+
+test("make dies at the layer's build with every refusal in its message, and builds a good list", async () => {
+  const entry = (declaration: Declaration): Entry => ({ declaration, run: () => Effect.succeed(null) })
+  const build = (declarations: ReadonlyArray<Declaration>) =>
+    Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make(declarations.map(entry))))))
+  const exit = await build([ZOOM, DATE, DATE, schemaOf("store"), schemaOf("a.b.c")])
+  assert.equal(Exit.isFailure(exit), true)
+  const cause = Exit.isFailure(exit) ? exit.cause : Cause.empty
+  assert.equal(Cause.hasDies(cause), true)
+  const message = String((Cause.squash(cause) as Error).message)
+  assert.equal(
+    message,
+    'The list of functions is refused: "date": Another function before it has this name. "store": "store" is a global of the sandbox. "a.b.c": A name is an identifier, or a namespace and a member with one dot between them.'
+  )
+  const good = await build([...HOSTED, SEARCH])
+  assert.equal(Exit.isSuccess(good), true)
+  assert.deepEqual(Exit.isSuccess(good) ? good.value.names : [], ["zoom", "date", "result", "docs.search"])
 })
