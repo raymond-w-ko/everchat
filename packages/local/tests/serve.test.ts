@@ -275,6 +275,23 @@ test("(d) a port in use: the message, the code 1, an empty standard output", asy
   expect(err).toMatch(new RegExp(`^everchat: the host could not listen on port ${port} \\(.*\\)\\. Give another port with --port\\.\\n$`))
 }, 20_000)
 
+// (d) The port 80: a browser gives no port in Host for it, so the page
+// could never be served there. Refused before the server is made: this
+// case needs no socket.
+test("(d) the port 80: the message, the code 1, an empty standard output, and no process left", async () => {
+  const at = place()
+  const proc = Bun.spawn([...PROGRAM, "serve", "--port", "80"], { cwd: at.work, env: env(at, undefined), stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  // Were it to listen, the case ends it.
+  const stop = setTimeout(() => proc.kill("SIGKILL"), 10_000)
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+  clearTimeout(stop)
+  expect([code, out]).toEqual([1, ""])
+  expect(err).toBe(
+    "everchat: the host cannot serve the page on port 80: a browser gives no port in Host for port 80, and the gate takes only 127.0.0.1:<port>. Give another port with --port.\n"
+  )
+  expect(() => process.kill(proc.pid, 0)).toThrow()
+}, 20_000)
+
 // (e)
 test("(e) the stop by SIGINT, SIGTERM and SIGHUP, each with a stream and a socket connected: close with stop, 1001, the code 130, no process left, each launch ended; the next start on the same home finds its chats, and the earlier start's token and start value open nothing", async () => {
   const at = place()
@@ -338,10 +355,11 @@ test("(f) the outputs of a whole run: the address alone on the standard output; 
 }, 20_000)
 
 // (g)
-test("(g) a launch of the terminal, of pipe mode and of the inspector loads no module of the host: the static imports from main.ts reach no file of packages/server and not serve.ts, which main.ts imports by a dynamic import only", () => {
+test("(g) a launch of the terminal, of pipe mode and of the inspector loads no module of the host: the static imports from main.ts, and from each module that main.ts imports by a dynamic import but serve.ts (the inspector's), reach no file of packages/server and not serve.ts, which main.ts imports by a dynamic import only", () => {
   const scanner = new Bun.Transpiler({ loader: "ts" })
   const main = path.join(import.meta.dir, "..", "src", "main.ts")
   const serve = path.join(import.meta.dir, "..", "src", "serve.ts")
+  const inspector = path.join(import.meta.dir, "..", "src", "inspector.ts")
   const server = fs.realpathSync(path.join(import.meta.dir, "..", "..", "server")) + path.sep
   const seen = new Set<string>()
   const dynamic: Array<string> = []
@@ -360,6 +378,11 @@ test("(g) a launch of the terminal, of pipe mode and of the inspector loads no m
     }
   }
   walk(main)
+  // Each module of a dynamic import of main.ts but serve.ts is a root too.
+  const roots = dynamic.filter((to) => to !== serve)
+  expect(roots).toContain(inspector)
+  for (const root of roots) walk(root)
+  expect(seen.has(inspector)).toBe(true)
   expect(seen.size).toBeGreaterThan(10)
   expect([...seen].filter((file) => file.startsWith(server) || file === serve)).toEqual([])
   expect(dynamic).toContain(serve)

@@ -29,8 +29,11 @@
 //
 // R9, in this order: the count (at most `newChats` in `newChatsWindow`, for
 // the host); its body, read (at most 16,384 bytes, in at most `bodyRead`)
-// and not used, none too (the page sends none); `makeChat` of the local tenant with the pick. A store's
-// failure is `500 internal`, and it has counted.
+// and not used, or none (the page sends none): a request with no stream or
+// a `content-length` of 0 has none, and a read of a body that fails (one
+// that stops in its middle) is `400 bad_request`, with no chat made;
+// `makeChat` of the local tenant with the pick. A store's failure is `500
+// internal`, and it has counted.
 //
 // R10, in this order: the count (`newTokens` in `newTokensWindow`); the
 // body's type, as R1's (`415`); the body, at most 16,384 bytes (`413`,
@@ -200,6 +203,12 @@ const chatsOf = (body: Uint8Array, most: number): ReadonlyArray<string> | undefi
 
 const refuse = (code: Refused["code"]) => Effect.fail(new Refused({ code }))
 
+// Whether a request has a body: its source (the web's `Request`, from Bun
+// or from `fromWeb`) has a stream, and its `content-length` is not 0.
+// Effect's `stream` fails for a source with none.
+const hasBody = (request: HttpServerRequest.HttpServerRequest): boolean =>
+  (request.source as { readonly body?: unknown }).body != null && request.headers["content-length"] !== "0"
+
 // What the page's routes need of the host.
 export interface PageNeeds {
   readonly gate: Gate
@@ -236,11 +245,11 @@ export const pageRoutes = (local: LocalOptions, needs: PageNeeds, page: string =
     const chatWork = (given: Local) =>
       Effect.gen(function*() {
         yield* newChat
-        // The page's own R9 sends no body, and Effect's request has no stream
-        // for none: its read fails as `bad_request`, which is no body here
-        // (the body is not used). A body over the bound and a slow one keep
-        // their answers.
-        yield* given.body(PAGE_BODY).pipe(Effect.catchIf((refused) => refused.code === "bad_request", () => Effect.void))
+        // The page's own R9 sends no body. Effect's request has no stream for
+        // none, and its read would fail as `bad_request`: so a request with
+        // none is not read. Any other read keeps its answer: over the bound,
+        // slow, or failed in its middle.
+        if (hasBody(given.request)) yield* given.body(PAGE_BODY)
         const chat = yield* makeChat(chats, tenant, pick).pipe(Effect.catchTag("StoreError", () => refuse("internal")))
         return jsonAnswer({ chat })
       })

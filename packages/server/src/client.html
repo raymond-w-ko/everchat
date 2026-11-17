@@ -197,41 +197,133 @@ const forget = (chat) => {
   drawChats()
 }
 
-// Asks R10 for a token for `list`. A chat that R10 answers `404 no_chat`
-// for leaves the list. R10 does not say which chat it was, so the page asks
-// for each half of a list again, down to the one chat.
-const findGone = async (list) => {
+const R10 = (list) => call("POST", BASE + "token", { body: { chats: list } })
+const noChat = (answer) => answer.status === 404 && answer.error === "no_chat"
+
+// Holds the token of an answer of R10 for `list`, and sets its renewal.
+const hold = (data, list) => {
+  if (data === null || typeof data.token !== "string" || !Number.isSafeInteger(data.exp)) throw new Error("The host gave no token.")
+  token = { value: data.token, exp: data.exp, chats: list }
+  clearTimeout(renewal)
+  renewal = setTimeout(() => {
+    renew().catch((error) => showError(error.message))
+  }, Math.max(0, data.exp * 1000 - EARLY - Date.now()))
+  return token.value
+}
+
+// The hunt for gone chats (lead, ec-ot20g). R10's `404 no_chat` does not
+// say which chat of a list is gone, so the hunt asks R10 again for each
+// half of the list, down to the one chat, which leaves the list. It runs
+// behind: the open chat's work and "New chat" never wait for it. It makes
+// at most HUNT calls of R10 in each SPAN ms (half of the host's rate), and
+// after a `429` it waits the `retry-after` and asks again, with no
+// sentence on the page. At its end it asks one token for every chat that
+// is left (`tokenChats`), and hunts again if that is `404 no_chat` too.
+// Any other failure ends it: the next `404 no_chat` starts it again.
+const HUNT = 30
+const SPAN = 60000
+let hunting = null
+const hunted = [] // the times of the hunt's calls in the last SPAN ms
+
+const huntCall = async (list) => {
+  for (;;) {
+    while (hunted.length > 0 && hunted[0] <= Date.now() - SPAN) hunted.shift()
+    if (hunted.length >= HUNT) {
+      await wait(hunted[0] + SPAN - Date.now())
+      continue
+    }
+    hunted.push(Date.now())
+    const answer = await R10(list)
+    if (answer.status !== 429) return answer
+    await wait(Math.max(1000, answer.retry))
+  }
+}
+
+// Whether `list` holds a gone chat.
+const holdsGone = async (list) => {
+  const answer = await huntCall(list)
+  if (answer.ok) return false
+  if (noChat(answer)) return true
+  throw new Error(answer.message)
+}
+
+// `list` holds at least one gone chat: each gone one leaves the list.
+const search = async (list) => {
   if (list.length === 1) {
     forget(list[0])
     return
   }
   const half = Math.ceil(list.length / 2)
-  for (const part of [list.slice(0, half), list.slice(half)]) {
-    const answer = await call("POST", BASE + "token", { body: { chats: part } })
-    if (answer.status === 404 && answer.error === "no_chat") await findGone(part)
-    else if (!answer.ok) throw new Error(answer.message)
+  const first = list.slice(0, half)
+  const second = list.slice(half)
+  if (await holdsGone(first)) {
+    await search(first)
+    if (await holdsGone(second)) await search(second)
+  } else {
+    await search(second)
   }
 }
 
-const ask = async () => {
-  for (let round = 0; round < 3; round++) {
-    const list = tokenChats()
-    if (list.length === 0) return null
-    const answer = await call("POST", BASE + "token", { body: { chats: list } })
-    if (answer.ok) {
-      const data = answer.data
-      if (data === null || typeof data.token !== "string" || !Number.isSafeInteger(data.exp)) throw new Error("The host gave no token.")
-      token = { value: data.token, exp: data.exp, chats: list }
-      clearTimeout(renewal)
-      renewal = setTimeout(() => {
-        renew().catch((error) => showError(error.message))
-      }, Math.max(0, data.exp * 1000 - EARLY - Date.now()))
-      return token.value
+// Starts the hunt in `list`, which holds a gone chat when `gone` (else the
+// hunt asks first). One hunt at a time: its last ask covers a later list.
+const hunt = (list, gone) => {
+  if (hunting !== null || list.length === 0) return
+  hunting = (async () => {
+    let next = list
+    let known = gone
+    for (;;) {
+      const before = chats.length
+      if (next.length > 0 && (known || (await holdsGone(next)))) await search(next)
+      const rest = tokenChats()
+      if (rest.length === 0) return
+      const answer = await huntCall(rest)
+      if (answer.ok) {
+        hold(answer.data, rest)
+        return
+      }
+      // A round that found no gone chat ends it, so that a host that
+      // answers out of turn is not asked in a loop.
+      if (!noChat(answer) || chats.length === before) return
+      next = rest
+      known = true
     }
-    if (answer.status === 404 && answer.error === "no_chat") await findGone(list)
-    else throw new Error(answer.message)
+  })()
+    .catch(() => {})
+    .finally(() => {
+      hunting = null
+    })
+}
+
+// Asks R10 for a token: for the open chat alone while a hunt runs, else for
+// `tokenChats`. After a `404 no_chat` for a list of more than one chat, the
+// next ask is for the open chat alone, and the hunt starts behind (lead,
+// ec-ot20g, 1 and 2). A chat alone that is `404 no_chat` leaves the list.
+// Null: no token (no chat, or the open chat is gone).
+const ask = async () => {
+  const open = current !== null && chats.includes(current.chat) ? current.chat : null
+  const list = hunting !== null && open !== null ? [open] : tokenChats()
+  if (list.length === 0) return null
+  const answer = await R10(list)
+  if (answer.ok) return hold(answer.data, list)
+  if (!noChat(answer)) throw new Error(answer.message)
+  if (list.length === 1) {
+    forget(list[0])
+    return null
   }
-  throw new Error("The host gave no token for these chats.")
+  const rest = list.filter((one) => one !== open)
+  if (open === null || !list.includes(open)) {
+    hunt(rest, true)
+    return null
+  }
+  const alone = await R10([open])
+  if (alone.ok) {
+    hunt(rest, true)
+    return hold(alone.data, [open])
+  }
+  if (!noChat(alone)) throw new Error(alone.message)
+  forget(open)
+  hunt(rest, false)
+  return null
 }
 
 // A new token, once for all who ask at one time.
@@ -245,18 +337,41 @@ const renew = () => {
 }
 
 // The token for `chat`: one whose R10 request named it (lead, ec-uq21h, 3).
-// The one held, or a new one; a renewal that was under way when it asked was
-// for an older list, so when its token does not name the chat, the page asks
-// R10 again with the present list, one time. A second token without the chat
-// is an error (`unnamed`), not a loop. Null: the page has no chat at all.
+// The one held, or the renewal's, shared by all who ask at one time. That
+// renewal may have been for an older list, or have ended with no token (its
+// open chat was gone, and another chat is open by now): then, while `chat`
+// is still in the list, the page asks R10 one more time, for `chat`, with
+// an ask of its own (`askFor`; lead, ec-8gqty, 1). There is no third ask:
+// a chat of the list never ends with no token and no error. Null: `chat`
+// is no longer in the list.
 const names = (chat) => token !== null && token.chats.includes(chat)
 const tokenFor = async (chat) => {
   if (names(chat)) return token.value
-  for (let tries = 0; tries < 2; tries++) {
-    const value = await renew()
-    if (value === null) return null
-    if (names(chat)) return token.value
+  await renew()
+  if (names(chat)) return token.value
+  if (!chats.includes(chat)) return null
+  return askFor(chat)
+}
+
+// The ask of `tokenFor` for `chat`: for `chat` alone while a hunt runs (as
+// `ask` does for the open chat), else for `tokenChats` with `chat` among
+// them. A `404 no_chat` for `chat` alone takes it off the list (null); for
+// a longer list it starts the hunt, and is an error (`unnamed`); any other
+// failure is the host's sentence.
+const askFor = async (chat) => {
+  let list = [chat]
+  if (hunting === null) {
+    list = tokenChats()
+    if (!list.includes(chat)) list = [...list.slice(list.length >= MOST ? 1 : 0), chat]
   }
+  const answer = await R10(list)
+  if (answer.ok) return hold(answer.data, list)
+  if (!noChat(answer)) throw new Error(answer.message)
+  if (list.length === 1) {
+    forget(chat)
+    return null
+  }
+  hunt(list, true)
   const error = new Error("The host gave no token for this chat.")
   error.unnamed = true
   throw error

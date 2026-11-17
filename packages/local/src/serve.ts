@@ -20,7 +20,9 @@
 //   origin, `http://127.0.0.1:<port>`, and the one value of `Host` that the
 //   gate takes, `127.0.0.1:<port>`: a page of a web site that points its own
 //   name at 127.0.0.1 gets `403`. A port in use fails the start with
-//   `NoPort`, as the inspector's, before anything is printed.
+//   `NoPort`, as the inspector's, before anything is printed. So does the
+//   port 80, before anything listens: a browser gives no port in `Host` for
+//   it, so the gate would refuse each request of the page.
 // - Its secret and its start value: 32 random bytes and 32 random hex
 //   digits, each new at each start, from the system's random source
 //   (`crypto.getRandomValues`), held in memory only (the secret as a
@@ -101,6 +103,12 @@ const STDERR = Logger.layer([Logger.withConsoleError(Logger.formatLogFmt)])
 // The host, until an interruption ends it.
 export const host = (given: ServeOptions): Effect.Effect<never, unknown> =>
   Effect.scoped(Effect.gen(function*() {
+    // A browser sends `Host: 127.0.0.1`, with no port, for the port 80, and
+    // the gate takes only `127.0.0.1:<port>`: refused before the server is
+    // made, as a port in use.
+    if (given.port === 80) {
+      return yield* new NoPort({ port: 80, message: "the host cannot serve the page on port 80: a browser gives no port in Host for port 80, and the gate takes only 127.0.0.1:<port>" })
+    }
     const file = path.join(given.home, FILE)
     // Made with no access for another account, when it is not there; one
     // that is there keeps its mode.

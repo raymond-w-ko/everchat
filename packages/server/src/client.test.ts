@@ -698,12 +698,22 @@ test("(g) a chat that R10 answers 404 no_chat for leaves the list", async () => 
   expect(one.all("#chats li").length).toBe(0)
   expect(one.texts("#none")).toEqual(["No chat is open."])
 
-  // Three, the middle one gone: R10 does not say which, so the page asks for halves.
+  // Three, the middle one gone: R10 does not say which. The page asks for the
+  // open chat (C) alone, whose token serves its R2; then, behind, for halves
+  // of the rest ([A] is there, so B is the gone one), and at the end one
+  // token for every chat that is left.
   const three = await load({ stored: JSON.stringify([A, B, C]), chats: { [A]: {}, [C]: {} } })
-  expect(three.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)).toEqual([[A, B, C], [A, B], [A], [B], [C], [A, C]])
+  expect(three.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)).toEqual([[A, B, C], [C], [A], [A, C]])
   expect(JSON.parse(three.stored()!)).toEqual([A, C])
   expect(three.texts("#chats button")).toEqual([C, A])
-  expect(auth(three.calls("GET", chatPath(C))[0]!)).toBe("Bearer " + three.host.issued.at(-1))
+  expect(auth(three.calls("GET", chatPath(C))[0]!)).toBe("Bearer " + three.host.issued[0])
+  expect(three.host.tokens.get(three.host.issued[0]!)!.chats).toEqual([C])
+  expect(three.host.tokens.get(three.host.issued.at(-1)!)!.chats).toEqual([A, C])
+  // A switch to A takes the last token, which names it: no more R10.
+  await three.open(A)
+  expect(three.calls("POST", token("token")).length).toBe(4)
+  expect(auth(three.calls("GET", chatPath(A))[0]!)).toBe("Bearer " + three.host.issued.at(-1))
+  expect(three.$("error").textContent).toBe("")
 })
 
 // The five findings of the review ec-j56pa, one case for each ruling of ec-uq21h.
@@ -891,4 +901,261 @@ test("(l) ruling 5: R3's 401 gets a new token and the read again, one time; a se
   expect(refusing.calls("POST", token("token")).length).toBe(2)
   expect(refusing.$("error").textContent).toBe("The token was refused.")
   expect(refusing.entries().length).toBe(50)
+})
+
+// The hunt for gone chats and the token's lists (lead, ec-ot20g).
+
+// R10 as the host rates it: 60 asks in a window of a minute, then `429` with
+// the seconds to the window's end. `refused` counts the 429s.
+const rated = () => {
+  const rate = { start: -Infinity, count: 0, refused: 0 }
+  const route: Route = (call) => {
+    if (call.path !== token("token")) {
+      return undefined
+    }
+    if (call.at >= rate.start + 60_000) {
+      rate.start = call.at
+      rate.count = 0
+    }
+    if (++rate.count > 60) {
+      rate.refused++
+      return fault(429, "too_many", "Too many requests: try again later.", { "retry-after": String(Math.ceil((rate.start + 60_000 - call.at) / 1000)) })
+    }
+    return undefined
+  }
+  return { rate, route }
+}
+// The most calls of `list` in a span of 60 s: [t, t + 60 s) for each call's t.
+const most = (list: Array<Sent>) => Math.max(0, ...list.map((one) => list.filter((other) => other.at >= one.at && other.at < one.at + 60_000).length))
+const stale = (count: number) => Array.from({ length: count }, (_, k) => uuid(500 + k))
+
+test("(m) rulings 1 to 3, every one of 64 stored chats gone: the open chat alone is asked next; New chat and its R2 come at once; the hunt asks R10 at most 30 times in each 60 s, ends with one token for the chats left, and puts no sentence on the page", async () => {
+  const stored = stale(64)
+  const { rate, route } = rated()
+  const page = await load({ stored: JSON.stringify(stored), chats: {}, route })
+  const t0 = page.clock.now
+  const asks = () => page.calls("POST", token("token"))
+  // The list, then the open chat (the newest) alone: gone too, so it leaves.
+  expect(asks().slice(0, 2).map((call) => JSON.parse(call.body!).chats)).toEqual([stored, [stored[63]]])
+  expect(JSON.parse(page.stored()!)).not.toContain(stored[63])
+  expect(page.texts("#none")).toEqual(["No chat is open."])
+  // The hunt runs behind, and New chat does not wait for it: R9, its token and its R2, at once.
+  expect(JSON.parse(page.stored()!).length).toBeGreaterThan(1)
+  await page.click("new")
+  const made = uuid(101)
+  const mine = page.sent.filter((call) => call.path === token("chats") || call.path === chatPath(made))
+  expect(mine.map((call) => [call.method + " " + call.path, call.at - t0])).toEqual([["POST " + token("chats"), 0], ["GET " + chatPath(made), 0]])
+  const hers = asks().filter((call) => JSON.parse(call.body!).chats.includes(made))
+  expect([hers[0]!.at - t0, JSON.parse(hers[0]!.body!).chats]).toEqual([0, [made]])
+  expect(page.host.tokens.get(auth(mine[1]!)!.replace(/^Bearer /, ""))!.chats).toEqual([made])
+  expect(page.calls("GET", chatPath(made, "/events")).length).toBe(1)
+  expect(page.$("error").textContent).toBe("")
+
+  // Ten minutes: the hunt ends; every gone chat has left; the last token names the new chat.
+  await page.clock.advance(600_000)
+  expect(JSON.parse(page.stored()!)).toEqual([made])
+  expect(page.texts("#chats button")).toEqual([made])
+  const hunt = asks().filter((call) => call !== asks()[0] && call !== asks()[1] && call !== hers[0])
+  expect(hunt.length).toBeGreaterThan(60)
+  expect(most(hunt)).toBe(30)
+  expect(JSON.parse(hunt.at(-1)!.body!).chats).toEqual([made])
+  expect(page.host.tokens.get(page.host.issued.at(-1)!)!.chats).toEqual([made])
+  expect(rate.refused).toBe(0)
+  expect(page.$("error").textContent).toBe("")
+  expect(page.document.body.textContent).not.toContain("Too many requests")
+  expect(page.$("state").textContent).toBe("connected by the stream")
+})
+
+test("(m) rulings 1 and 2, the open chat there and 63 stored chats gone: its token comes at the second R10, its R2 and R4 at once; the hunt goes on behind and the open chat stays connected", async () => {
+  const stored = stale(64)
+  const open = stored[63]!
+  const { rate, route } = rated()
+  const page = await load({ stored: JSON.stringify(stored), chats: { [open]: { seq: 2, messages: [message(0, "user", "hello")] } }, route })
+  const t0 = page.clock.now
+  const asks = () => page.calls("POST", token("token"))
+  expect(asks().slice(0, 2).map((call) => JSON.parse(call.body!).chats)).toEqual([stored, [open]])
+  const read = page.calls("GET", chatPath(open))
+  expect(read.map((call) => [call.at - t0, auth(call)])).toEqual([[0, "Bearer " + page.host.issued[0]]])
+  expect(page.calls("GET", chatPath(open, "/events")).map((call) => call.at - t0)).toEqual([0])
+  expect(page.entries()).toEqual(["user|hello"])
+  expect(page.$("state").textContent).toBe("connected by the stream")
+  // The hunt has not ended: some gone chats are still in the list.
+  expect(JSON.parse(page.stored()!).length).toBeGreaterThan(1)
+
+  await page.clock.advance(600_000)
+  expect(JSON.parse(page.stored()!)).toEqual([open])
+  const hunt = asks().slice(2)
+  expect(most(hunt)).toBe(30)
+  expect(JSON.parse(hunt.at(-1)!.body!).chats).toEqual([open])
+  expect([rate.refused, page.$("error").textContent, page.streams.length, page.streams[0]!.aborted]).toEqual([0, "", 1, false])
+})
+
+test("(n) ruling 3: a 429 in the hunt waits its retry-after and asks again, with no sentence on the page", async () => {
+  let refuse = 1
+  const page = await load({
+    stored: JSON.stringify([A, B, C]),
+    chats: { [A]: {}, [C]: {} },
+    route: (call) => {
+      // The hunt's first call ([A], after the list and the open chat alone).
+      if (call.path === token("token") && call.body === JSON.stringify({ chats: [A] }) && refuse-- > 0) {
+        return fault(429, "too_many", "Too many requests: try again later.", { "retry-after": "7" })
+      }
+      return undefined
+    }
+  })
+  const t0 = page.clock.now
+  const asks = () => page.calls("POST", token("token")).map((call) => [JSON.parse(call.body!).chats, call.at - t0])
+  expect(asks()).toEqual([[[A, B, C], 0], [[C], 0], [[A], 0]])
+  expect(page.$("error").textContent).toBe("")
+  expect(JSON.parse(page.stored()!)).toEqual([A, B, C])
+  await page.clock.advance(6_999)
+  expect(asks().length).toBe(3)
+  await page.clock.advance(1)
+  expect(asks()).toEqual([[[A, B, C], 0], [[C], 0], [[A], 0], [[A], 7000], [[A, C], 7000]])
+  expect(JSON.parse(page.stored()!)).toEqual([A, C])
+  expect([page.$("error").textContent, page.$("state").textContent]).toEqual(["", "connected by the stream"])
+  expect(page.document.body.textContent).not.toContain("Too many requests")
+})
+
+test("(o) the token's list: the newest 64 of 70 stored chats; the open chat among them when it is older, with its R2 on that token", async () => {
+  const stored = stale(70)
+  const oldest = stored[0]!
+  const page = await load({ stored: JSON.stringify(stored), chats: Object.fromEntries(stored.map((one) => [one, {}])) })
+  const asks = () => page.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats as Array<string>)
+  expect(asks()).toEqual([stored.slice(-64)])
+  // The oldest chat, opened: a new token for 64 chats, the oldest among them.
+  await page.open(oldest)
+  expect(asks().length).toBe(2)
+  const second = asks()[1]!
+  expect(second.length).toBe(64)
+  expect(new Set(second).size).toBe(64)
+  expect(second).toContain(oldest)
+  expect(second.filter((one) => one !== oldest)).toEqual(stored.slice(-63))
+  expect(auth(page.calls("GET", chatPath(oldest))[0]!)).toBe("Bearer " + page.host.issued[1])
+  expect(page.host.tokens.get(page.host.issued[1]!)!.chats).toContain(oldest)
+  expect([page.$("error").textContent, page.$("state").textContent]).toEqual(["", "connected by the stream"])
+})
+
+test("(p) the token is in no address: R2, R3 (older messages), R4 and R1 carry it in the header Authorization only", async () => {
+  const messages = Array.from({ length: 51 }, (_, k) => message(k, "user", "m" + k))
+  const page = await load({ stored: JSON.stringify([A]), chats: { [A]: { seq: 51, messages } } })
+  await page.click("older")
+  await page.say("hello")
+  const value = page.host.issued[0]!
+  const reads = page.calls("GET", chatPath(A, "/messages"))
+  expect(reads.map((one) => [one.query, auth(one)])).toEqual([[{ from: "0", to: "1" }, "Bearer " + value]])
+  expect(page.entries()[0]).toBe("user|m0")
+  const routes = page.sent.filter((one) => one.path.startsWith("/v1/")).map((one) => one.method + " " + one.path.replace(A, "A"))
+  expect(routes).toEqual(["GET /v1/chats/A", "GET /v1/chats/A/events", "GET /v1/chats/A/messages", "POST /v1/chats/A/messages"])
+  for (const one of page.sent) {
+    expect(one.url).not.toContain(value)
+    expect(one.url).not.toContain("token-")
+    expect(Object.values(one.query).join(" ")).not.toContain("eyJ")
+  }
+})
+
+// A chat made or opened while the gone open chat's R10 is under way (lead, ec-8gqty).
+
+// The page over [A, B, C], with the open chat's ask alone ([C]) held until
+// `release`; `answer` answers R10 for the new chat alone ([made]) when it
+// gives a response.
+const held = async (chats: Record<string, Partial<Chat>>, answer: (list: Array<string>) => Response | undefined = () => undefined) => {
+  let release!: (answer: Response) => void
+  let hold = true
+  const page = await load({
+    stored: JSON.stringify([A, B, C]),
+    chats,
+    route: (call) => {
+      if (call.path !== token("token")) {
+        return undefined
+      }
+      const list = (JSON.parse(call.body!) as { chats: Array<string> }).chats
+      if (hold && list.length === 1 && list[0] === C) {
+        hold = false
+        return new Promise<Response>((resolve) => void (release = resolve))
+      }
+      return answer(list)
+    }
+  })
+  const asks = () => page.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats as Array<string>)
+  expect(asks()).toEqual([[A, B, C], [C]])
+  return { page, asks, release: (response: Response) => release(response) }
+}
+const gone = () => fault(404, "no_chat", "This tenant has no chat with this UUID.")
+const made = uuid(101)
+
+test("(q) ruling 1: New chat while the gone open chat's R10 is under way: after its 404, the new chat's R2 and R4 come with no act of the person, on one more R10, for the new chat alone", async () => {
+  const { page, asks, release } = await held({})
+  const t0 = page.clock.now
+  await page.click("new")
+  expect(page.calls("POST", token("chats")).length).toBe(1)
+  expect(page.calls("GET", chatPath(made)).length).toBe(0)
+  release(gone())
+  await page.clock.flush()
+  // The shared ask for [C] ended with no token; the new chat's own ask, then the hunt behind ([A, B], [A], [B], and its token for the chat left).
+  expect(asks()).toEqual([[A, B, C], [C], [A, B], [made], [A], [B], [made]])
+  const read = page.calls("GET", chatPath(made))
+  expect(read.map((call) => call.at - t0)).toEqual([0])
+  expect(page.host.tokens.get(auth(read[0]!)!.replace(/^Bearer /, ""))!.chats).toEqual([made])
+  expect(page.calls("GET", chatPath(made, "/events")).length).toBe(1)
+  expect([page.$("error").textContent, page.$("state").textContent]).toEqual(["", "connected by the stream"])
+  expect(JSON.parse(page.stored()!)).toEqual([made])
+  await page.clock.advance(60_000)
+  expect(asks().length).toBe(7)
+  expect(page.calls("GET", chatPath(made)).length).toBe(1)
+})
+
+test("(r) ruling 2: a switch to a chat of the list that is there, while the gone open chat's R10 is under way: after its 404, that chat's R2 and R4 come, on one more R10, for it alone", async () => {
+  const { page, asks, release } = await held({ [A]: {}, [B]: { seq: 1, messages: [message(0, "user", "in B")] } })
+  await page.open(B)
+  expect(page.calls("GET", chatPath(B)).length).toBe(0)
+  release(gone())
+  await page.clock.flush()
+  // C leaves the list; B's own ask; the hunt finds [A, B] there and holds one token for both.
+  expect(asks()).toEqual([[A, B, C], [C], [A, B], [B], [A, B]])
+  expect(JSON.parse(page.stored()!)).toEqual([A, B])
+  const read = page.calls("GET", chatPath(B))
+  expect(read.length).toBe(1)
+  expect(page.host.tokens.get(auth(read[0]!)!.replace(/^Bearer /, ""))!.chats).toEqual([B])
+  expect(page.calls("GET", chatPath(B, "/events")).length).toBe(1)
+  expect(page.entries()).toEqual(["user|in B"])
+  expect([page.$("error").textContent, page.$("state").textContent]).toEqual(["", "connected by the stream"])
+})
+
+test("(s) ruling 1: the one more R10's 404 no_chat for the chat itself takes it off the list, with no third ask and no error", async () => {
+  const { page, asks, release } = await held({}, (list) => (list.length === 1 && list[0] === made ? gone() : undefined))
+  await page.click("new")
+  release(gone())
+  await page.clock.flush()
+  // The new chat's own ask takes it off at once: the hunt ([A, B], [A], [B]) has no chat left to ask a token for.
+  expect(asks()).toEqual([[A, B, C], [C], [A, B], [made], [A], [B]])
+  await page.clock.advance(60_000)
+  expect(asks().length).toBe(6)
+  expect(JSON.parse(page.stored()!)).toEqual([])
+  expect(page.calls("GET", chatPath(made)).length).toBe(0)
+  expect(page.texts("#none")).toEqual(["No chat is open."])
+  expect(page.all("#chats li").length).toBe(0)
+  expect(page.$("error").textContent).toBe("")
+})
+
+test("(t) ruling 1: the one more R10's other failure shows the host's sentence, with no third ask in that call", async () => {
+  let failing = true
+  const { page, asks, release } = await held({}, (list) => (failing && list.length === 1 && list[0] === made ? fault(500, "internal", "The host failed.") : undefined))
+  const t0 = page.clock.now
+  await page.click("new")
+  release(gone())
+  await page.clock.flush()
+  // The new chat's own ask fails; the hunt goes on behind, and its last ask (the same list) fails too, with no sentence of its own.
+  expect(asks()).toEqual([[A, B, C], [C], [A, B], [made], [A], [B], [made]])
+  expect(page.$("error").textContent).toBe("The host failed.")
+  expect(page.calls("GET", chatPath(made)).length).toBe(0)
+  expect(JSON.parse(page.stored()!)).toContain(made)
+  // The connection's own wait (as after a fault of the network), then a new call of tokenFor, and its ask.
+  failing = false
+  await page.clock.advance(999)
+  expect(asks().length).toBe(7)
+  await page.clock.advance(1)
+  expect(asks().length).toBe(8)
+  expect(page.calls("GET", chatPath(made)).map((call) => call.at - t0)).toEqual([1000])
+  expect(page.$("state").textContent).toBe("connected by the stream")
 })

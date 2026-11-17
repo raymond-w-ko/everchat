@@ -106,6 +106,7 @@ How to test it:
   7, is its design.
 - Its port is 4681 (`--port <n>`; 0 for any free port). It listens on
   127.0.0.1 only and takes only `127.0.0.1:<port>` as the `Host`. It
+  refuses the port 80, where a browser gives no port in `Host`. It
   prints one line on the standard output, the page's address with a start
   value that is new at each start, and its own diagnostics go to the
   standard error.

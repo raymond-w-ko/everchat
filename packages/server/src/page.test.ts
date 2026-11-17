@@ -229,7 +229,38 @@ test("(b) R9 makes a chat of the local tenant with the pick, which Chats.reads f
   expect(calls.make).toBe(4)
 })
 
-test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its seconds, 1 in its last millisecond; the window's end and a clock that steps back give a new window; a store's failure is 500 and has counted", async () => {
+// A body that fails as it is read: `first` bytes, then the stream's error
+// (a client that resets in the middle of its body); with no bytes, at once.
+const broken = (first: number) => {
+  let pulled = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1
+      if (pulled === 1 && first > 0) controller.enqueue(new Uint8Array(first).fill(97))
+      else controller.error(new Error("the client reset"))
+    }
+  })
+}
+
+test("(b) R9: a body whose read fails in its middle or at once is 400 bad_request with close, makes no chat, and has counted; a request with no stream, or with a content-length of 0, has no body and makes its chat", async () => {
+  const { find, calls } = await pageOf({ limits: { newChats: 5 } })
+  for (const first of [1_000, 0]) {
+    const failed = await ask(find, "chats", { body: broken(first) })
+    expect([first, failed.status, failed.text, failed.headers["connection"]]).toEqual([first, 400, errorText("bad_request"), "close"])
+  }
+  expect(calls.make).toBe(0)
+  // No stream, and a length of 0 (its stream is not read).
+  expect((await ask(find, "chats")).status).toBe(200)
+  expect((await ask(find, "chats", { body: broken(0), headers: { "content-length": "0" } })).status).toBe(200)
+  expect(calls.make).toBe(2)
+  // The two failed reads counted: the window's 5 are used.
+  expect((await ask(find, "chats")).status).toBe(200)
+  expect((await ask(find, "chats")).status).toBe(429)
+  expect(calls.make).toBe(3)
+  expect(lines.join("\n")).not.toContain("the client reset")
+})
+
+test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its seconds, rounded up (1 at 500 ms and 2 at 1,500 ms before the window's end), 1 in its last millisecond; the window's end and a clock that steps back give a new window; a store's failure is 500 and has counted", async () => {
   const { find, calls } = await pageOf()
   for (let k = 0; k < 10; k++) expect((await ask(find, "chats")).status).toBe(200)
   const many = await ask(find, "chats")
@@ -237,6 +268,12 @@ test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its second
   expect(calls.make).toBe(10)
   const late = await ask(find, "chats", { at: NOW + 59_999 })
   expect([late.status, late.headers["retry-after"]]).toEqual([429, "1"])
+  // In the middle of a second of the window: rounded up.
+  for (const [before, seconds] of [[500, "1"], [1_500, "2"]] as const) {
+    const mid = await ask(find, "chats", { at: NOW + 60_000 - before })
+    expect([before, mid.status, mid.headers["retry-after"]]).toEqual([before, 429, seconds])
+  }
+  expect(calls.make).toBe(10)
   // The window's end: a new window from now.
   const next = NOW + 60_000
   for (let k = 0; k < 10; k++) expect((await ask(find, "chats", { at: next })).status).toBe(200)
@@ -320,13 +357,17 @@ test("(c) R10 gives a token of the local tenant for the body's chats with exp 60
   expect(claimsOf((JSON.parse(wide.text) as { token: string }).token).chats).toEqual(all)
 })
 
-test("(c) R10's rate: 60 in a minute; the 61st is 429 with its seconds, before its body's checks; a refused body counted too", async () => {
+test("(c) R10's rate: 60 in a minute; the 61st is 429 with its seconds, rounded up (1 at 500 ms and 2 at 1,500 ms before the window's end), before its body's checks; a refused body counted too", async () => {
   const { find, made } = await pageOf()
   for (let k = 0; k < 59; k++) expect((await ask(find, "token", { body: tokenBody([C1]) })).status).toBe(200)
   expect((await ask(find, "token", { body: "no json" })).status).toBe(400)
   const many = await ask(find, "token", { body: "no json" })
   expect([many.status, many.headers["retry-after"], many.text]).toEqual([429, "60", errorText("too_many")])
   expect((await ask(find, "token", { body: tokenBody([C1]), at: NOW + 30_000 })).headers["retry-after"]).toBe("30")
+  for (const [before, seconds] of [[500, "1"], [1_500, "2"]] as const) {
+    const mid = await ask(find, "token", { body: tokenBody([C1]), at: NOW + 60_000 - before })
+    expect([before, mid.status, mid.headers["retry-after"]]).toEqual([before, 429, seconds])
+  }
   expect(made.count).toBe(59)
   expect((await ask(find, "token", { body: tokenBody([C1]), at: NOW + 60_000 })).status).toBe(200)
 })
