@@ -44,6 +44,7 @@ instead.
 | `echo` | The result of that program, as the model was shown it. |
 | `work` | The report of an agent. It starts with the agent's name, as `[Name]`. |
 | `note` | The program itself, and not a person or a model. For example: what an agent is, or text from a hook. |
+| `late` | The result of a call that ran after a person's yes. It waits until the chat is idle, and then it starts a turn of its own. |
 | `wake` | A wake-up: the text of a reminder or a routine when it fires. It starts a turn of its own. |
 
 ## The memory
@@ -200,7 +201,7 @@ instead.
 | entry | noun | One path of a package's `exports` (`.`, `/bun`): the only way in from outside. A package has an entry for each runtime that needs its own code. |
 | core | noun | The package `@everchat/core`: the memory, the turn loop, requests, the cache, and the head, with no runtime API but `createHash` of `node:crypto`. |
 | host | noun | The code of one build that loads chats, takes messages in, and sends events out: the terminal, the HTTP and WebSocket server, a Durable Object. |
-| seam | noun | A service of the core with more than one implementation: the store, the engine, the host, and the source of a message outside a turn (a wake-up, later a background shell). |
+| seam | noun | A service of the core with more than one implementation: the store, the engine, the host, and the source of a message outside a turn (the result of an approved call, a wake-up, later a background shell). |
 | engine | noun | What runs a program: QuickJS, on all builds. Each program gets a new engine, with its own memory, and it goes away when the program ends. A chat that runs no program has none. |
 | Durable Object | noun | Cloudflare's single-threaded object with a unique name and its own SQLite. The Cloudflare build has one for each chat. |
 
@@ -259,7 +260,7 @@ instead.
 | MCP | noun | The Model Context Protocol, the version of 2026-07-28 over HTTP: what a provider and a connector speak. |
 | connector | noun | An MCP server for one service of the person (mail, a calendar), named in the config file, in the local use. The person's own code is a local MCP server too. |
 | approval | noun | A person's yes or no to one recorded call of a function that needs it, with its exact arguments. The answer names who answered, and it is kept for ever. After a yes, EverChat runs the recorded call. It waits 7 days at most. |
-| pending | adjective | Said of a call of a function that needs approval: it did not run, and it returned "pending" at once. |
+| pending | adjective | Said of a call of a function that needs approval: it did not run, and it returned "pending" at once. Its row is kept, and a note in the log says that it waits. |
 
 ## Wake-ups
 
