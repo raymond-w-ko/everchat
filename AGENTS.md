@@ -124,6 +124,7 @@ The rest:
   directory where `bun test` starts.
 - Full check in a worktree: yes
 - Worktree setup: `bun install --frozen-lockfile`
+- Message check: `bun tools/words.ts --message`
 
 ## Read before you work on
 
