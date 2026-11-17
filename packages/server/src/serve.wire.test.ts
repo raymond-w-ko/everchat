@@ -311,6 +311,8 @@ const EQUAL: ReadonlyArray<readonly [string, (chat: string, last: RouteCase["las
   [".%2e", (chat, last) => `/v1/x/.%2e/chats/${chat}${last}`],
   ["%2e%2e", (chat, last) => `/v1/x/%2e%2e/chats/${chat}${last}`],
   ["%2E%2E", (chat, last) => `/v1/x/%2E%2E/chats/${chat}${last}`],
+  ["%2e.", (chat, last) => `/v1/x/%2e./chats/${chat}${last}`],
+  ["%2e%2E", (chat, last) => `/v1/x/%2e%2E/chats/${chat}${last}`],
   ["a backslash for each slash after the first", (chat, last) => `/v1\\chats\\${chat}${last.replace("/", "\\")}`],
   ["the absolute form", (chat, last) => `http://other.example/v1/chats/${chat}${last}`]
 ]
@@ -400,6 +402,7 @@ test("each spelling that Bun's parsing does not make equal (another letter case,
       ["GET", `/v1/chats/${a}/.`],
       ["GET", `/v1/chats/${a}/messages/..`],
       ["GET", `/v1/chats/${a}/%2e`],
+      ["GET", `/v1/chats/%252e/${a}`],
       ["GET", `//v1/chats/${a}`],
       ["GET", `/v1//chats/${a}`],
       ["GET", `/v1/chats//${a}`],

@@ -5,7 +5,7 @@
 // first read's page, and the bounds of clients.
 
 import { expect, test } from "bun:test"
-import { Effect, Exit, Fiber, Scheduler, Semaphore } from "effect"
+import { Cause, Effect, Exit, Fiber, Scheduler, Semaphore } from "effect"
 import { type Channel, type ChannelLimits, type Client, ClientRefused, makeRegistry, REASONS, type Taken } from "./channel.ts"
 import { type Entry, fit, utf8 } from "./fit.ts"
 
@@ -757,6 +757,64 @@ test("after the registry's stop, addClient on a channel that it had and on one t
   expect(got.read).toEqual([event(1).json, piece("p").json, event(2).json])
   expect(got.end).toEqual({ channels: 2, clients: 1 })
   expect(got.laterClients).toBe(0)
+})
+
+test("addClient with a given that is not a safe whole number from 0 (NaN, -1, 1.5, Infinity, -Infinity, 2**53) dies, with and without pieces: false, and adds no client and changes no count, before every other check (a full chat, a stopped registry); 0 and 2**53 - 1 pass", async () => {
+  const limits = { ...LIMITS, chatClients: 3 }
+  const registry = makeRegistry(limits)
+  const bad = [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53]
+  // Each bad `given`, with no option and with `pieces: false`: "died" for a
+  // defect, else what the exit was.
+  const exitsOf = (channel: Channel) =>
+    Effect.forEach(bad.flatMap((given) => [[given, undefined], [given, { pieces: false }]] as const), ([given, options]) =>
+      Effect.map(Effect.exit(channel.addClient(given, options)), (exit) =>
+        Exit.isFailure(exit) && Cause.hasDies(exit.cause) && !Cause.hasFails(exit.cause) ? "died" : String(exit)))
+  const died = bad.flatMap(() => ["died", "died"])
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    const counts = () => ({ size: registry.size(), clients: channel.clients.length })
+    const before = counts()
+    const onEmpty = yield* exitsOf(channel)
+    const afterEmpty = counts()
+    // 0 and 2**53 - 1 pass, with each option.
+    const zero = yield* channel.addClient(0)
+    const top = yield* channel.addClient(2 ** 53 - 1, { pieces: false })
+    const third = yield* channel.addClient(1)
+    const passed = [zero.given, top.given, third.given]
+    // A full chat: a bad `given` still dies, and a good one is refused.
+    const onFull = yield* exitsOf(channel)
+    const full = yield* Effect.flip(channel.addClient(0))
+    const afterFull = counts()
+    // A stopped registry: the same.
+    yield* registry.stop
+    const onStopped = yield* exitsOf(channel)
+    const afterStopped = counts()
+    return { before, onEmpty, afterEmpty, passed, onFull, full: full.bound, afterFull, onStopped, afterStopped }
+  }))
+  expect(got.before).toEqual({ size: { channels: 1, clients: 0 }, clients: 0 })
+  expect(got.onEmpty).toEqual(died)
+  expect(got.afterEmpty).toEqual(got.before)
+  expect(got.passed).toEqual([0, 2 ** 53 - 1, 1])
+  expect(got.onFull).toEqual(died)
+  expect(got.full).toBe("chat")
+  expect(got.afterFull).toEqual({ size: { channels: 1, clients: 3 }, clients: 3 })
+  expect(got.onStopped).toEqual(died)
+  expect(got.afterStopped).toEqual(got.afterFull)
+})
+
+test("the stop's check comes before the chat's bound: a stopped registry with a chat at chatClients refuses its next client with busy host, not chat", async () => {
+  const limits = { ...LIMITS, chatClients: 2 }
+  const registry = makeRegistry(limits)
+  const got = await run(Effect.gen(function*() {
+    const channel = yield* registry.hold(TENANT_A, CHAT)
+    yield* channel.addClient(0)
+    yield* channel.addClient(0)
+    const beforeStop = yield* Effect.flip(channel.addClient(0))
+    yield* registry.stop
+    const afterStop = yield* Effect.flip(channel.addClient(0))
+    return { beforeStop: [beforeStop.reason, beforeStop.bound], afterStop: [afterStop.reason, afterStop.bound], clients: registry.size().clients }
+  }))
+  expect(got).toEqual({ beforeStop: ["busy", "chat"], afterStop: ["busy", "host"], clients: 2 })
 })
 
 // The rules that hold the counts and the order

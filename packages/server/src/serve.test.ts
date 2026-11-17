@@ -255,12 +255,31 @@ test("each route over a real server: R1 logs a message; R4 (frames), R5 (JSON) a
   }
 }, 15_000)
 
-test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and parameters aside, is R4; `application/json`, `*/*`, `text/event-streams` and none are R5", async () => {
+test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and parameters aside, is R4 (a `q` that is no number, `q=0.001`, or one more part with no `q=0`, too); `application/json`, `*/*`, `text/event-streams`, none, and a part whose `q` is zero (`q=0` to `q=0.000`, `Q` too) are R5", async () => {
   const s = await served()
   try {
     const token = await s.token(TENANT_A, [s.a1])
-    const r4 = ["text/event-stream", "TEXT/EVENT-STREAM", "text/event-stream;q=0.9", "application/json, text/event-stream;q=0.5, */*"]
-    const r5 = ["application/json", "*/*", "text/event-streams", "text/event-stream-x, application/json", undefined]
+    const r4 = [
+      "text/event-stream",
+      "TEXT/EVENT-STREAM",
+      "text/event-stream;q=0.9",
+      "application/json, text/event-stream;q=0.5, */*",
+      "text/event-stream;q=0.001",
+      "text/event-stream;q=x",
+      "text/event-stream;q=0, text/event-stream"
+    ]
+    const r5 = [
+      "application/json",
+      "*/*",
+      "text/event-streams",
+      "text/event-stream-x, application/json",
+      undefined,
+      "application/json;q=1, text/event-stream;q=0",
+      "text/event-stream;q=0.0",
+      "text/event-stream; Q=0.000",
+      "text/event-stream;q=0.00",
+      "text/event-stream ; charset=utf-8 ; q=0"
+    ]
     for (const accept of [...r4, ...r5]) {
       const controller = new AbortController()
       const headers: Record<string, string> = { authorization: "Bearer " + token }
@@ -276,12 +295,126 @@ test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and par
       }
     }
     // The choice alone.
-    expect(r4.map(wantsStream)).toEqual([true, true, true, true])
-    expect(r5.map(wantsStream)).toEqual([false, false, false, false, false])
+    expect(r4.map(wantsStream)).toEqual(r4.map(() => true))
+    expect(r5.map(wantsStream)).toEqual(r5.map(() => false))
     expect(wantsStream(" Text/Event-Stream ; charset=utf-8")).toBe(true)
     // Each R4 client went at its end.
     expect(await within(() => s.host.registry.size().clients === 0, 2_000)).toBe(true)
   } finally {
+    await s.close()
+  }
+}, 15_000)
+
+test("R4 or R5 by `Accept`, a quoted value one piece: a `;q=0` or a `,` in it ends nothing, so a stream part with one is R4; a backslash in it takes the next character, so an escaped quote ends nothing and an escaped backslash does not take the closing quote; a quoted string with no end runs to the end; a real `q=0` after a quoted value is R5", async () => {
+  const s = await served()
+  try {
+    const token = await s.token(TENANT_A, [s.a1])
+    const r4 = [
+      // The review's header.
+      'text/event-stream; profile="https://example.test/p;q=0;v=1"',
+      // A `,` in a quoted value ends no part.
+      'text/event-stream; x="a, b;q=0"',
+      'text/event-stream; x="a,q=0"; y=1',
+      // An escaped quote ends nothing: the `;q=0` is in the string.
+      'text/event-stream; x="a\\";q=0"',
+      'text/event-stream; x="a\\"; q=0, b"',
+      // No end: nothing after the `"` splits.
+      'text/event-stream; x="a;q=0',
+      'text/event-stream; x="a, text/event-stream;q=0',
+      // A quoted `q` is no weight (ruling 2 of ec-ajj5m).
+      'text/event-stream; q="0"',
+      // Another part names the stream after one with a quoted value.
+      'application/json; x="a;b", text/event-stream'
+    ]
+    const r5 = [
+      // The escaped backslash takes no quote: the string ended, the `q=0` is real.
+      'text/event-stream; x="a\\\\";q=0',
+      // A `,` in a quoted value names no type (with the `"` at its end the
+      // split of the list on every `,` named none either; with a `;` before
+      // it, it did).
+      'application/json; x="a, text/event-stream"',
+      'application/json; x="a, text/event-stream; y=1"',
+      'application/json; x="a, text/event-stream',
+      // A real `q=0` after a quoted value.
+      'text/event-stream; profile="p;v=1"; q=0',
+      'text/event-stream; x="a,b"; Q=0.000',
+      // A backslash outside a quoted string takes nothing.
+      "text/event-stream; x=a\\;q=0"
+    ]
+    for (const accept of [...r4, ...r5]) {
+      const controller = new AbortController()
+      const response = await fetch(s.url + s.a1 + "/events?after=0", { headers: { authorization: "Bearer " + token, accept }, signal: controller.signal })
+      expect([accept, response.status]).toEqual([accept, 200])
+      if (r4.includes(accept)) {
+        expect([accept, response.headers.get("content-type")]).toEqual([accept, "text/event-stream"])
+        controller.abort()
+      } else {
+        expect([accept, response.headers.get("content-type")]).toEqual([accept, "application/json; charset=utf-8"])
+        expect(await response.json()).toEqual({ events: [] })
+      }
+    }
+    // The choice alone.
+    expect(r4.filter((accept) => !wantsStream(accept))).toEqual([])
+    expect(r5.filter(wantsStream)).toEqual([])
+    expect(await within(() => s.host.registry.size().clients === 0, 2_000)).toBe(true)
+  } finally {
+    await s.close()
+  }
+}, 15_000)
+
+test("R4 or R5 by `Accept` in time linear in its length: a header of 16,000 bytes of `\"`, `;` and `\\` is answered in under 100 ms", async () => {
+  const s = await served()
+  const sockets: Array<Socket> = []
+  // A head written raw, as small as the route takes: Bun refuses a head of
+  // more than 16,384 bytes (431), which a fetch's own headers pass. Its
+  // answer's head, and the time from the write to its end.
+  const answer = (head: string) =>
+    new Promise<{ readonly head: string; readonly took: number }>((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port: s.port })
+      sockets.push(socket)
+      let got = ""
+      let started = 0
+      socket.on("error", reject)
+      socket.on("connect", () => {
+        started = performance.now()
+        socket.write(head)
+      })
+      socket.on("data", (data) => {
+        got += data.toString("latin1")
+        const end = got.indexOf("\r\n\r\n")
+        if (end !== -1) {
+          resolve({ head: got.slice(0, end), took: performance.now() - started })
+          socket.destroy()
+        }
+      })
+    })
+  try {
+    const token = await s.token(TENANT_A, [s.a1])
+    const type = "text/event-stream;"
+    const accepts = [
+      // A quoted string that never ends: each `\` in it takes a `"`, so the
+      // rest is one piece and the part names the stream (R4).
+      { accept: type + '"' + '\\";'.repeat(5_327), stream: true },
+      // 7,988 quoted strings of one `;` each, every one its own piece, then
+      // a real `q=0.00` (R5).
+      { accept: type + '";'.repeat(7_988) + "q=0.00", stream: false }
+    ]
+    for (const { accept, stream } of accepts) {
+      expect(accept.length).toBe(16_000)
+      const alone = performance.now()
+      expect(wantsStream(accept)).toBe(stream)
+      expect(performance.now() - alone).toBeLessThan(100)
+      const head = `GET /v1/chats/${s.a1}/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\nAccept: ${accept}\r\n\r\n`
+      expect(head.length).toBeLessThanOrEqual(16_384)
+      const answered = await answer(head)
+      const lines = answered.head.toLowerCase().split("\r\n")
+      expect(lines[0]).toBe("http/1.1 200 ok")
+      expect(lines).toContain(stream ? "content-type: text/event-stream" : "content-type: application/json; charset=utf-8")
+      expect(answered.took).toBeLessThan(100)
+    }
+    expect(await within(() => s.host.registry.size().clients === 0, 2_000)).toBe(true)
+  } finally {
+    for (const socket of sockets) socket.destroy()
     await s.close()
   }
 }, 15_000)

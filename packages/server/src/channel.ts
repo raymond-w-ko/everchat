@@ -321,8 +321,13 @@ export class Channel<L = unknown> {
   }
 
   // A new client of the chat, whose `given` is `given`; with `pieces: false`,
-  // one that gets no piece.
+  // one that gets no piece. A `given` that is not a safe whole number from 0
+  // is the caller's fault (the routes refuse such an `after` first): it dies,
+  // before every other check, and adds no client (lead, ec-ajj5m, 4).
   addClient(given: number, options?: { readonly pieces: boolean }): Effect.Effect<Client, ClientRefused> {
+    if (!(Number.isSafeInteger(given) && given >= 0)) {
+      return Effect.die(new Error("a client's given is a safe whole number from 0, not " + String(given)))
+    }
     return this.step(Effect.suspend(() => {
       // The check and the add are one synchronous body: after the
       // registry's `stop` has returned, no client is added.

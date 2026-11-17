@@ -904,6 +904,33 @@ test("after the layer's end, and inside it (after the registry's stop, while a l
   )
 })
 
+test("Host's registry has the real stop: host.registry.stop on a live host refuses addClient on a channel of the host's registry with busy host, and the clients that were there are as they were", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      const channel = yield* b.host.registry.hold(TENANT_A, uuid)
+      const one = yield* channel.addClient(0)
+      const two = yield* channel.addClient(0, { pieces: false })
+      const state = () => ({
+        size: b.host.registry.size(),
+        clients: channel.clients.length,
+        ended: [one.ended, two.ended],
+        given: [one.given, two.given]
+      })
+      const before = state()
+      yield* b.host.registry.stop
+      const refused = yield* tryAdd(channel)
+      const after = state()
+      expect(before).toEqual({ size: { channels: 1, clients: 2 }, clients: 2, ended: [null, null], given: [0, 0] })
+      expect(refused).toEqual(refusedByHost)
+      expect(after).toEqual(before)
+      yield* b.host.registry.letGo(channel)
+      yield* b.close
+    })
+  )
+})
+
 test("an addClient that races the layer's end, at each order that a Deferred and the steps between make: the client gets stop or is refused, never a client with no end", async () => {
   const tally = { stop: 0, refused: 0 }
   await run(() =>

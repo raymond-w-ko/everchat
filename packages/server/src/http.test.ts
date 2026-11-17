@@ -973,6 +973,38 @@ test("a stream answer that started and is not pulled at the deadline (its client
   }))
 })
 
+test("a stream answer's deadline counts from the request's head, not from the hand-off: a work that waits 900 ms of a request of 1,000 ms, then answers a stream that never ends, is stopped 100 ms after the hand-off, and its place goes back there", async () => {
+  const gate = gateOf({ request: 1_000 })
+  await run(Effect.gen(function*() {
+    const calling = yield* Effect.forkChild(call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
+      Effect.as(Effect.sleep(900), HttpServerResponse.stream(Stream.never, { contentType: "text/plain" }))))
+    yield* settle
+    yield* TestClock.adjust(900)
+    yield* settle
+    const response = yield* Fiber.join(calling)
+    expect(response.status).toBe(200)
+    // The stream starts, and waits for a byte that never comes.
+    const reader = HttpServerResponse.toWeb(response).body!.getReader()
+    const state = { read: "pending" as "pending" | "done" | "failed" }
+    void reader.read().then((chunk) => {
+      state.read = chunk.done ? "done" : "pending"
+    }, () => {
+      state.read = "failed"
+    })
+    yield* settle
+    expect([gate.inFlight(), state.read]).toEqual([1, "pending"])
+    // 99 ms after the hand-off, 999 ms from the head: it still runs.
+    yield* TestClock.adjust(99)
+    yield* settle
+    expect([gate.inFlight(), state.read]).toEqual([1, "pending"])
+    // At `request` from the head: stopped, and its place back.
+    yield* TestClock.adjust(1)
+    yield* settle
+    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect([gate.inFlight(), state.read]).toEqual([0, "failed"])
+  }))
+})
+
 test("a stream answer that nothing starts gives its place back at the deadline, and fails if it starts later: no work of it runs", async () => {
   const gate = gateOf()
   let ran = false

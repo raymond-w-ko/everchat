@@ -3,8 +3,9 @@
 // `Host`, the service of the loaded chats, and its layer (docs/host.md,
 // section 1, `HostOptions`; section 2, "The deadline of the work under the
 // lock"; section 3, "Admission", 4, 5 and 8; section 5; lead, ec-jyjxm).
-// This entry, `@everchat/server`, gives `Host` and `Host.layer(options)`;
-// `serve(options)`, the layer of the routes, is not here yet.
+// The entry `@everchat/server` (its `.`, packages/server/src/index.ts) gives
+// `Host`, `serve` and `serverOptions`; `serve(options)`, the layer of the
+// routes, is in serve.ts.
 //
 // `Host.layer(options)` needs `Chats`. At its start it makes the limits
 // (`limits(options.limits)`: a refusal fails the layer with `LimitsRefused`)

@@ -20,8 +20,9 @@
 // not there to read. A target that this parsing makes equal to a route's
 // path is that route's request, with the route's method rule, its checks in
 // their order on the parsed text, its places and its work: a dot segment
-// (`./` or `../`, in any place; `%2e` or `%2E` for a dot of one), a
-// backslash for a slash, the absolute form (`GET http://any.host/v1/...`).
+// (`./` or `../`, in any place; each dot of one as `.`, `%2e` or `%2E`, in
+// any mix: `%2e/`, `.%2e/`, `%2e./`, `%2e%2E/`), a backslash for a slash,
+// the absolute form (`GET http://any.host/v1/...`).
 // Two slashes, another letter case, `;`, an encoded slash and any other
 // percent escape stay as they came: no route, or, in `{chat}`, a text that
 // the gate's check of the chat refuses. No check is passed by a spelling. A
@@ -49,7 +50,9 @@
 // the gate, no check, no work, no line of the gate's log, at any load. R4 or
 // R5: R4 when the header `Accept` names the media type
 // `text/event-stream` in its list, letter case and parameters aside
-// (`text/event-stream;q=0.9` too); else R5, with no `Accept` too.
+// (`text/event-stream;q=0.9` too), but for a part whose `q` is zero (`q=0`,
+// `q=0.0` to `q=0.000`, `Q` too: that part does not name it; a `q` that is
+// no number names it); else R5, with no `Accept` too (lead, ec-ajj5m, 2).
 //
 // The end. The host's layer ends each client with `stop` (host.ts), and each
 // such end is written while the server still serves: R4's `close` frame and
@@ -57,7 +60,9 @@
 // this layer gives no request to a route: a request that comes after it
 // gets `503 busy` with `retry-after: 1` from this layer itself, with no
 // route, no gate, no place, no upgrade and no line of the gate's log (lead,
-// ec-yculc, ruling 3); then the host's end, which stops its registry first,
+// ec-yculc, ruling 3), with the origin's headers as the gate gives them
+// (`busyAnswer`; lead, ec-ajj5m, 1); then the host's end, which stops its
+// registry first,
 // so that no request becomes a client after it (one that came before the
 // mark and is still in its checks, a socket whose `auth` comes late, an R5
 // that joins to wait: each is refused as by a full host); then a wait,
@@ -174,11 +179,69 @@ const pathOf = (url: string) => {
   return query === -1 ? url : url.slice(0, query)
 }
 
+// A `q` of zero, as RFC 9110 writes a weight: `0`, then at most three
+// zeros after a dot.
+const ZERO = /^0(?:\.0{0,3})?$/
+
+// The parts of `Accept`'s list, each as its pieces: its type, then each
+// parameter. One pass over the text: a `,` ends a part and a `;` a piece,
+// but not inside a quoted string (RFC 9110): a `"` opens one, the next `"`
+// that no backslash takes ends it, and in it a backslash takes the next
+// character with it. A quoted string with no end runs to the text's end.
+const partsOf = (accept: string): ReadonlyArray<ReadonlyArray<string>> => {
+  const parts: Array<Array<string>> = []
+  let pieces: Array<string> = []
+  let start = 0
+  let quoted = false
+  for (let at = 0; at < accept.length; at++) {
+    const char = accept[at]
+    if (quoted) {
+      if (char === "\\") at++
+      else if (char === '"') quoted = false
+    } else if (char === '"') quoted = true
+    else if (char === ";" || char === ",") {
+      pieces.push(accept.slice(start, at))
+      start = at + 1
+      if (char === ",") {
+        parts.push(pieces)
+        pieces = []
+      }
+    }
+  }
+  pieces.push(accept.slice(start))
+  parts.push(pieces)
+  return parts
+}
+
 // Whether `Accept` names `text/event-stream` in its list, letter case and
-// parameters aside.
+// parameters aside, but for `q` of zero: a part with it does not name the
+// type. A `q` that is no weight (`q=x`, `q="0"`) is aside as every other
+// parameter. A quoted value is one piece (`partsOf`): a `,` or `;q=0` in it
+// ends nothing.
 export const wantsStream = (accept: string | undefined): boolean =>
   accept !== undefined &&
-  accept.split(",").some((part) => (part.split(";")[0] ?? "").trim().toLowerCase() === "text/event-stream")
+  partsOf(accept).some(([type, ...parameters]) => {
+    if ((type ?? "").trim().toLowerCase() !== "text/event-stream") return false
+    return !parameters.some((parameter) => {
+      const at = parameter.indexOf("=")
+      return at !== -1 && parameter.slice(0, at).trim().toLowerCase() === "q" && ZERO.test(parameter.slice(at + 1).trim())
+    })
+  })
+
+// The answer after the end's mark: the gate's `503 busy` with
+// `retry-after: 1`, with its headers for the origin of the request (http.ts,
+// `finish`): for an `Origin` that is on the list, byte for byte,
+// `access-control-allow-origin` with it and `vary: origin`; for another or
+// none, neither; never `access-control-allow-credentials`. Every method
+// gets it, an `OPTIONS` too: it is no preflight. A case of serve.end.test.ts
+// compares it with the gate's own `503 busy`, header for header.
+const busyAnswer = (request: HttpServerRequest.HttpServerRequest, origins: ReadonlyArray<string>) => {
+  const answer = errorAnswer("busy", { retryAfter: 1 })
+  const origin = request.headers["origin"]
+  return origin !== undefined && origins.includes(origin)
+    ? HttpServerResponse.setHeaders(answer, { "access-control-allow-origin": origin, vary: "origin" })
+    : answer
+}
 
 // The handler of all routes for one request.
 const routes = (gate: Gate, host: typeof Host.Service) => {
@@ -212,7 +275,8 @@ const routes = (gate: Gate, host: typeof Host.Service) => {
 
 // The requests of the routes and the answers' streams that the layer gave:
 // `track` wraps the handler, and answers each request after `mark` with
-// `503 busy` and `retry-after: 1` at once, with no handler; `drained` waits
+// `503 busy` and `retry-after: 1` at once (`busyAnswer`, with the origin's
+// headers), with no handler; `drained` waits
 // until no stream is open, at
 // most `ms`; `stop` interrupts each request that still runs (its handler:
 // a socket's whole session, or a request with no answer yet) and waits for
@@ -221,7 +285,7 @@ const routes = (gate: Gate, host: typeof Host.Service) => {
 // (`HttpEffect.toHandled`), and the gate and the routes take their own
 // uninterruptible steps where they need them. So a client that goes away,
 // the gate's deadline and this layer's end can interrupt a request.
-const tracker = () => {
+const tracker = (origins: ReadonlyArray<string>) => {
   const running = new Set<Fiber.Fiber<unknown, unknown>>()
   let ending = false
   let open = 0
@@ -237,8 +301,12 @@ const tracker = () => {
   }
   const track = <E, R>(
     handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>
-  ): Effect.Effect<HttpServerResponse.HttpServerResponse, E, R> =>
-    Effect.suspend(() => (ending ? Effect.succeed(errorAnswer("busy", { retryAfter: 1 })) : tracked(handler)))
+  ): Effect.Effect<HttpServerResponse.HttpServerResponse, E, R | HttpServerRequest.HttpServerRequest> =>
+    Effect.suspend((): Effect.Effect<HttpServerResponse.HttpServerResponse, E, R | HttpServerRequest.HttpServerRequest> =>
+      ending
+        ? Effect.map(HttpServerRequest.HttpServerRequest, (request) => busyAnswer(request, origins))
+        : tracked(handler)
+    )
   const tracked = <E, R>(handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
     Effect.withFiber((fiber) => {
       running.add(fiber)
@@ -281,7 +349,7 @@ export const serve = (options: HostOptions): Layer.Layer<Host, LimitsRefused | S
     const host = Context.get(context, Host)
     const chats = yield* Chats
     const gate = makeGate({ secret: host.secret, origins: host.origins, limits: host.limits, chats })
-    const requests = tracker()
+    const requests = tracker(host.origins)
     yield* HttpServer.serveEffect(requests.track(routes(gate, host)))
     // Added last, so run first: the mark, the host's end, the wait for the
     // streams and the interruption of the requests, then the server's own
