@@ -108,9 +108,9 @@ The rest:
 
 ## Checks
 
-- Full check: `just full`, about 220 s (the whole run at the landing of
-  `7b13f9c`: 1,517 tests in 219.62 s, at a load average of 4 to 10 with the
-  fleet at work; 263 s at the landing of `2e2c021`).
+- Full check: `just full`, about 290 s (the whole run at the landing of
+  `3530d32`: 1,552 tests in 289.20 s, at a load average of 4.48 / 15.61 /
+  22.94 with the fleet at work; 263 s at the landing of `2e2c021`).
 - Scoped check: `just scoped <test files>`, for the files of one change,
   with their paths from the root (for example
   `just scoped packages/core/src/memory.test.ts` or

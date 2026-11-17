@@ -239,8 +239,9 @@ test("the compute limit stops a program that loops, and not one that waits for a
     Effect.gen(function*() {
       const started = performance.now()
       const loop = yield* run("for (;;) {}")
+      // The fakes hold no `shell`: the text names no function.
       expect(loop).toEqual({
-        output: "The program was stopped: it computed for 2 s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\").",
+        output: "The program was stopped: it computed for 2 s with no function at work. A program has no timers. Do less in one program.",
         failed: true
       })
       expect(performance.now() - started).toBeLessThan(BOUND + 1000)

@@ -146,6 +146,11 @@ export const threadLayer = (options: Options = {}) => {
         // work, and starts again at each arm. The count of polls is the
         // worker's, and no function stops it.
         const controller = new AbortController()
+        // Its text names `shell` only where the program has that function
+        // (a terminal's chat); a program with none (a host's chat) is not
+        // sent to a function that is not there.
+        const stuck = "The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. " +
+          (calls.names.includes("shell") ? "A program has no timers: to wait, call shell(\"sleep 5\")." : "A program has no timers. Do less in one program.")
         // The functions' time at work: the time while at least one ran.
         let worked = 0
         let since = 0
@@ -157,9 +162,7 @@ export const threadLayer = (options: Options = {}) => {
         let over = false
         const arm = () => {
           timer = setTimeout(() => {
-            controller.abort(new Error(
-              "The program was stopped: it computed for " + Math.round(compute / 1000) + " s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\")."
-            ))
+            controller.abort(new Error(stuck))
           }, compute)
         }
         const disarm = () => {

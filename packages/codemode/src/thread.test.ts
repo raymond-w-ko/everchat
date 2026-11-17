@@ -29,9 +29,24 @@ const slow = Layer.succeed(
   })
 )
 
-// Runs `program` on the thread engine with `options` and the fake `slow`,
-// in a new store: its result, and how long it took.
-const run = (program: string, options: Options): Promise<Ran & { ms: number }> =>
+// The same `slow`, and a fake `shell` beside it: the functions of a
+// terminal's chat hold one of that name.
+const withShell = Layer.succeed(
+  Functions,
+  Functions.of({
+    declarations: [
+      { name: "slow", signature: "(ms)", description: "slow" },
+      { name: "shell", signature: "(command)", description: "shell" }
+    ],
+    names: ["slow", "shell"],
+    call: (name, args) => name === "slow" ? Effect.sleep(args[0] as number).pipe(Effect.as("slept")) : Effect.succeed("")
+  })
+)
+
+// Runs `program` on the thread engine with `options` and the fake `slow`
+// (or the functions of `fns`), in a new store: its result, and how long it
+// took.
+const run = (program: string, options: Options, fns: Layer.Layer<Functions> = slow): Promise<Ran & { ms: number }> =>
   withStore(
     newFile(),
     Effect.gen(function*() {
@@ -42,7 +57,7 @@ const run = (program: string, options: Options): Promise<Ran & { ms: number }> =
       const started = performance.now()
       const got = yield* box.run(program, { turn: turn.id, call })
       return { ...got, ms: Math.round(performance.now() - started) }
-    }).pipe(Effect.provide(threadLayer(options).pipe(Layer.provide(slow))))
+    }).pipe(Effect.provide(threadLayer(options).pipe(Layer.provide(fns))))
   )
 
 // Runs `programs` one after the other on the sandbox of `layer`, each in a
@@ -138,9 +153,10 @@ test("thread: the count is over the whole program: a function call does not star
 }, 30_000)
 
 test("thread: with no count, the compute limit stops a loop as before, and a count never stops a program", async () => {
+  // Its functions hold no `shell`: the text names no function.
   const loop = await run("for (;;) {}", { compute: 1000 })
   expect({ output: loop.output, failed: loop.failed }).toEqual({
-    output: "The program was stopped: it computed for 1 s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\").",
+    output: "The program was stopped: it computed for 1 s with no function at work. A program has no timers. Do less in one program.",
     failed: true
   })
   // The program that the count stops above runs to its end.
@@ -148,6 +164,16 @@ test("thread: with no count, the compute limit stops a loop as before, and a cou
   expect({ output: whole.output, failed: whole.failed }).toEqual({ output: "done", failed: false })
 }, 30_000)
 
+// The compute limit's text names `shell` only where the program has it
+// (review ec-ihoya): the text of a terminal's chat, to the byte. A limit
+// of 100 ms, said as "0 s", keeps the file's time.
+test("thread: with a function named shell, the compute limit's text says to wait with it", async () => {
+  const loop = await run("for (;;) {}", { compute: 100 }, withShell)
+  expect({ output: loop.output, failed: loop.failed }).toEqual({
+    output: "The program was stopped: it computed for 0 s with no function at work. A program has no timers: to wait, call shell(\"sleep 5\").",
+    failed: true
+  })
+}, 30_000)
 
 // The bound of a program that must run, as in sandbox.test.ts: far past a
 // stretch of its compute on a loaded host.
@@ -181,6 +207,12 @@ const withRows = (program: string, options: Options): Promise<Ran & { ms: number
     }).pipe(Effect.provide(threadLayer(options).pipe(Layer.provide(slow))))
   )
 
+// The deadline of the cases in which a function is at work when it falls:
+// the time at work is most of it, said as 1 or 2 s by its form (the short
+// gaps of compute before the long call grow under load).
+const DEADLINE = 2000
+const LATE = /^The program was stopped: it ran for 2 s, the limit of one program, and functions were at work for [12] s of that time\. Do less in one program\.$/
+
 const late = (working: number) =>
   "The program was stopped: it ran for 1 s, the limit of one program, and functions were at work for " + working + " s of that time. Do less in one program."
 
@@ -189,22 +221,39 @@ test("thread: with a deadline, a program that calls a slow function in a loop is
   // Two calls that end at once, then one that outlasts the deadline by far:
   // a function is at work when the deadline falls, at any load, with no two
   // timers that must stay in step.
-  const got = await withRows("for (let i = 0; i < 2; i++) await slow(0)\nfor (;;) await slow(600000)", { deadline: 1000 })
+  const got = await withRows("for (let i = 0; i < 2; i++) await slow(0)\nfor (;;) await slow(600000)", { deadline: DEADLINE })
   expect(got.failed).toBe(true)
-  // The time that functions were at work is most of the second, by its form.
-  expect(got.output).toMatch(/^The program was stopped: it ran for 1 s, the limit of one program, and functions were at work for [01] s of that time\. Do less in one program\.$/)
+  // The time that functions were at work is most of the deadline, and the
+  // call at work when it falls is counted: not 0 s.
+  expect(got.output).toMatch(LATE)
   // The function at work then is stopped, and its row is cut; the ones before it ended.
   const last = got.rows[got.rows.length - 1]!
   expect(last).toEqual({ status: "cut", output: STOPPED })
   expect(got.rows.slice(0, -1).every((row) => row.status === "done" && row.output === "slept")).toBe(true)
   expect(got.rows.length).toBeGreaterThanOrEqual(1)
   expect(got.rows.length).toBeLessThanOrEqual(3)
-  expect(got.ms).toBeGreaterThanOrEqual(1000)
+  expect(got.ms).toBeGreaterThanOrEqual(DEADLINE)
   expect(got.ms).toBeLessThan(20_000)
   // A loop with no function: the deadline stops it too, before the compute
   // limit (60 s), with 0 s of functions.
   const loop = await withRows("for (;;) {}", { deadline: 1000 })
   expect({ output: loop.output, failed: loop.failed, rows: loop.rows }).toEqual({ output: late(0), failed: true, rows: [] })
+}, 30_000)
+
+// (a2)
+test("thread: with a deadline, calls at work at one time are counted from the first one's start: a call not waited for, then short calls until the deadline", async () => {
+  // The first call is at work from the start to the deadline; the short
+  // ones start and end inside it, so no function is ever idle.
+  const got = await withRows("slow(600000)\nfor (;;) await slow(200)", { deadline: DEADLINE })
+  expect(got.failed).toBe(true)
+  expect(got.output).toMatch(LATE)
+  // The call not waited for is stopped at the program's end, its row cut;
+  // the short ones before the last ended.
+  expect(got.rows.length).toBeGreaterThanOrEqual(2)
+  expect(got.rows[0]).toEqual({ status: "cut", output: STOPPED })
+  expect(got.rows.slice(1, -1).every((row) => row.status === "done" && row.output === "slept")).toBe(true)
+  expect(got.ms).toBeGreaterThanOrEqual(DEADLINE)
+  expect(got.ms).toBeLessThan(20_000)
 }, 30_000)
 
 // (b)
