@@ -23,12 +23,22 @@
 // checks a list where it is built (functions.ts, `refusals`).
 //
 // The head is text that the program owns, so it is part of the executable.
-// The person's own rules (a file that the config names) go at its end.
+// The person sets two fields of it, and nothing more (packages/core/AGENTS.md,
+// "One system prompt for every kind of request"): a name, which replaces
+// "EverChat" in the fixed text (prompt.ts, `named`), and the person's own
+// rules (a file that the config names), which go at its end. The fixed text
+// cannot be replaced. With neither, the head has the bytes of a head with
+// no field.
 
 import { renderDeclarations } from "./codemode/declarations.ts"
 import type { CodemodeJsonSchema, CodemodeTool } from "./codemode/types.ts"
-import { PROMPT as prompt } from "./prompt.ts"
+import { NAME, named } from "./prompt.ts"
 import type { Head } from "./request.ts"
+
+// The name's members, for a host that checks a name before it gives one
+// (the config file of packages/local): the package exports this module,
+// and not prompt.ts.
+export { NAME, NAME_MAX, nameFault } from "./prompt.ts"
 
 // The name of the one tool.
 export const TOOL = "run"
@@ -78,8 +88,13 @@ The program is the body of an async function: use \`await\` and \`return\`.
 ${renderDeclarations({ globals: declarations.map((one) => ({ ...globalOf(one), execute: () => undefined })) })}`
 
 // The head for a chat. `declarations`: the functions that a program can
-// call. `rules`: the person's own instructions, if any.
-export const head = (declarations: ReadonlyArray<Declaration>, rules: string | null = null): Head => ({
-  system: rules === null || rules.trim() === "" ? prompt : prompt + "\n# The user's instructions\n\n" + rules.trim() + "\n",
-  tools: [{ name: TOOL, description: describe(declarations) }]
-})
+// call. `rules`: the person's own instructions, if any. `name`: the agent's
+// name in the fixed text, "EverChat" when none; one that `nameFault`
+// (prompt.ts) refuses throws.
+export const head = (declarations: ReadonlyArray<Declaration>, rules: string | null = null, name: string = NAME): Head => {
+  const prompt = named(name)
+  return {
+    system: rules === null || rules.trim() === "" ? prompt : prompt + "\n# The user's instructions\n\n" + rules.trim() + "\n",
+    tools: [{ name: TOOL, description: describe(declarations) }]
+  }
+}

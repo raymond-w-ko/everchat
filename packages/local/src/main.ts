@@ -92,11 +92,15 @@
 // The config file
 //
 // `everchat` reads `config.json` in the home (config.ts) one time, at its
-// start, before it opens the database: the picks and the output limit. A
-// flag of the launch wins over the file, and the file over the fixed
-// defaults. A fault of the file ends the start, with each fault on the
-// standard error and the code 1. `everchat inspect` and `everchat serve`
-// do not read it.
+// start, before it opens the database: the picks, the output limit, the
+// servers, the agent's name and the rules. A flag of the launch wins over
+// the file, and the file over the fixed defaults. The file of the rules
+// (the config's `rules`, a relative path against the work directory) is
+// read one time too, right after the config: the name and its text make
+// the one head of the launch, so a change of either applies at the next
+// launch. A fault of the file, or of the rules' file, ends the start, with
+// each fault on the standard error and the code 1. `everchat inspect` and
+// `everchat serve` do not read them.
 //
 // The connectors
 //
@@ -229,7 +233,9 @@ const NOTHING: Outside = { declarations: [], entries: [] }
 // `limit`: the output limit in characters; with none, limit.ts's.
 // `servers`: the config's servers, whose functions the launch loads
 // (connectors.ts); none when not given. `load`: the load's time limit in
-// ms, for a test; the client's when not given.
+// ms, for a test; the client's when not given. `name`, `rules`: the
+// agent's name and the text of the person's rules, for the head; none when
+// not given.
 export const layer = (given: {
   readonly home: string
   readonly file: string
@@ -239,6 +245,8 @@ export const layer = (given: {
   readonly limit?: number | undefined
   readonly servers?: ReadonlyArray<ConfigFile.Server> | undefined
   readonly load?: number | undefined
+  readonly name?: string | undefined
+  readonly rules?: string | undefined
 }) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
@@ -247,11 +255,11 @@ export const layer = (given: {
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(gatewayLayer)))), Layer.provideMerge(base))
   // The chat's functions: one list, for the head and the sandbox
   // (functions.ts, "One list for each stack"): the built-ins, then the
-  // functions from outside. The head is made one time, from that list, for
-  // the turns and the compactions.
+  // functions from outside. The head is made one time, from that list, the
+  // rules and the name, for the turns and the compactions.
   const stack = (outside: Outside) => {
     const declarations: ReadonlyArray<Declaration> = [...DECLARATIONS, ...outside.declarations]
-    const made = head(declarations)
+    const made = head(declarations, given.rules ?? null, given.name)
     const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, head: made })))
     const limits = limitLayer({ limit: given.limit }).pipe(Layer.provideMerge(memory))
     const functions = functionsLayer(declarations, { cwd: given.cwd, more: outside.entries }).pipe(Layer.provideMerge(limits))
@@ -360,6 +368,9 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
   const home = yield* homeOf
   // Before the database is opened: a fault of the file leaves no launch.
   const settings = yield* ConfigFile.read(home, process.env)
+  const cwd = process.cwd()
+  // The rules' file, against the work directory: a fault stops the start too.
+  const rules = yield* ConfigFile.rulesOf(settings, cwd, path.join(home, ConfigFile.FILE))
   const { model, effort, compactor: compacting } = ConfigFile.picks(
     { model: Option.getOrUndefined(given.model), effort: Option.getOrUndefined(given.effort), compactor: Option.getOrUndefined(given.compactor) },
     settings
@@ -371,8 +382,7 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
     ? undefined
     : { vendor: "openai", model: model ?? MODEL, effort: effort ?? EFFORT, speed: "slow" }
   const compactor: Pick = { vendor: "openai", model: compacting ?? COMPACTOR, effort: "low", speed: "slow" }
-  const cwd = process.cwd()
-  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor, limit: settings.limit, servers: settings.servers })
+  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor, limit: settings.limit, servers: settings.servers, name: settings.name, rules })
 
   if ((yield* stdio.stdinIsTerminal) && (yield* stdio.stdoutIsTerminal)) {
     // The failures of the terminal's input, until the process ends

@@ -89,10 +89,25 @@ How to test them:
     `"deny"`, for each of its tools) and `tools` (a tool's name to one of
     the three, which wins for that tool); with none, a tool is `"auto"`.
     A launch loads them ("The connectors").
+  - `name`: the agent's name in the system prompt, in place of "EverChat"
+    (the form: `nameFault` of `packages/core/src/prompt.ts`, and
+    `packages/core/AGENTS.md`). It changes no other text of the program:
+    not the terminal, not an error's sentence, not `--help`.
+  - `rules`: the path of a file of the person's own instructions, 1 to 4,096
+    characters. A relative path is resolved against the work directory, not
+    the home. `rulesOf` of `config.ts` reads the file one time, right after
+    the config, at most 32,768 bytes (`RULES_MAX`) of UTF-8; a blank file
+    gives no rules. Its text joins the system prompt of every request (the
+    turns, the compactions and the subagents), under its own heading at the
+    end. A file that is missing, not a file, unreadable, over the cap or not
+    UTF-8 is a fault of the start that names the field `rules`, never a
+    part of the content.
+  - The name and the rules make the launch's one head: a change of either
+    applies at the next launch. Neither takes `${NAME}`.
   - A field that is not in this list is refused, at any depth.
 - The faults: a file that cannot be read, that is not JSON or not one
   object, a field of a wrong type or out of its bounds, an unknown field, an
-  unset variable. Each fault stops the start: the program writes it as one
+  unset variable, a rules file that cannot be used. Each fault stops the start: the program writes it as one
   line on the standard error, with the file's path and the field's path,
   and ends with the code 1, before the screen is up and before the database
   is opened.

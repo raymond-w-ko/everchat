@@ -9,6 +9,43 @@
 // tools. Its bytes are part of the prompt cache's key: change it only on
 // purpose (packages/core/AGENTS.md, "One system prompt for every kind of
 // request"). In this file, each \` stands for a backtick.
+//
+// The person may give the agent a name (the config file's `name`): it
+// replaces each "EverChat" of the text (16 places), and nothing else of it
+// (`named`). The name is checked here, so that no host can put a line end,
+// a control character or a long text into the fixed text (`nameFault`).
+// With no name the text keeps its bytes: `named(NAME) === PROMPT`.
+
+// The name that the fixed text says.
+export const NAME = "EverChat"
+
+// The most characters of a name.
+export const NAME_MAX = 64
+
+// A name's form: letters and digits, and between two of them one space,
+// `.`, `_` or `-`. So it starts and ends with a letter or a digit, and has
+// no line end and no control character.
+const FORM = /^[\p{L}\p{N}]+(?:[ ._-][\p{L}\p{N}]+)*$/u
+
+// Why a name is refused, as a sentence that does not quote it; undefined
+// for a name that is taken. Its length is counted in characters (code
+// points), not in UTF-16 units.
+export const nameFault = (name: unknown): string | undefined => {
+  if (typeof name !== "string") return "Expected a name that is a text"
+  const length = [...name].length
+  if (length < 1 || length > NAME_MAX) return `Expected a name of 1 to ${NAME_MAX} characters`
+  if (!FORM.test(name)) return "Expected a name of letters and digits, with one space, ., _ or - between two of them"
+  return undefined
+}
+
+// The fixed text, with each "EverChat" replaced by `name`. A name that
+// `nameFault` refuses is a defect of the host that gives it: it throws.
+export const named = (name: string): string => {
+  const fault = nameFault(name)
+  if (fault !== undefined) throw new Error("named: " + fault)
+  // Split and join, not `replaceAll`: a `$` of a replacement is a pattern.
+  return PROMPT.split(NAME).join(name)
+}
 
 export const PROMPT = `You are EverChat, an AI agent that works for one user in a single chat that never
 ends. Each request to you is a turn, a compaction, or a subagent task: the view

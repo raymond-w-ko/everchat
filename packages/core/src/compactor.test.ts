@@ -10,6 +10,7 @@ import { Ask, AskDelay } from "./ask.ts"
 import { Cache } from "./cache.ts"
 import * as RealCompactor from "./compactor.ts"
 import { head, TOOL } from "./head.ts"
+import { NAME, named, nameFault, PROMPT } from "./prompt.ts"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
 import { limitLayer } from "@everchat/local/limitfile"
 import * as path from "node:path"
@@ -58,6 +59,61 @@ test("the head's bytes are the ones that the prompt cache was written for", () =
   // request"). Change this hash only on purpose.
   const hash = createHash("sha256").update(JSON.stringify(head(DECLARATIONS))).digest("hex")
   assert.equal(hash, "52cab4d3bef1ebac0fd4125fa6db9eefac15f977867448fcff28e2457136f826")
+})
+
+// The times that a text holds a word.
+const count = (text: string, word: string) => text.split(word).length - 1
+
+test("the fixed text says EverChat in 16 places, and with no name the head keeps them", () => {
+  assert.equal(NAME, "EverChat")
+  assert.equal(count(PROMPT, "EverChat"), 16)
+  assert.equal(named(NAME), PROMPT)
+  assert.equal(head(DECLARATIONS).system, PROMPT)
+  assert.deepStrictEqual(head(DECLARATIONS, null, NAME), head(DECLARATIONS))
+})
+
+test("a name replaces each of the 16 places, and only them; the rules still come at the end under their heading", () => {
+  const ada = head(DECLARATIONS, null, "Ada")
+  assert.equal(count(ada.system, "Ada"), 16)
+  assert.equal(count(ada.system, "EverChat"), 0)
+  // Nothing else of the text changed: put the old name back, and it is the fixed text.
+  assert.equal(ada.system.split("Ada").join("EverChat"), PROMPT)
+  assert.ok(ada.system.startsWith("You are Ada, an AI agent that works for one user"))
+  assert.deepStrictEqual(ada.tools, head(DECLARATIONS).tools)
+  const both = head(DECLARATIONS, "  Answer in English.  ", "Ada")
+  assert.equal(both.system, ada.system + "\n# The user's instructions\n\nAnswer in English.\n")
+  assert.equal(count(both.system, "Ada"), 16)
+  assert.deepStrictEqual(head(DECLARATIONS, "  ", "Ada"), ada)
+})
+
+test("a name is refused, each with its sentence, and named throws for it; the taken ones are taken", () => {
+  const LENGTH = "Expected a name of 1 to 64 characters"
+  const FORM = "Expected a name of letters and digits, with one space, ., _ or - between two of them"
+  const refused: ReadonlyArray<readonly [unknown, string]> = [
+    ["", LENGTH],
+    ["a".repeat(65), LENGTH],
+    ["Ada\nLovelace", FORM],
+    ["Ada\tLovelace", FORM],
+    ["Ada\u009b", FORM],
+    [" Ada", FORM],
+    ["Ada!", FORM],
+    ["Ada ", FORM],
+    ["Ada  2", FORM],
+    [5, "Expected a name that is a text"]
+  ]
+  for (const [name, why] of refused) {
+    assert.equal(nameFault(name), why, JSON.stringify(name))
+    if (typeof name === "string") {
+      assert.throws(() => named(name), { message: "named: " + why })
+      assert.throws(() => head(DECLARATIONS, null, name), { message: "named: " + why })
+    }
+  }
+  for (const name of ["Ada", "Ada 2", "Zo\u00eb", "my-agent_1.0", "a".repeat(64), "\u00e9".repeat(64), "\u{1d400}".repeat(64)]) {
+    assert.equal(nameFault(name), undefined, JSON.stringify(name))
+    assert.equal(count(named(name), name), 16)
+  }
+  // Counted in characters: 65 letters of two UTF-16 units each are refused.
+  assert.equal(nameFault("\u{1d400}".repeat(65)), LENGTH)
 })
 
 test("a compaction is one patient request with the chat's id and head, and its usage is written with its node", async () => {

@@ -431,6 +431,49 @@ test("a config file sets the picks and the output limit, and a flag wins over it
   expect(pty.code).toBe(0)
 })
 
+// The system text of each turn's head, as its row holds it.
+const heads = (file: string) =>
+  rows<{ body: string }>(file, "select h.body from everchat_turn t join everchat_head h on h.chat = t.chat and h.n = t.head order by t.n").map((one) => (JSON.parse(one.body) as { system: string }).system)
+
+test("a config file names the agent and a rules file in the work directory: the head of the turn's row has both", async () => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  configure(at, { name: "Ada", rules: "RULES.md" })
+  fs.writeFileSync(path.join(at.work, "RULES.md"), "Answer in haiku.\n")
+  // A file of the same name in the home is not the one read.
+  fs.writeFileSync(path.join(at.home, "RULES.md"), "Answer in prose.\n")
+  const pty = start(at, server.address)
+  await pty.sees(IDLE)
+  pty.type("hello\r")
+  await pty.sees("Hello.", IDLE)
+  pty.type("/quit\r")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  const [system, ...more] = heads(at.file)
+  expect(more).toEqual([])
+  expect(system!.startsWith("You are Ada, an AI agent")).toBe(true)
+  expect(system!.split("Ada").length - 1).toBe(16)
+  expect(system).not.toContain("EverChat")
+  expect(system!.endsWith("\n# The user's instructions\n\nAnswer in haiku.\n")).toBe(true)
+  expect(system).not.toContain("prose")
+  // The request carried that head.
+  expect(JSON.stringify(server.bodies[0])).toContain("You are Ada, an AI agent")
+})
+
+test("a launch whose rules file is missing does not start: the code 1, the field rules on the standard error, no screen and no database", async () => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const config = configure(at, { name: "Ada", rules: "missing.md" })
+  const stderr = path.join(at.root, "stderr")
+  const pty = start(at, server.address, undefined, stderr)
+  await pty.ends()
+  expect(pty.code).toBe(1)
+  expect(fs.readFileSync(stderr, "utf8")).toBe("everchat: " + config + ": rules: no such file\n")
+  expect(pty.raw).not.toContain("\x1b[?2004h")
+  expect(fs.existsSync(at.file)).toBe(false)
+  expect(server.bodies.length).toBe(0)
+})
+
 test("when only one of the standard input and the standard output is a terminal, the program works in pipe mode", async () => {
   const at = place()
   const server = fake(() => text("Hello."))

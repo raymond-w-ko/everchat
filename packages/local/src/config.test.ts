@@ -4,11 +4,11 @@
 
 import { expect, test } from "bun:test"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Effect, Exit } from "effect"
+import { Effect, Exit, FileSystem, Stream } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { ConfigFault, FILE, NONE, picks, read, type Settings, type StdioServer } from "./config.ts"
+import { ConfigFault, FILE, NONE, picks, read, RULES_IO, RULES_MAX, rulesOf, type RulesIo, type Settings, type StdioServer } from "./config.ts"
 
 const home = () => fs.mkdtempSync(path.join(os.tmpdir(), "everchat-config-"))
 
@@ -47,7 +47,7 @@ const stdio = (name: string, rest: Partial<StdioServer> = {}): StdioServer => ({
 test("no file and the file {} give no setting", async () => {
   expect(await settings(home())).toEqual(NONE)
   expect(await settings(write({}))).toEqual(NONE)
-  expect(NONE).toEqual({ model: undefined, effort: undefined, compactor: undefined, limit: undefined, servers: [] })
+  expect(Object.entries(NONE)).toEqual([["model", undefined], ["effort", undefined], ["compactor", undefined], ["limit", undefined], ["servers", []], ["name", undefined], ["rules", undefined]])
 })
 
 test("each field: the picks, the limit, and a server of each form with its approvals", async () => {
@@ -101,9 +101,11 @@ test("a fault: a file that cannot be read", async () => {
 })
 
 test("a fault: an unknown field at the top, and inside a server", async () => {
-  expect(await faults(write({ model: "gpt", name: "me" }))).toEqual(["name: Unknown field"])
+  expect(await faults(write({ model: "gpt", nick: "me" }))).toEqual(["nick: Unknown field"])
   expect(await faults(write({ servers: { git: { command: "git-server", timeout: 5 } } }))).toEqual(["servers.git.timeout: Unknown field"])
-  expect(await faults(write({ servers: { git: { command: "git-server", tools: { push: "deny" }, env: { A: "1" } } }, rules: "x" }))).toEqual(["rules: Unknown field"])
+  expect(await faults(write({ servers: { git: { command: "git-server", tools: { push: "deny" }, env: { A: "1" } } }, prompt: "x" }))).toEqual(["prompt: Unknown field"])
+  // The two fields of the system prompt are known, and a field beside them is not.
+  expect(await faults(write({ name: "Ada", rules: "AGENTS.md", system: "x" }))).toEqual(["system: Unknown field"])
 })
 
 test("a fault: a field of a wrong type, at each depth, all of them", async () => {
@@ -241,4 +243,345 @@ test("a key such as __proto__ is a key, in the servers, a server's texts and its
   expect(server?.name).toBe("__proto__")
   expect(server?.kind === "stdio" && Object.entries(server.env)).toEqual([["__proto__", "v"]])
   expect(server && Object.entries(server.tools)).toEqual([["__proto__", "deny"]])
+})
+
+test("name and rules are decoded as written: no ${VAR} in either", async () => {
+  const got = await settings(write({ name: "Zo\u00eb 2", rules: "../notes/${RULES}.md" }), { RULES: "never" })
+  expect([got.name, got.rules]).toEqual(["Zo\u00eb 2", "../notes/${RULES}.md"])
+  const ada = await settings(write({ name: "my-agent_1.0", rules: "/abs/AGENTS.md" }))
+  expect([ada.name, ada.rules]).toEqual(["my-agent_1.0", "/abs/AGENTS.md"])
+  expect((await settings(write({ rules: "r".repeat(4_096) }))).rules?.length).toBe(4_096)
+})
+
+test("a fault: a name that the prompt refuses, an empty or a long rules path, and a wrong type, each naming its field", async () => {
+  const FORM = "name: Expected a name of letters and digits, with one space, ., _ or - between two of them"
+  expect(await faults(write({ name: "" }))).toEqual(["name: Expected a name of 1 to 64 characters"])
+  expect(await faults(write({ name: "a".repeat(65) }))).toEqual(["name: Expected a name of 1 to 64 characters"])
+  for (const name of ["Ada\nLovelace", "Ada\t", "Ada\u009b", " Ada", "Ada!", "${NAME}"]) expect(await faults(write({ name }), { NAME: "Ada" })).toEqual([FORM])
+  expect(await faults(write({ rules: "" }))).toEqual(["rules: Expected a path of 1 to 4096 characters"])
+  expect(await faults(write({ rules: "r".repeat(4_097) }))).toEqual(["rules: Expected a path of 1 to 4096 characters"])
+  expect(await faults(write({ name: 5, rules: ["a"] }))).toEqual(["name: Expected string", "rules: Expected string"])
+})
+
+// rulesOf: a work directory and a home, each in a root of its own case.
+const rooms = () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-rules-"))
+  const work = path.join(root, "work")
+  const home = path.join(root, "home")
+  fs.mkdirSync(work)
+  fs.mkdirSync(home)
+  return { root, work, home, config: path.join(home, FILE) }
+}
+
+const rulesExit = (rules: string | undefined, cwd: string, config: string) =>
+  Effect.runPromise(Effect.exit(rulesOf({ ...NONE, rules }, cwd, config)).pipe(Effect.provide(BunServices.layer)))
+
+const rulesText = async (rules: string | undefined, cwd: string, config: string) => {
+  const exit = await rulesExit(rules, cwd, config)
+  if (Exit.isFailure(exit)) throw new Error("the rules were refused: " + JSON.stringify(exit.cause))
+  return exit.value
+}
+
+// The fault's lines; its file is the config file, and no line holds the content.
+const rulesFaults = async (rules: string, cwd: string, config: string, content?: string) => {
+  const exit = await rulesExit(rules, cwd, config)
+  if (Exit.isSuccess(exit)) throw new Error("the rules were taken, " + String(exit.value?.length) + " characters")
+  const error = exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error
+  expect(error).toBeInstanceOf(ConfigFault)
+  const fault = error as ConfigFault
+  expect(fault.file).toBe(config)
+  expect(fault.message).toBe(fault.faults.map((one) => config + ": " + one).join("\n"))
+  if (content !== undefined) expect(JSON.stringify({ ...fault, message: fault.message })).not.toContain(content)
+  return fault.faults
+}
+
+test("rulesOf: no rules gives none; a relative path is read against the work directory, never the home", async () => {
+  const at = rooms()
+  expect(await rulesText(undefined, at.work, at.config)).toBeUndefined()
+  fs.writeFileSync(path.join(at.work, "AGENTS.md"), "Rules of the work.\n")
+  fs.writeFileSync(path.join(at.home, "AGENTS.md"), "Rules of the home.\n")
+  expect(await rulesText("AGENTS.md", at.work, at.config)).toBe("Rules of the work.\n")
+  fs.mkdirSync(path.join(at.work, "docs"))
+  fs.writeFileSync(path.join(at.work, "docs", "me.md"), "Deeper.")
+  expect(await rulesText("./docs/me.md", at.work, at.config)).toBe("Deeper.")
+  expect(await rulesText("../home/AGENTS.md", at.work, at.config)).toBe("Rules of the home.\n")
+  // Only in the home: the work directory has none, so there is no such file.
+  fs.writeFileSync(path.join(at.home, "only-home.md"), "Home only.")
+  expect(await rulesFaults("only-home.md", at.work, at.config)).toEqual(["rules: no such file"])
+})
+
+test("rulesOf: an absolute path is read as it is", async () => {
+  const at = rooms()
+  const file = path.join(at.root, "elsewhere.md")
+  fs.writeFileSync(file, "Absolute rules.")
+  expect(await rulesText(file, at.work, at.config)).toBe("Absolute rules.")
+  expect(await rulesText(file, at.home, at.config)).toBe("Absolute rules.")
+})
+
+test("rulesOf: a fault for no such file and for a directory, naming the field and not the path", async () => {
+  const at = rooms()
+  expect(await rulesFaults("missing.md", at.work, at.config)).toEqual(["rules: no such file"])
+  expect(await rulesFaults(path.join(at.root, "missing.md"), at.work, at.config)).toEqual(["rules: no such file"])
+  fs.mkdirSync(path.join(at.work, "dir"))
+  const faulted = await rulesFaults("dir", at.work, at.config)
+  expect(faulted).toEqual(["rules: not a file"])
+  expect(faulted.join("")).not.toContain(at.work)
+})
+
+// rulesOf with the platform's files, but a `stat` that runs `after` once
+// the real one has looked at the path: a path that changes between the
+// first check and the open. `reopened`, when given, runs before each other
+// way of the platform to open or read the path, so that a read that is not
+// of the one descriptor sees another object.
+const rulesSwapped = (rules: string, cwd: string, config: string, after: (file: string) => void, reopened?: (file: string) => void, io: RulesIo = RULES_IO) =>
+  Effect.runPromise(
+    Effect.gen(function*() {
+      const real = yield* FileSystem.FileSystem
+      const before = (file: string) => Effect.sync(() => reopened?.(file))
+      const swapped: FileSystem.FileSystem = {
+        ...real,
+        stat: (file) => real.stat(file).pipe(Effect.tap(() => Effect.sync(() => after(file)))),
+        open: (file, options) => Effect.andThen(before(file), real.open(file, options)),
+        readFile: (file) => Effect.andThen(before(file), real.readFile(file)),
+        readFileString: (file, encoding) => Effect.andThen(before(file), real.readFileString(file, encoding)),
+        stream: (file, options) => Stream.unwrap(Effect.as(before(file), real.stream(file, options)))
+      }
+      return yield* Effect.exit(rulesOf({ ...NONE, rules }, cwd, config, io).pipe(Effect.provideService(FileSystem.FileSystem, swapped)))
+    }).pipe(Effect.provide(BunServices.layer))
+  )
+
+// The operations of `RULES_IO`, each forwarded to it, with a log: the
+// descriptor that each open gave, and the descriptor of each fstat, read and
+// close. `afterFstat` runs at once after the real fstat has returned.
+const watched = (afterFstat: () => void = () => {}) => {
+  const log = { opens: [] as Array<number>, fstats: [] as Array<number>, reads: [] as Array<number>, closes: [] as Array<number> }
+  const io: RulesIo = {
+    open: (file) => {
+      const fd = RULES_IO.open(file)
+      log.opens.push(fd)
+      return fd
+    },
+    fstat: (fd) => {
+      const stats = RULES_IO.fstat(fd)
+      log.fstats.push(fd)
+      afterFstat()
+      return stats
+    },
+    read: (fd, bytes, offset, length, position) => {
+      log.reads.push(fd)
+      return RULES_IO.read(fd, bytes, offset, length, position)
+    },
+    close: (fd) => {
+      log.closes.push(fd)
+      RULES_IO.close(fd)
+    }
+  }
+  return { io, log }
+}
+
+// What the log says of the one descriptor: opened once, its fstat, its
+// reads (each of that descriptor), and its closes.
+const once = (log: ReturnType<typeof watched>["log"]) => ({
+  opens: log.opens.length,
+  fstatOfIt: log.fstats.length === 1 && log.fstats[0] === log.opens[0],
+  reads: log.reads.length,
+  readsOfIt: log.reads.every((fd) => fd === log.opens[0]),
+  closedOnce: log.closes.length === 1 && log.closes[0] === log.opens[0]
+})
+
+const faultsOf = (exit: Exit.Exit<string | undefined, ConfigFault>) => {
+  if (Exit.isSuccess(exit)) throw new Error("the rules were taken, " + String(exit.value?.length) + " characters")
+  const error = exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error
+  expect(error).toBeInstanceOf(ConfigFault)
+  return (error as ConfigFault).faults
+}
+
+// A link `rules.md` in the work directory to an ordinary file with a marker.
+const linked = () => {
+  const at = rooms()
+  fs.writeFileSync(path.join(at.root, "first.md"), "marker-first-41d9")
+  fs.symlinkSync(path.join(at.root, "first.md"), path.join(at.work, "rules.md"))
+  return at
+}
+
+const retarget = (link: string, to: string) => {
+  fs.unlinkSync(link)
+  fs.symlinkSync(to, link)
+}
+
+const HAS_FIFO = Bun.which("mkfifo") !== null
+const fifo = (at: string) => {
+  const made = Bun.spawnSync(["mkfifo", at])
+  if (made.exitCode !== 0) throw new Error("mkfifo failed")
+  return at
+}
+
+// The bound of time of a case with a pipe: rulesOf runs in a child, so that
+// an open that waits holds the child and not this run; past the bound the
+// child is killed and the case fails. The child gives the faults (or the
+// text) as JSON on its output.
+const BOUND = 20_000
+const inChild = async (rules: string, cwd: string, config: string, retargetTo: string | undefined) => {
+  const code = `
+    import * as BunServices from ${JSON.stringify(import.meta.resolve("@effect/platform-bun/BunServices"))}
+    import { Effect, Exit, FileSystem } from ${JSON.stringify(import.meta.resolve("effect"))}
+    import * as fs from "node:fs"
+    import { NONE, RULES_IO, rulesOf } from ${JSON.stringify(import.meta.resolve("./config.ts"))}
+    const [rules, cwd, config, to] = process.argv.slice(-4)
+    const log = { opens: [], reads: [], closes: [] }
+    const io = {
+      open: (file) => { const fd = RULES_IO.open(file); log.opens.push(fd); return fd },
+      fstat: (fd) => RULES_IO.fstat(fd),
+      read: (fd, bytes, offset, length, position) => { log.reads.push(fd); return RULES_IO.read(fd, bytes, offset, length, position) },
+      close: (fd) => { log.closes.push(fd); RULES_IO.close(fd) }
+    }
+    const exit = await Effect.runPromise(Effect.gen(function*() {
+      const real = yield* FileSystem.FileSystem
+      const swapped = { ...real, stat: (file) => real.stat(file).pipe(Effect.tap(() => Effect.sync(() => {
+        if (to !== "") { fs.unlinkSync(file); fs.symlinkSync(to, file) }
+      }))) }
+      return yield* Effect.exit(rulesOf({ ...NONE, rules }, cwd, config, io).pipe(Effect.provideService(FileSystem.FileSystem, swapped)))
+    }).pipe(Effect.provide(BunServices.layer)))
+    const error = Exit.isFailure(exit) ? exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error : undefined
+    const opened = { opens: log.opens.length, reads: log.reads.length, closedOnce: log.closes.length === 1 && log.closes[0] === log.opens[0] }
+    console.log(JSON.stringify({ ...(Exit.isSuccess(exit) ? { text: exit.value ?? null } : { faults: error?.faults ?? null }), opened }))
+  `
+  const child = Bun.spawn([process.execPath, "-e", code, rules, cwd, config, retargetTo ?? ""], { cwd, env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" })
+  let killed = false
+  const timer = setTimeout(() => {
+    killed = true
+    child.kill("SIGKILL")
+  }, BOUND)
+  const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+  clearTimeout(timer)
+  if (killed) throw new Error("rulesOf waited: the child was killed after " + BOUND + " ms")
+  if (child.exitCode !== 0) throw new Error("the child failed: " + err)
+  return JSON.parse(out) as {
+    readonly text?: string | null
+    readonly faults?: ReadonlyArray<string> | null
+    readonly opened: { readonly opens: number; readonly reads: number; readonly closedOnce: boolean }
+  }
+}
+
+test("rulesOf: a link to an ordinary file is followed", async () => {
+  const at = linked()
+  expect(await rulesText("rules.md", at.work, at.config)).toBe("marker-first-41d9")
+})
+
+test("rulesOf: a device named at once is refused, never opened", async () => {
+  const at = rooms()
+  expect(await rulesFaults("/dev/null", at.work, at.config)).toEqual(["rules: not a file"])
+})
+
+test.skipIf(!HAS_FIFO)("rulesOf: a FIFO with no writer named at once is refused, within the case's bound", async () => {
+  const at = rooms()
+  fifo(path.join(at.work, "pipe.md"))
+  expect(await inChild("pipe.md", at.work, at.config, undefined)).toEqual({ faults: ["rules: not a file"], opened: { opens: 0, reads: 0, closedOnce: false } })
+}, BOUND + 10_000)
+
+test("rulesOf: a link that points to a device after the first check is refused, and nothing of it is read", async () => {
+  const at = linked()
+  let swapped = false
+  const { io, log } = watched()
+  const exit = await rulesSwapped("rules.md", at.work, at.config, (file) => {
+    retarget(file, "/dev/null")
+    swapped = true
+  }, undefined, io)
+  expect(swapped).toBe(true)
+  const faults = faultsOf(exit)
+  expect(faults).toEqual(["rules: not a file"])
+  // The device was opened, and its fstat refused it: no read at all, and
+  // its descriptor closed one time.
+  expect(once(log)).toEqual({ opens: 1, fstatOfIt: true, reads: 0, readsOfIt: true, closedOnce: true })
+  expect(JSON.stringify(faults)).not.toContain("marker-first")
+  expect(JSON.stringify(faults)).not.toContain(at.root)
+})
+
+test.skipIf(!HAS_FIFO)("rulesOf: a link that points to a FIFO with no writer after the first check is refused without a wait", async () => {
+  const at = linked()
+  const pipe = fifo(path.join(at.root, "pipe"))
+  // Opened without a wait, refused by its fstat: no read, closed one time.
+  expect(await inChild("rules.md", at.work, at.config, pipe)).toEqual({ faults: ["rules: not a file"], opened: { opens: 1, reads: 0, closedOnce: true } })
+  // The child did retarget the link.
+  expect(fs.readlinkSync(path.join(at.work, "rules.md"))).toBe(pipe)
+}, BOUND + 10_000)
+
+test("rulesOf: a link that points to another ordinary file after the first check gives that file's text, read from the one descriptor", async () => {
+  const at = linked()
+  fs.writeFileSync(path.join(at.root, "second.md"), "marker-second-8a3c")
+  const link = path.join(at.work, "rules.md")
+  // Any other open or read of the path through the platform finds a device:
+  // the text comes only from the descriptor that was checked.
+  const exit = await rulesSwapped("rules.md", at.work, at.config, (file) => retarget(file, path.join(at.root, "second.md")), (file) => retarget(file, "/dev/null"))
+  expect(exit).toEqual(Exit.succeed("marker-second-8a3c"))
+  expect(fs.readlinkSync(link)).toBe(path.join(at.root, "second.md"))
+})
+
+// rulesOf with the platform's files and the operations `io`.
+const rulesWith = (rules: string, cwd: string, config: string, io: RulesIo) =>
+  Effect.runPromise(Effect.exit(rulesOf({ ...NONE, rules }, cwd, config, io)).pipe(Effect.provide(BunServices.layer)))
+
+test("rulesOf: a link that points to another ordinary file at once after the fstat of the opened file gives the first file's text: one open, each read of its descriptor, closed one time", async () => {
+  const at = linked()
+  const second = path.join(at.root, "second.md")
+  fs.writeFileSync(second, "marker-second-8a3c")
+  const link = path.join(at.work, "rules.md")
+  const { io, log } = watched(() => retarget(link, second))
+  const exit = await rulesWith("rules.md", at.work, at.config, io)
+  // The link did point to the second file while the bytes were read.
+  expect(fs.readlinkSync(link)).toBe(second)
+  expect(exit).toEqual(Exit.succeed("marker-first-41d9"))
+  expect(once(log)).toEqual({ opens: 1, fstatOfIt: true, reads: log.reads.length, readsOfIt: true, closedOnce: true })
+  expect(log.reads.length).toBeGreaterThan(0)
+})
+
+test("rulesOf: a link that points to a device at once after the fstat of the opened file gives the first file's text: the path is not looked at again", async () => {
+  const at = linked()
+  const link = path.join(at.work, "rules.md")
+  const { io, log } = watched(() => retarget(link, "/dev/null"))
+  const exit = await rulesWith("rules.md", at.work, at.config, io)
+  expect(fs.readlinkSync(link)).toBe("/dev/null")
+  expect(exit).toEqual(Exit.succeed("marker-first-41d9"))
+  expect(once(log)).toEqual({ opens: 1, fstatOfIt: true, reads: log.reads.length, readsOfIt: true, closedOnce: true })
+  expect(log.reads.length).toBeGreaterThan(0)
+})
+
+test("rulesOf: a file that grows past the cap after the first check is refused", async () => {
+  const at = rooms()
+  fs.writeFileSync(path.join(at.work, "growing.md"), "a")
+  const exit = await rulesSwapped("growing.md", at.work, at.config, (file) => fs.writeFileSync(file, "g".repeat(RULES_MAX + 1)))
+  expect(faultsOf(exit)).toEqual(["rules: Expected a file of at most 32768 bytes"])
+})
+
+test("rulesOf: a file of 32,768 bytes is taken, one of 32,769 is refused", async () => {
+  const at = rooms()
+  // A two-byte character at the end, so that the cap is in bytes, not characters.
+  const full = "r".repeat(RULES_MAX - 2) + "\u00e9"
+  expect(Buffer.byteLength(full)).toBe(32_768)
+  fs.writeFileSync(path.join(at.work, "full.md"), full)
+  expect(await rulesText("full.md", at.work, at.config)).toBe(full)
+  const over = "s".repeat(RULES_MAX - 1) + "\u00e9"
+  expect(Buffer.byteLength(over)).toBe(32_769)
+  fs.writeFileSync(path.join(at.work, "over.md"), over)
+  expect(await rulesFaults("over.md", at.work, at.config, "sss")).toEqual(["rules: Expected a file of at most 32768 bytes"])
+  // A much larger file is refused the same way.
+  fs.writeFileSync(path.join(at.work, "huge.md"), "h".repeat(1_000_000))
+  expect(await rulesFaults("huge.md", at.work, at.config, "hhh")).toEqual(["rules: Expected a file of at most 32768 bytes"])
+})
+
+test("rulesOf: bytes that are not UTF-8 are refused, without the content", async () => {
+  const at = rooms()
+  fs.writeFileSync(path.join(at.work, "latin1.md"), Buffer.concat([Buffer.from("marker-rules-7c2e "), Buffer.from([0xe9, 0x74, 0xe9])]))
+  expect(await rulesFaults("latin1.md", at.work, at.config, "marker-rules-7c2e")).toEqual(["rules: Expected a file of UTF-8 text"])
+  // A sequence cut at the end is not UTF-8 either.
+  fs.writeFileSync(path.join(at.work, "cut.md"), Buffer.from([0x41, 0xc3]))
+  expect(await rulesFaults("cut.md", at.work, at.config)).toEqual(["rules: Expected a file of UTF-8 text"])
+})
+
+test("rulesOf: a blank file gives no rules", async () => {
+  const at = rooms()
+  fs.writeFileSync(path.join(at.work, "empty.md"), "")
+  fs.writeFileSync(path.join(at.work, "blank.md"), "  \n\t\n  ")
+  expect(await rulesText("empty.md", at.work, at.config)).toBeUndefined()
+  expect(await rulesText("blank.md", at.work, at.config)).toBeUndefined()
 })

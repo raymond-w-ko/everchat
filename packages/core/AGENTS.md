@@ -61,6 +61,24 @@ Two rules follow:
 - The prompt does not enforce what a role may do. The code does: a function
   that a subagent may not use returns an error.
 
+The person sets two fields of the prompt, and nothing more. The fixed text
+(`PROMPT` in `packages/core/src/prompt.ts`) cannot be replaced: no file and
+no option does it.
+
+- The name: `head(declarations, rules, name)` puts it in place of each
+  "EverChat" of the fixed text (16 places, `named` of `prompt.ts`), and
+  nowhere else. A name is 1 to 64 characters: letters and digits (`\p{L}`,
+  `\p{N}`), and between two of them one space, `.`, `_` or `-`; so it starts
+  and ends with a letter or a digit, and has no line end and no control
+  character. `nameFault` says why a name is refused; `named` and `head`
+  throw for one (a defect of the host). `named(NAME)` is `PROMPT`.
+- The rules: the person's own instructions, appended at the end under
+  "# The user's instructions". A blank text is none.
+
+With neither field the head keeps the bytes of a head with none (the hash
+case of `compactor.test.ts`). A host gives both at the load, so a change
+applies at the next load.
+
 A computer task is the exception. It has no view and another tool, so it
 keeps its own prompt.
 
