@@ -12,7 +12,7 @@ import { Ask, AskDelay } from "./ask.ts"
 import { Cache } from "./cache.ts"
 import { head } from "./head.ts"
 import { Memory } from "./memory.ts"
-import type { Item, Reply, Request } from "./request.ts"
+import type { Head, Item, Reply, Request } from "./request.ts"
 import { chatsLayer, storeLayer } from "@everchat/sqlite/bun"
 import { Chats, Store, StoreError } from "./store.ts"
 import { limitLayer } from "@everchat/local/limitfile"
@@ -27,7 +27,8 @@ type Run = (program: string) => Effect.Effect<{ output: string; failed: boolean 
 // fake sandbox, and the turn loop. `over` puts a wrapper over the store or
 // the memory that the turn loop gets; `over.base` is a store in place of the
 // file's chat; `over.hub` is the hub's capacity; `over.clock` runs it all on
-// a TestClock.
+// a TestClock; `over.head` is the stack's head (`head(DECLARATIONS)` when
+// not given).
 const withTurns = <A, E>(
   file: string,
   wire: ReturnType<typeof fakeWire>,
@@ -40,6 +41,7 @@ const withTurns = <A, E>(
     readonly base?: Layer.Layer<Store>
     readonly hub?: number
     readonly clock?: boolean
+    readonly head?: Head
   } = {}
 ) => {
   const real = over.base ?? storeLayer(file, options())
@@ -48,7 +50,7 @@ const withTurns = <A, E>(
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
   const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
-  const turns = Turns.layer({ head: head(DECLARATIONS), ...(over.hub === undefined ? {} : { hub: over.hub }) }).pipe(
+  const turns = Turns.layer({ head: over.head ?? head(DECLARATIONS), ...(over.hub === undefined ? {} : { hub: over.hub }) }).pipe(
     Layer.provideMerge(memory),
     Layer.provide(Layer.mergeAll(asking, sandbox, limit))
   )
@@ -1054,6 +1056,38 @@ test("a program that ran when the program stopped is closed as cut at the next l
     ["asst", "It was cut, I will check."]
   ])
   assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
+})
+
+test("a cut turn goes on under the head of its row: the next launch's stack has another head B, and each request of the cut turn sends A; a new turn after it sends B, and the two turns' rows hold A and B", async () => {
+  const file = newFile()
+  // Two heads of two loads: another list of functions, and the person's rules.
+  const A = head(DECLARATIONS)
+  const B = head(DECLARATIONS.filter((one) => one.name !== "date"), "Answer in French.")
+  assert.notDeepStrictEqual(A, B)
+  const never = fakeWire(() => reply({} as Request))
+  never.wire.send = (asked) => (never.sent.push(asked), Stream.never)
+  await withTurns(file, never, noPrograms, Effect.gen(function*() {
+    yield* (yield* Turns).say("hello")
+    yield* eventually(() => never.sent.length === 1)
+  }), undefined, { head: A })
+  assert.deepStrictEqual(never.sent[0]!.head, A)
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "running", why: null, first_msg: 0 }])
+  // The next launch, under B: the cut turn runs a program and then answers
+  // (two requests), and a new message starts turn 2 (the third request).
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "return 1") : says(asked, "Reply " + n + ".")))
+  await withTurns(file, wire, () => Effect.succeed({ output: "1", failed: false }), Effect.gen(function*() {
+    const turnsService = yield* Turns
+    yield* turnsService.idle
+    yield* turnsService.say("and now?")
+    yield* turnsService.idle
+  }), undefined, { head: B })
+  assert.equal(wire.sent.length, 3)
+  assert.deepStrictEqual(wire.sent.map((asked) => asked.head), [A, A, B])
+  // A turn's row names its head by number (everchat_head, one row for each head of the chat).
+  assert.deepStrictEqual(rows(file, "select t.n, t.status, h.body as head from everchat_turn t join everchat_head h on h.chat = t.chat and h.n = t.head order by t.n"), [
+    { n: 1, status: "done", head: JSON.stringify(A) },
+    { n: 2, status: "done", head: JSON.stringify(B) }
+  ])
 })
 
 test("a turn that was cut before its first request was built builds it at the next launch", async () => {
