@@ -284,7 +284,7 @@ if (mode === "models") {
   const pick = { vendor: "openai", model, effort: "low", speed: "slow" }
   const store = storeLayer(file, { launch: { pid: process.pid, host: "probe", cwd: process.cwd(), version: "probe", runTag: "probe" }, pick })
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, layer)))
-  const compactor = RealCompactor.layer({ pick, declarations: DECLARATIONS }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const compactor = RealCompactor.layer({ pick, head: realHead(DECLARATIONS) }).pipe(Layer.provide(Layer.merge(asking, store)))
   const words = "the quick brown fox jumps over the lazy dog while a small boat drifts past an old stone bridge".split(" ")
   const prose = (seed: string, n: number) => Array.from({ length: n }, (_, k) => words[parseInt(hash(seed + k).slice(0, 6), 16) % words.length]).join(" ")
   const started = Date.now()
@@ -321,9 +321,9 @@ if (mode === "models") {
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(none))
   const limit = limitLayer({ dir: path.join(home, "results") }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd: home }).pipe(Layer.provide(store))
-  const functions = functionsLayer({ cwd: home }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limit)))
+  const functions = functionsLayer(DECLARATIONS, { cwd: home }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limit)))
   const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
-  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  const turns = Turns.layer({ head: realHead(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   const started = Date.now()
   await Effect.runPromise(Effect.gen(function*() {
     const service = yield* Turns

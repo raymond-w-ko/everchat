@@ -48,7 +48,7 @@ const withTurns = <A, E>(
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
   const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
-  const turns = Turns.layer({ declarations: DECLARATIONS, ...(over.hub === undefined ? {} : { hub: over.hub }) }).pipe(
+  const turns = Turns.layer({ head: head(DECLARATIONS), ...(over.hub === undefined ? {} : { hub: over.hub }) }).pipe(
     Layer.provideMerge(memory),
     Layer.provide(Layer.mergeAll(asking, sandbox, limit))
   )

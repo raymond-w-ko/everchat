@@ -2,12 +2,12 @@
 // arguments at the boundary, and what each function gives.
 
 import { expect, test } from "bun:test"
-import { Effect, Fiber, Layer } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { compactor, newFile, options, PICK, rows } from "../tests/help.ts"
-import { type Caller, Functions, hostedLayer } from "@everchat/core/functions"
+import { type Caller, type Declaration, Functions, HOSTED, hostedLayer } from "@everchat/core/functions"
 import { Limit } from "@everchat/core/limit"
 import { limitLayer } from "./limitfile.ts"
 import { DECLARATIONS, functionsLayer } from "./localfunctions.ts"
@@ -17,15 +17,16 @@ import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "@everchat/core/store"
 
 // One launch with the real functions. The work directory is the home.
-const withFunctions = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory | Limit>) => {
+const functionsOf = (file: string, declarations: ReadonlyArray<Declaration> = DECLARATIONS) => {
   const cwd = path.dirname(file)
   const store = storeLayer(file, options({ runTag: "tag-" + crypto.randomUUID() }))
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
   const limit = limitLayer({ dir: path.join(cwd, "results"), limit: 1000 }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = functionsLayer({ cwd }).pipe(Layer.provideMerge(Layer.mergeAll(memory, shell, limit)))
-  return Effect.runPromise(effect.pipe(Effect.provide(functions)))
+  return functionsLayer(declarations, { cwd }).pipe(Layer.provideMerge(Layer.mergeAll(memory, shell, limit)))
 }
+const withFunctions = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory | Limit>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(functionsOf(file))))
 
 const CALLER: Caller = { turn: 1, program: 1, call: 1 }
 
@@ -43,6 +44,18 @@ test("each declared function can be called, and no other", async () => {
     expect(yield* fails("spawn", "a task")).toBe("No function spawn.")
     expect(yield* fails("toString")).toBe("No function toString.")
   }))
+})
+
+test("functionsLayer takes the list of the stack's head: DECLARATIONS builds; the list in another order, or HOSTED, dies at the build with the names", async () => {
+  const names = async (declarations: ReadonlyArray<Declaration>) => {
+    const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return (yield* Functions).names }), functionsOf(newFile(), declarations)))
+    return Exit.isSuccess(exit) ? exit.value : Cause.hasDies(exit.cause) ? String((Cause.squash(exit.cause) as Error).message) : "it failed"
+  }
+  expect(await names(DECLARATIONS)).toEqual(["shell", "read", "write", "edit", "zoom", "date", "result"])
+  expect(await names([...DECLARATIONS].reverse())).toBe(
+    'The functions are not the list of the head: The list has "result", "date", "zoom", "edit", "write", "read", "shell" in this order, and the entries "shell", "read", "write", "edit", "zoom", "date", "result".'
+  )
+  expect(await names(HOSTED)).toBe('The functions are not the list of the head: An entry has "shell", "read", "write", "edit", and the list does not.')
 })
 
 test("a wrong argument is an error that names the argument and shows the signature", async () => {
@@ -150,7 +163,7 @@ test("a host's result, the core's, gives the output and makes no file in any dir
     expect(yield* fails("result", open)).toBe("Call " + open + " still runs: it has no result yet.")
     expect(yield* fails("result", 99)).toBe("No call 99.")
     return (yield* store.chat).uuid
-  }).pipe(Effect.provide(hostedLayer.pipe(Layer.provideMerge(memory)))))
+  }).pipe(Effect.provide(hostedLayer(HOSTED).pipe(Layer.provideMerge(memory)))))
   // The home holds the database's files only, and the chat has no
   // directory of results (limitfile.ts).
   expect(fs.readdirSync(home).filter((name) => !name.startsWith(path.basename(file)))).toEqual([])

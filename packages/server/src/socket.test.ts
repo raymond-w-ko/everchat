@@ -22,6 +22,7 @@ import { TestClock } from "effect/testing"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import { HOSTED, hostedLayer } from "@everchat/core/functions"
+import { head } from "@everchat/core/head"
 import { noFileLayer } from "@everchat/core/limit"
 import { Memory } from "@everchat/core/memory"
 import type { Reply, Request } from "@everchat/core/request"
@@ -84,8 +85,8 @@ const stackOf = (w: World) => {
     const memory = Memory.layer.pipe(Layer.provideMerge(base), Layer.provide(compactor(() => "a summary")))
     const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
     const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run: () => Effect.succeed({ output: "2", failed: false }) }))
-    const functions = hostedLayer.pipe(Layer.provide(memory))
-    return Turns.layer({ declarations: HOSTED }).pipe(
+    const functions = hostedLayer(HOSTED).pipe(Layer.provide(memory))
+    return Turns.layer({ head: head(HOSTED) }).pipe(
       Layer.provideMerge(memory),
       Layer.provide(Layer.mergeAll(asking, sandbox, noFileLayer(), functions))
     )

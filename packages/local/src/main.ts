@@ -104,6 +104,8 @@ import { Cache } from "@everchat/core/cache"
 import * as Compactor from "@everchat/core/compactor"
 import * as Database from "@everchat/sqlite/database"
 import * as Diagnostics from "@everchat/core/diagnostics"
+import type { Declaration } from "@everchat/core/functions"
+import { head } from "@everchat/core/head"
 import { Inspect } from "./inspect.ts"
 import { gatewayLayer } from "./gateway.ts"
 import { limitLayer } from "./limitfile.ts"
@@ -182,12 +184,17 @@ export const layer = (given: { readonly home: string; readonly file: string; rea
     Layer.provideMerge(storeLayer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(gatewayLayer)))), Layer.provideMerge(base))
-  const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, declarations: DECLARATIONS })), Layer.provideMerge(asking))
+  // The chat's functions: one list, for the head and the sandbox
+  // (functions.ts, "One list for each stack"). The head is made one time,
+  // from that list, for the turns and the compactions.
+  const declarations: ReadonlyArray<Declaration> = DECLARATIONS
+  const made = head(declarations)
+  const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, head: made })), Layer.provideMerge(asking))
   const limits = limitLayer().pipe(Layer.provideMerge(memory))
   const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(limits))
-  const functions = functionsLayer({ cwd: given.cwd }).pipe(Layer.provideMerge(shell))
+  const functions = functionsLayer(declarations, { cwd: given.cwd }).pipe(Layer.provideMerge(shell))
   const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
-  return Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(sandbox))
+  return Turns.layer({ head: made }).pipe(Layer.provideMerge(sandbox))
 }
 
 // Pipe mode ended, and a turn of this launch had failed. The output holds

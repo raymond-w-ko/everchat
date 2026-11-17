@@ -101,7 +101,7 @@
 
 import { Clock, Context, Effect, Fiber, Layer, Option, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
-import { type Declaration, head as makeHead, TOOL } from "./head.ts"
+import { TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
@@ -208,8 +208,11 @@ export const whyOf = (given: string): string => {
 const LARGEST = 65_536
 
 export interface Options {
-  readonly declarations: ReadonlyArray<Declaration> // the functions of the chat, for the head (the sandbox's, in the same order)
-  readonly rules?: string | null | undefined // the person's own instructions, for the head
+  // The head of the chat (head.ts, `head`): the stack makes it one time, at
+  // the load, from the functions of the sandbox, in their order, and gives
+  // the same value to the compactor. A new turn stores it in its row; a
+  // turn keeps the head of its row across a restart.
+  readonly head: Head
   // The hub's capacity in events, for a listener that may fall behind: with
   // it, a full hub drops its oldest event (`PubSub.sliding`), so a turn
   // never waits for a listener; with none, the hub keeps every event. A
@@ -547,7 +550,7 @@ export class Turns extends Context.Service<Turns, {
         const begin = (firstMsg: number) =>
           Effect.gen(function*() {
             const chat = yield* store.chat
-            const turn = yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(makeHead(options.declarations, options.rules ?? null)), firstMsg })
+            const turn = yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(options.head), firstMsg })
             return { turn, n: yield* store.addEvent({ type: "start", turn: turn.id }) }
           })
         const started = (begun: { readonly turn: Turn; readonly n: number }): TurnEvent => ({ type: "start", n: begun.n, turn: begun.turn.id })

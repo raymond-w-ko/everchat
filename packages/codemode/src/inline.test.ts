@@ -225,7 +225,7 @@ test("inline: a function with an input schema called with no argument (or undefi
 test("inline: the core's list covers the engine: each own name of the global object at a program's boot is in ENGINE_GLOBALS, in RESERVED or a function of the chat (here the namespace ns), and each own name of each prototype of the global object is in INHERITED; and ns.JSON, ns.toString and ns.valueOf, members named as a global and as inherited names, pass make and are called", async () => {
   const file = newFile()
   const member = (name: string) => ({ declaration: { name, description: "A member.", inputSchema: { type: "object" } }, run: (args: ReadonlyArray<unknown>) => Effect.succeed([name, ...args]) })
-  const layer = Layer.succeed(Functions, make([member("ns.JSON"), member("ns.toString"), member("ns.valueOf")]))
+  const layer = Layer.succeed(Functions, make(["ns.JSON", "ns.toString", "ns.valueOf"].map((name) => member(name).declaration), [member("ns.JSON"), member("ns.toString"), member("ns.valueOf")]))
   const got = await withSandbox(file, { layer }, (run) =>
     run(
       "const chain = []\n" +

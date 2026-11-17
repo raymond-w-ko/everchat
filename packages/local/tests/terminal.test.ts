@@ -22,6 +22,7 @@ import { threadLayer } from "@everchat/codemode/thread"
 import { type TurnEvent, Turns } from "@everchat/core/turn"
 import { compactor, newFile, options, PICK as PICKED, reply, rows, wireError } from "./help.ts"
 import { KEYS, Screen } from "./screen.ts"
+import { head } from "@everchat/core/head"
 
 // A fake wire: `answer` gives the events of the n-th request (1, 2, ...).
 const wireOf = (answer: (asked: Request, n: number) => Stream.Stream<Event, WireError>) => {
@@ -56,10 +57,10 @@ const launch = <A, E>(
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
   const limits = limitLayer({ dir: path.join(cwd, "results") }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = functionsLayer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
+  const functions = functionsLayer(DECLARATIONS, { cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
   const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
+  const turns = Turns.layer({ head: head(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
   const terminal = Terminal.layer({ tty: screen, cwd, pace }).pipe(Layer.provideMerge(turns))
   return Effect.runPromise(effect.pipe(Effect.provide(terminal), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }

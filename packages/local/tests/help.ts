@@ -17,6 +17,7 @@ import { readsLayer, storeLayer } from "@everchat/sqlite/bun"
 import { options } from "@everchat/sqlite/testing"
 import { Store } from "@everchat/core/store"
 import { Turns } from "@everchat/core/turn"
+import { head } from "@everchat/core/head"
 
 // The helpers of the store (`@everchat/sqlite/testing`), for the tests of
 // this package and of the core.
@@ -116,7 +117,7 @@ export const withChat = <A, E>(
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run }))
   const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
-  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  const turns = Turns.layer({ head: head(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 

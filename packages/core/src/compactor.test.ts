@@ -11,10 +11,15 @@ import { Cache } from "./cache.ts"
 import * as RealCompactor from "./compactor.ts"
 import { head, TOOL } from "./head.ts"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
+import { limitLayer } from "@everchat/local/limitfile"
+import * as path from "node:path"
 import { CompactionRetry, Memory } from "./memory.ts"
+import type { Head, Request } from "./request.ts"
+import { Sandbox } from "./sandbox.ts"
 import { Schedule } from "effect"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Store } from "./store.ts"
+import { Turns } from "./turn.ts"
 
 const PICK = { vendor: "openai", model: "small", effort: "high", speed: "slow" }
 
@@ -22,7 +27,7 @@ const PICK = { vendor: "openai", model: "small", effort: "high", speed: "slow" }
 const withAll = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: Effect.Effect<A, E, Memory | Store>) => {
   const store = storeLayer(file, options())
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const compactor = RealCompactor.layer({ pick: PICK, declarations: DECLARATIONS, rules: "Answer in English." }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const compactor = RealCompactor.layer({ pick: PICK, head: head(DECLARATIONS, "Answer in English.") }).pipe(Layer.provide(Layer.merge(asking, store)))
   return Effect.runPromise(
     effect.pipe(
       Effect.provide(Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor))),
@@ -79,6 +84,47 @@ test("a compaction is one patient request with the chat's id and head, and its u
     from everchat_usage u join everchat_pick p on p.id = u.pick`), [
     { served: "compaction", node_l: 0, node_i: 0, model: "small", request: "req_7", input: 50, cache_read: 900, cache_write: 30, output: 12, expected: 0 }
   ])
+})
+
+// One head for each load (ec-u3nf8): a stack makes the head one time and
+// gives the one value to the turn loop and to the compactor. A head that no
+// call of `head` gives shows that neither layer makes its own.
+test("the head in a turn's row, the head that the turn sends and the head that the compactor sends are the one value that the stack gave", async () => {
+  const given: Head = { system: "The stack's own system prompt.\n", tools: [{ name: TOOL, description: "The stack's own tool." }] }
+  const compacting = (asked: Request) => {
+    const last = asked.items[asked.items.length - 1]
+    return last?.kind === "user" && last.blocks[last.blocks.length - 1]!.text.startsWith("Compaction:")
+  }
+  const file = newFile()
+  const wire = fakeWire((asked) => reply(asked, { text: compacting(asked) ? "the line" : "Done." }))
+  const store = storeLayer(file, options())
+  const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
+  const compactor = RealCompactor.layer({ pick: PICK, head: given }).pipe(Layer.provide(Layer.merge(asking, store)))
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor))
+  const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run: () => Effect.die("no program was expected") }))
+  const limit = limitLayer({ dir: path.join(path.dirname(file), "results") }).pipe(Layer.provide(store))
+  const turns = Turns.layer({ head: given }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limit)))
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const service = yield* Turns
+      yield* service.say(long)
+      yield* service.idle
+      yield* (yield* Memory).idle
+    }).pipe(
+      Effect.provide(turns),
+      Effect.provideService(AskDelay, () => Effect.succeed(0)),
+      Effect.provideService(CompactionRetry, Schedule.spaced("1 millis"))
+    )
+  )
+  const sentTurns = wire.sent.filter((asked) => !compacting(asked))
+  const sentCompactions = wire.sent.filter(compacting)
+  assert.equal(sentTurns.length, 1)
+  assert.ok(sentCompactions.length > 0)
+  for (const asked of wire.sent) assert.deepStrictEqual(asked.head, given)
+  assert.deepStrictEqual(
+    rows(file, "select h.body from everchat_turn t join everchat_head h on h.chat = t.chat and h.n = t.head"),
+    [{ body: JSON.stringify(given) }]
+  )
 })
 
 test("a compaction that the vendor refuses for its input, or stops with its filter, gives the source, cut", async () => {

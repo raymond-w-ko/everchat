@@ -46,7 +46,10 @@ How it is built (`packages/core/src/sandbox.ts`,
 The chat's turns, its compactions, and its subagents all send the same system
 prompt and the same tool list. The system prompt names each kind of request
 and holds its rules. A block after the view says which kind this request is
-(for example, one that starts `Subagent task:`).
+(for example, one that starts `Subagent task:`). Each stack makes the head
+one time, at the load, from its list of functions (`head` in
+`packages/core/src/head.ts`), and gives that one value to the turn loop and to
+the compactor: the option `head` of `Turns.layer` and of `Compactor.layer`.
 
 The reason is the prompt cache: a request can read another request's cache
 only when both start with the same bytes. With one prompt, a subagent reads

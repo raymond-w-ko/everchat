@@ -2,13 +2,15 @@
 // `date` and `result`, over the store and the memory. The core imports no
 // file system (tools/graph.ts); that a host's `result` makes no file is
 // checked with one, in packages/local/src/functions.test.ts. Then the check
-// of a list (`refusals`, `make`) and a declaration with schemas in the head.
+// of a list (`refusals`, `make`), the check of the entries against the list
+// of the head (`make`, `hostedLayer`) and a declaration with schemas in the
+// head.
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, TYPE_MAX, ZOOM } from "./functions.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, RESULT, TYPE_MAX, ZOOM } from "./functions.ts"
 import { globalOf, head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
@@ -18,7 +20,7 @@ import { Store } from "./store.ts"
 const withHosted = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory>) => {
   const store = storeLayer(file, options())
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
-  return Effect.runPromise(effect.pipe(Effect.provide(hostedLayer.pipe(Layer.provideMerge(memory)))))
+  return Effect.runPromise(effect.pipe(Effect.provide(hostedLayer(HOSTED).pipe(Layer.provideMerge(memory)))))
 }
 
 const CALLER: Caller = { turn: 1, program: 1, call: 1 }
@@ -174,7 +176,7 @@ test("a function named as a global of the sandbox's engine, or in its namespace,
   assert.deepEqual([refusals([schemaOf("prototype")]), refusals([schemaOf("prototype.m")])], [[], []])
   // A member's name after the dot is free.
   assert.deepEqual(refusals([schemaOf("ns.JSON"), schemaOf("ns.Object"), schemaOf("ns.__proto__"), schemaOf("docs.constructor")]), [])
-  const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([{ declaration: schemaOf("JSON.member"), run: () => Effect.succeed(null) }])))))
+  const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([schemaOf("JSON.member")], [{ declaration: schemaOf("JSON.member"), run: () => Effect.succeed(null) }])))))
   assert.equal(Exit.isFailure(exit) && Cause.hasDies(exit.cause), true)
   assert.equal(String((Cause.squash(Exit.isFailure(exit) ? exit.cause : Cause.empty) as Error).message), 'The list of functions is refused: "JSON.member": "JSON" is a global of the sandbox\'s engine.')
 })
@@ -208,7 +210,7 @@ test("a function named as a name that the global object inherits, or that the en
   // A member after the dot is free.
   assert.deepEqual(refusals([schemaOf("ns.toString"), schemaOf("ns.valueOf"), schemaOf("ns.hasOwnProperty"), schemaOf("ns.toJSON")]), [])
   for (const name of ["toString", "then"]) {
-    const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([{ declaration: schemaOf(name), run: () => Effect.succeed(null) }])))))
+    const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([schemaOf(name)], [{ declaration: schemaOf(name), run: () => Effect.succeed(null) }])))))
     assert.equal(Exit.isFailure(exit) && Cause.hasDies(exit.cause), true)
     assert.equal(String((Cause.squash(Exit.isFailure(exit) ? exit.cause : Cause.empty) as Error).message), `The list of functions is refused: "${name}": ${name === "then" ? called(name) : inherited(name)}`)
   }
@@ -217,7 +219,7 @@ test("a function named as a name that the global object inherits, or that the en
 test("make dies at the layer's build with every refusal in its message, and builds a good list", async () => {
   const entry = (declaration: Declaration): Entry => ({ declaration, run: () => Effect.succeed(null) })
   const build = (declarations: ReadonlyArray<Declaration>) =>
-    Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make(declarations.map(entry))))))
+    Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make(declarations, declarations.map(entry))))))
   const exit = await build([ZOOM, DATE, DATE, schemaOf("store"), schemaOf("a.b.c")])
   assert.equal(Exit.isFailure(exit), true)
   const cause = Exit.isFailure(exit) ? exit.cause : Cause.empty
@@ -230,4 +232,46 @@ test("make dies at the layer's build with every refusal in its message, and buil
   const good = await build([...HOSTED, SEARCH])
   assert.equal(Exit.isSuccess(good), true)
   assert.deepEqual(Exit.isSuccess(good) ? good.value.names : [], ["zoom", "date", "result", "docs.search"])
+})
+
+// The message of a layer that died at its build, or "it was built".
+const died = (exit: Exit.Exit<unknown, unknown>): string =>
+  Exit.isFailure(exit) && Cause.hasDies(exit.cause) ? String((Cause.squash(exit.cause) as Error).message) : "it was built"
+
+test("make dies at the layer's build, with the names, when the entries' declarations are not the list: a missing name, an extra name, another order, another declaration; the same list builds", async () => {
+  const entry = (declaration: Declaration): Entry => ({ declaration, run: () => Effect.succeed(null) })
+  const build = (declarations: ReadonlyArray<Declaration>, entries: ReadonlyArray<Entry>) =>
+    Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make(declarations, entries)))))
+  const head = "The functions are not the list of the head: "
+  // A missing name: the list has result, no entry has it.
+  assert.equal(died(await build([ZOOM, DATE, RESULT], [ZOOM, DATE].map(entry))), head + 'The list has "result", and no entry.')
+  // An extra name: an entry has result, the list does not.
+  assert.equal(died(await build([ZOOM, DATE], [ZOOM, DATE, RESULT].map(entry))), head + 'An entry has "result", and the list does not.')
+  // Another order: the same names.
+  assert.equal(
+    died(await build([ZOOM, DATE, RESULT], [RESULT, ZOOM, DATE].map(entry))),
+    head + 'The list has "zoom", "date", "result" in this order, and the entries "result", "zoom", "date".'
+  )
+  // Another declaration of one name: the head would show another function than the sandbox's.
+  assert.equal(died(await build([ZOOM, DATE], [ZOOM, { ...DATE, description: "Another." }].map(entry))), head + 'The entry of "date" has another declaration than the list\'s.')
+  // All at once, each with its sentence.
+  assert.equal(
+    died(await build([ZOOM, DATE, RESULT], [SEARCH, DATE, ZOOM].map(entry))),
+    head + 'The list has "result", and no entry. An entry has "docs.search", and the list does not. The list has "zoom", "date" in this order, and the entries "date", "zoom".'
+  )
+  // The same list, as equal values (not the same objects), builds.
+  const same = await build([...HOSTED, SEARCH], [...HOSTED, SEARCH].map((one) => entry(JSON.parse(JSON.stringify(one)) as Declaration)))
+  assert.deepEqual(Exit.isSuccess(same) ? same.value.names : died(same), ["zoom", "date", "result", "docs.search"])
+})
+
+test("hostedLayer takes the list of the stack's head: HOSTED builds; another list, HOSTED in another order or with one more, dies at the build", async () => {
+  const file = newFile()
+  const store = storeLayer(file, options())
+  const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
+  const build = (declarations: ReadonlyArray<Declaration>) =>
+    Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return (yield* Functions).names }), hostedLayer(declarations).pipe(Layer.provideMerge(memory))))
+  const good = await build(HOSTED)
+  assert.deepEqual(Exit.isSuccess(good) ? good.value : died(good), ["zoom", "date", "result"])
+  assert.equal(died(await build([DATE, ZOOM, RESULT])), 'The functions are not the list of the head: The list has "date", "zoom", "result" in this order, and the entries "zoom", "date", "result".')
+  assert.equal(died(await build([...HOSTED, SEARCH])), 'The functions are not the list of the head: The list has "docs.search", and no entry.')
 })

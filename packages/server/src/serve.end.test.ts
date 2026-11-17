@@ -14,6 +14,7 @@ import { HttpServer } from "effect/http"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import { HOSTED, hostedLayer } from "@everchat/core/functions"
+import { head } from "@everchat/core/head"
 import { noFileLayer } from "@everchat/core/limit"
 import { Memory } from "@everchat/core/memory"
 import type { Reply, Request as Asked } from "@everchat/core/request"
@@ -41,9 +42,9 @@ const stack = (store: typeof Store.Service) => {
   const memory = Memory.layer.pipe(Layer.provideMerge(Layer.succeed(Store, store)), Layer.provide(compactor(() => "a summary")))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run: () => Effect.succeed({ output: "2", failed: false }) }))
-  return Turns.layer({ declarations: HOSTED }).pipe(
+  return Turns.layer({ head: head(HOSTED) }).pipe(
     Layer.provideMerge(memory),
-    Layer.provide(Layer.mergeAll(asking, sandbox, noFileLayer(), hostedLayer.pipe(Layer.provide(memory))))
+    Layer.provide(Layer.mergeAll(asking, sandbox, noFileLayer(), hostedLayer(HOSTED).pipe(Layer.provide(memory))))
   )
 }
 

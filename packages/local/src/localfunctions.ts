@@ -8,7 +8,8 @@
 // (limitfile.ts).
 //
 // The order of the list is the order in which the head shows the
-// declarations, so it is part of the prompt cache's key (head.ts).
+// declarations, so it is part of the prompt cache's key (head.ts). The stack
+// gives its one list to the layer (`functionsLayer`), as to the heads'.
 
 import { Effect, Layer, Schema } from "effect"
 import * as fs from "node:fs"
@@ -67,8 +68,13 @@ export interface Options {
   readonly cwd?: string | undefined // the work directory of the file functions; the program's own when not given
 }
 
-// The functions of a local chat: the core's, and these.
-export const functionsLayer = (options: Options = {}): Layer.Layer<Functions, never, Store | Memory | Shell | Limit> =>
+// The functions of a local chat: the core's, and these (`DECLARATIONS`, in
+// its order), over `declarations`, the list of the stack's head: it dies at
+// its build when that list is not `DECLARATIONS` (`make`).
+export const functionsLayer = (
+  declarations: ReadonlyArray<Declaration>,
+  options: Options = {}
+): Layer.Layer<Functions, never, Store | Memory | Shell | Limit> =>
   Layer.effect(
     Functions,
     Effect.gen(function*() {
@@ -136,6 +142,6 @@ export const functionsLayer = (options: Options = {}): Layer.Layer<Functions, ne
         }
       }
 
-      return make(DECLARATIONS.map((one) => entries[one.name]))
+      return make(declarations, DECLARATIONS.map((one) => entries[one.name]))
     })
   )

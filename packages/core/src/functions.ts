@@ -32,6 +32,12 @@
 // A function gives its whole result to the program. The output limit
 // applies to the program's own result (limit.ts).
 //
+// One list for each stack: the stack makes its list of declarations one
+// time, and gives that value to the turn loop's layer and the compactor's
+// (for the head) and to the layer of `Functions`, whose `make` dies when its
+// entries' declarations are not that list (`mismatches`). So the head and
+// the sandbox's functions cannot differ.
+//
 // The check of a list (`refusals`), where the list is built: `make` dies
 // for a list with a fault, a defect of the code; the client of functions
 // from outside runs it first, and leaves a refused function out. Its rules:
@@ -266,11 +272,42 @@ export class Functions extends Context.Service<Functions, {
   call(name: string, args: ReadonlyArray<unknown>, caller: Caller): Effect.Effect<unknown, FunctionError>
 }>()("everchat/functions/Functions") {}
 
-// The service over a list of functions, in the order of the list. A list
-// that `refusals` refuses is a defect of the code: it throws, so the layer
-// that calls it dies at its build, with every refusal in its message.
-export const make = (entries: ReadonlyArray<Entry>) => {
-  const declarations = entries.map((one) => one.declaration)
+// How the declarations of `entries` differ from `declarations`, the list of
+// the head, as sentences: none when they are that list. Each check is apart
+// from the others: a name of the list that no entry has, a name of an entry
+// that the list does not have, the names that both have in another order,
+// and a name whose entry's declaration is another than the list's.
+export const mismatches = (declarations: ReadonlyArray<Declaration>, entries: ReadonlyArray<Entry>): ReadonlyArray<string> => {
+  const listed = declarations.map((one) => one.name)
+  const given = entries.map((one) => one.declaration.name)
+  const quoted = (names: ReadonlyArray<string>) => names.map((name) => `"${name}"`).join(", ")
+  const found: Array<string> = []
+  const missing = listed.filter((name) => !given.includes(name))
+  if (missing.length > 0) found.push(`The list has ${quoted(missing)}, and no entry.`)
+  const extra = given.filter((name) => !listed.includes(name))
+  if (extra.length > 0) found.push(`An entry has ${quoted(extra)}, and the list does not.`)
+  const both = listed.filter((name) => given.includes(name))
+  const order = given.filter((name) => listed.includes(name))
+  if (both.join("\n") !== order.join("\n")) found.push(`The list has ${quoted(both)} in this order, and the entries ${quoted(order)}.`)
+  for (const one of declarations) {
+    const entry = entries.find((each) => each.declaration.name === one.name)
+    if (entry !== undefined && JSON.stringify(entry.declaration) !== JSON.stringify(one)) found.push(`The entry of "${one.name}" has another declaration than the list's.`)
+  }
+  return found
+}
+
+// The service over a list of functions: `declarations`, the list that the
+// head of the same stack shows (one value, given to the turn loop's layer,
+// the compactor's and this one), and `entries`, the functions themselves.
+// The entries' declarations must be that list, in its order: another one is
+// a defect of the code, as is a list that `refusals` refuses. Then `make`
+// throws, so the layer that calls it dies at its build, with the names in
+// its message.
+export const make = (declarations: ReadonlyArray<Declaration>, entries: ReadonlyArray<Entry>) => {
+  const differ = mismatches(declarations, entries)
+  if (differ.length > 0) {
+    throw new Error("The functions are not the list of the head: " + differ.join(" "))
+  }
   const refused = refusals(declarations)
   if (refused.length > 0) {
     throw new Error("The list of functions is refused: " + refused.map((one) => `"${one.name}": ${one.reason}`).join(" "))
@@ -343,11 +380,14 @@ export const core = Effect.gen(function*() {
   return { zoom, date, result }
 })
 
-// The functions of a host's chat: `HOSTED`, in its order.
-export const hostedLayer: Layer.Layer<Functions, never, Store | Memory> = Layer.effect(
-  Functions,
-  Effect.gen(function*() {
-    const entries = yield* core
-    return make(HOSTED.map((one) => entries[one.name]))
-  })
-)
+// The functions of a host's chat (`HOSTED`, in its order), over
+// `declarations`, the list of the stack's head: it dies at its build when
+// that list is not `HOSTED` (`make`).
+export const hostedLayer = (declarations: ReadonlyArray<Declaration>): Layer.Layer<Functions, never, Store | Memory> =>
+  Layer.effect(
+    Functions,
+    Effect.gen(function*() {
+      const entries = yield* core
+      return make(declarations, HOSTED.map((one) => entries[one.name]))
+    })
+  )

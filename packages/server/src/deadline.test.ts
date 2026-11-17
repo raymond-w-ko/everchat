@@ -187,8 +187,8 @@ const stackOf = (w: World) => {
       ? Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
       : Layer.succeed(Ask, Ask.of({ stream: () => Stream.never, ask: () => Effect.never }))
     const sandbox = Layer.succeed(Sandbox, Sandbox.of({ run: () => Effect.succeed({ output: "2", failed: false }) }))
-    const functions = hostedLayer.pipe(Layer.provide(memory))
-    return Turns.layer({ declarations: HOSTED }).pipe(
+    const functions = hostedLayer(HOSTED).pipe(Layer.provide(memory))
+    return Turns.layer({ head: head(HOSTED) }).pipe(
       Layer.provideMerge(memory),
       Layer.provide(Layer.mergeAll(asking, sandbox, noFileLayer(), functions)),
       Layer.provideMerge(flush)

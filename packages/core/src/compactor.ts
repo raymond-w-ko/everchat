@@ -20,8 +20,8 @@
 
 import { Effect, Layer } from "effect"
 import { Ask } from "./ask.ts"
-import { type Declaration, head } from "./head.ts"
 import { Compactor, CompactorError } from "./memory.ts"
+import type { Head } from "./request.ts"
 import { type Pick, Store } from "./store.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
@@ -29,8 +29,7 @@ const diagnostic = Effect.annotateLogs("source", "compactor")
 
 export interface Options {
   readonly pick: Pick // the compactor's model: usually a cheap one
-  readonly declarations: ReadonlyArray<Declaration> // the functions of the chat, as in every head of the chat
-  readonly rules?: string | null | undefined // the person's own instructions, as in every head of the chat
+  readonly head: Head // the head of the chat (head.ts, `head`): the one value that the stack gives the turn loop too
 }
 
 export const layer = (options: Options) =>
@@ -40,10 +39,9 @@ export const layer = (options: Options) =>
       const asker = yield* Ask
       const store = yield* Store
       const chat = yield* store.chat
-      const sent = head(options.declarations, options.rules ?? null)
       return Compactor.of({
         compact: (blocks) =>
-          asker.ask({ session: chat.uuid, pick: options.pick, head: sent, items: [{ kind: "user", blocks }] }, { patient: true }).pipe(
+          asker.ask({ session: chat.uuid, pick: options.pick, head: options.head, items: [{ kind: "user", blocks }] }, { patient: true }).pipe(
             Effect.map((reply) => ({
               text: reply.stop === "filter" ? "" : reply.text,
               usage: reply.usage === null ? undefined : {

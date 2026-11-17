@@ -10,11 +10,11 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { Ask, AskDelay } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
-import { HOSTED } from "@everchat/core/functions"
+import { Functions, HOSTED } from "@everchat/core/functions"
 import { head } from "@everchat/core/head"
 import { LIMIT } from "@everchat/core/limit"
 import { Memory } from "@everchat/core/memory"
-import type { Reply, Request, VendorWire } from "@everchat/core/request"
+import type { Head, Reply, Request, VendorWire } from "@everchat/core/request"
 import { Chats, type Event, type Message, Store } from "@everchat/core/store"
 import { Turns } from "@everchat/core/turn"
 import { OpenAI } from "@everchat/openai"
@@ -430,3 +430,58 @@ test("hostedStack with deadline 1,000 ms: a program that does not end and calls 
   expect(got).toEqual({ ended: "Some", busy: false })
   expect(back(turnsOf(wire.sent)[1])).toBe(LATE(1, 0))
 }, 30_000)
+
+// One list for each stack (ec-0di3a): the head of each turn's row, the head
+// of each compaction's request and the names of the stack's `Functions`
+// name the same functions, `names`, in the same order.
+const oneList = (functions: typeof Functions.Service, names: ReadonlyArray<string>, turns: ReadonlyArray<string>, compactions: ReadonlyArray<Head>) => {
+  expect(functions.names).toEqual(names)
+  expect(functions.declarations.map((one) => one.name)).toEqual([...names])
+  const shown = head(functions.declarations)
+  expect(turns.length).toBeGreaterThan(0)
+  expect(turns).toEqual(turns.map(() => JSON.stringify(shown)))
+  expect(compactions.length).toBeGreaterThan(0)
+  expect(compactions).toEqual(compactions.map(() => shown))
+}
+
+test("one list in the terminal's stack: the head in a turn's row, the head that the compactor sends and Functions.names name shell, read, write, edit, zoom, date and result in that order (the fake vendor, over the gateway's wire)", async () => {
+  const sentCompaction = (body: unknown) => JSON.stringify(body).includes("Compaction: ")
+  const fake = vendor((_n, body) => vendorText(sentCompaction(body) ? "a line" : "Done."))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "everchat-hosted-list-"))
+  process.env[URL_VARIABLE] = fake.address
+  process.env[KEY_VARIABLE] = "test-key"
+  try {
+    const got = await Effect.runPromise(Effect.gen(function*() {
+      // A message longer than a node: its leaf is a compaction.
+      yield* say({ turns: yield* Turns }, "a long one " + "and more ".repeat(80))
+      yield* until(() => fake.bodies.some(sentCompaction))
+      return { functions: yield* Functions, turns: (yield* (yield* Store).turns(null, 10)).map((turn) => turn.head) }
+    }).pipe(
+      Effect.provide(terminalLayer({ home: root, file: path.join(root, "terminal.db"), cwd: root, pick: PICK, compactor: COMPACTOR })),
+      Effect.provideService(AskDelay, () => Effect.succeed(0))
+    ))
+    // The head of a compaction's body: its developer message and its tools.
+    type Tool = { readonly type: string; readonly name: string; readonly description: string }
+    const sent = fake.bodies.filter(sentCompaction)
+    const compactions = sent.map((body): Head => ({ system: body.input[0].content[0].text, tools: body.tools.map((tool: Tool) => ({ name: tool.name, description: tool.description })) }))
+    expect(sent.flatMap((body) => body.tools.map((tool: Tool) => tool.type))).toEqual(sent.map(() => "custom"))
+    oneList(got.functions, ["shell", "read", "write", "edit", "zoom", "date", "result"], got.turns, compactions)
+  } finally {
+    fake.stop()
+    delete process.env[URL_VARIABLE]
+    delete process.env[KEY_VARIABLE]
+  }
+}, 20_000)
+
+test("one list in hostedStack: the head in a turn's row, the head that the compactor sends and Functions.names name zoom, date and result in that order", async () => {
+  const wire = model()
+  const got = await hosted({ wire: wire.layer }, (open) =>
+    Effect.gen(function*() {
+      const chat = yield* open(TENANT_A)
+      // A message longer than a node: its leaf is a compaction.
+      yield* say(chat, "a long one " + "and more ".repeat(80))
+      yield* until(() => wire.sent.some(isCompaction))
+      return { functions: Context.get(chat.context as unknown as Context.Context<Functions>, Functions), turns: (yield* chat.store.turns(null, 10)).map((turn) => turn.head) }
+    }))
+  oneList(got.functions, ["zoom", "date", "result"], got.turns, wire.sent.filter(isCompaction).map((asked) => asked.head))
+}, 20_000)

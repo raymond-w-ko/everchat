@@ -22,6 +22,7 @@ import { Store } from "@everchat/core/store"
 import { threadLayer } from "@everchat/codemode/thread"
 import { CUT, CUT_FUNCTION, STOPPED, Turns } from "@everchat/core/turn"
 import { compactor, fakeWire, newFile, options, reply, rows, write } from "./help.ts"
+import { head } from "@everchat/core/head"
 
 // One launch of the whole program but the terminal: a fake wire, and the
 // work directory in the home.
@@ -32,10 +33,10 @@ const launch = <A, E>(file: string, wire: ReturnType<typeof fakeWire>, effect: E
   const memory = Memory.layer.pipe(Layer.provideMerge(store), Layer.provide(compactor(() => "a summary")))
   const limits = limitLayer({ dir: path.join(cwd, "results"), limit }).pipe(Layer.provide(store))
   const shell = Shell.layer({ cwd, shell: "/bin/sh" }).pipe(Layer.provide(store))
-  const functions = functionsLayer({ cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
+  const functions = functionsLayer(DECLARATIONS, { cwd }).pipe(Layer.provide(Layer.mergeAll(memory, shell, limits)))
   const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
-  const turns = Turns.layer({ declarations: DECLARATIONS }).pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
+  const turns = Turns.layer({ head: head(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provideMerge(limits), Layer.provide(Layer.merge(asking, sandbox)))
   return Effect.runPromise(effect.pipe(Effect.provide(turns), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 

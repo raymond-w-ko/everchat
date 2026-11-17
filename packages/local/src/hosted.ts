@@ -30,7 +30,9 @@
 //
 // The hosted set. A host's chat has no machine: its functions are the
 // core's `hostedLayer` (`zoom`, `date`, `result`), and the turn loop and the
-// compactor show `HOSTED` in the head. There is no shell, no function of
+// compactor show `HOSTED` in the head: one value, made once for the process
+// and given to the three layers (functions.ts, "One list for each stack").
+// There is no shell, no function of
 // the files and no work directory, and the output limit is `noFileLayer`:
 // a long result is shortened and names `result(id)`, and no file is
 // written. A program that calls `shell`, `read`, `write` or `edit` gets the
@@ -75,7 +77,8 @@ import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import * as Compactor from "@everchat/core/compactor"
 import * as Diagnostics from "@everchat/core/diagnostics"
-import { HOSTED, hostedLayer } from "@everchat/core/functions"
+import { type Declaration, HOSTED, hostedLayer } from "@everchat/core/functions"
+import { head } from "@everchat/core/head"
 import { noFileLayer } from "@everchat/core/limit"
 import { Memory } from "@everchat/core/memory"
 import type { Request, VendorWire } from "@everchat/core/request"
@@ -147,6 +150,11 @@ export const hostedStack = <E = GatewayError>(options: HostedOptions<E>): Effect
     // One time for the process: the wires.
     const wires = yield* Layer.build(given)
     const wire = Layer.succeedContext(wires as Context.Context<VendorWire>)
+    // One time for the process: the chats' functions, for the head and the
+    // sandbox, and the head made from them, for the turns and the
+    // compactions.
+    const declarations: ReadonlyArray<Declaration> = HOSTED
+    const made = head(declarations)
     return (store) => {
       const base = Diagnostics.layer.pipe(Layer.provideMerge(Layer.succeed(Store, store)))
       const inner = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire)))
@@ -158,11 +166,11 @@ export const hostedStack = <E = GatewayError>(options: HostedOptions<E>): Effect
             ask: (request, how) => asker.ask(capped(request, cap), how)
           }))
       ).pipe(Layer.provide(inner), Layer.provideMerge(base))
-      const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: options.compactor, declarations: HOSTED })), Layer.provideMerge(ask))
+      const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: options.compactor, head: made })), Layer.provideMerge(ask))
       const limits = noFileLayer().pipe(Layer.provideMerge(memory))
-      const functions = hostedLayer.pipe(Layer.provideMerge(limits))
+      const functions = hostedLayer(declarations).pipe(Layer.provideMerge(limits))
       const sandbox = threadLayer(engine).pipe(Layer.provideMerge(functions))
-      const turns = Turns.layer({ declarations: HOSTED, hub: options.hub }).pipe(Layer.provideMerge(sandbox))
+      const turns = Turns.layer({ head: made, hub: options.hub }).pipe(Layer.provideMerge(sandbox))
       return ownLogs.pipe(Layer.provideMerge(turns))
     }
   })
