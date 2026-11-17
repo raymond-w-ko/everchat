@@ -135,9 +135,13 @@ work directory or an environment. The set is the core's `HOSTED`: `zoom`, `date`
 stack's list, which dies at its build when its entries' declarations are not that list
 (`packages/core/src/functions.ts`, "One list for each stack", `make` and `mismatches`;
 ec-0di3a). The core's `result` reads the call's
-whole output from the store (`store.call`) and writes no file (ec-o9i2n). The output limit
-of a host's chat writes no file either: the core's `noFileLayer`
-(`packages/core/src/limit.ts`) names `result(id)` only. The set is a parameter (the
+output from the store (`store.call`) and writes no file (ec-o9i2n): `result(id)` gives the
+whole output, and `result(id, from, to)` its characters from `from` (0 when not given) to
+before `to` (the end when not given) (`RESULT`; `part`, `packages/core/src/limit.ts:83-84`;
+ec-tdgk8). The output limit of a host's chat writes no file either: the line of a
+shortened result from the core's `noFileLayer` (`packages/core/src/limit.ts:168-178`;
+`where`, `:139-142`) names `result(id)` and `result(id, from, to)` only.
+The set is a parameter (the
 stack), so that the
 operator's other answer, the local functions, changes one caller: the stack that
 `everchat serve` gives. The sandbox stays as the design wants it for a hosted chat: a new QuickJS
@@ -1528,6 +1532,14 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
   own, because the local layers refuse a file with more than one tenant or chat
   (`packages/sqlite/src/sqlite.ts:323, 332`), and the host's file has many chats. It is
   made when it is not there.
+- **No config file.** The terminal's launch reads `config.json` in the home and loads the
+  functions of its MCP servers into the terminal's stack (`packages/local/src/config.ts`;
+  `packages/local/src/main.ts`, `layer`, its `servers`; ec-6i0ef, ec-xlf1a). `everchat
+  serve` reads no config file (`packages/local/src/main.ts`, `serveHost`;
+  `packages/local/src/serve.ts` and `packages/local/src/hosted.ts` name no config), so the
+  config's other settings (its model, its limit) do not reach the host. A host's chat has
+  no function from an MCP server: its set stays `HOSTED`, and no result of a host's chat
+  is a shortened result of a function from outside (lead, ec-q8d7n).
 - **One process for a home** (lead, ec-wp0xs, 9). The command does not lock its file.
   One `everchat serve` for a home is the help's rule (`packages/local/src/main.ts`,
   `ABOUT_SERVE`). A second one on the same home needs another port; then a chat that one
@@ -1541,7 +1553,8 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
   `http://127.0.0.1:<port>`, and its list of origins is that one origin. `serve(options,
   local)` gives the gate its `authority`, `127.0.0.1:<port>` with the port that the server
   got (`packages/server/src/serve.ts`, the head comment;
-  `packages/local/src/serve.ts:128-137`, `host`). While the host serves, a request whose `Host` header is not that text, byte
+  `packages/local/src/serve.ts:128-137`, `host`). While the host serves, a request whose
+  `Host` header is not that text, byte
   for byte, gets `403 forbidden_origin`, on every route and on a path that is no route,
   right after its place (section 3, "The checks of each request, in their order"; lead,
   ec-g3gkl, 1; `packages/server/src/http.ts:410-411`, `wrongHost`): this refuses a page
@@ -1653,12 +1666,15 @@ R9 and R10 for its chats and its tokens. Its rules are the inspector's
 - after R10's `404 no_chat` for a list of more than one chat, it hunts for the gone chats
   (lead, ec-ot20g, 1 to 3; lead, ec-88qxe, 1; `client.html:214-306`, `huntCall`, `search`
   and `hunt`; `:313-340`, `ask`):
-  - its next call of R10 asks a token for the open chat alone, and that token serves the
-    open chat's work at once; a `404 no_chat` on that call takes the open chat from the
-    list. While the hunt runs, the page's other asks of R10 name the open chat alone when
-    one is open; with no chat open, they name `tokenChats`, as with no hunt. The chat of a
-    Send that is not open still gets a token that names it after at most one more call of
-    R10, for it alone (`client.html:361-391`, `tokenFor` and `askFor`; lead, ec-8gqty, 1;
+  - when a chat is open, its next call of R10 asks a token for the open chat alone, and
+    that token serves the open chat's work at once; a `404 no_chat` on that call takes the
+    open chat from the list. With no chat open, there is no call for one chat: the hunt
+    starts at once on the list that was asked (`ask`, `open === null`). While the hunt
+    runs, the renewal's asks (`ask`) name the open chat alone when one is open; with no
+    chat open, they name `tokenChats`, as with no hunt. The chat of a Send that is not
+    open still gets a token that names it after at most one more call of R10: for it alone
+    while the hunt runs, and for `tokenChats` with it among them when the hunt has ended
+    before that call (`client.html:361-391`, `tokenFor` and `askFor`; lead, ec-8gqty, 1;
     ec-cdeu2, case 2);
   - the hunt runs behind: no ask, no R9 and no work of the open chat waits for it. It asks
     R10 for the halves of a list that holds a gone chat, down to one chat;
@@ -1666,8 +1682,10 @@ R9 and R10 for its chats and its tokens. Its rules are the inspector's
     `429` waits its `retry-after`, 1 s at least, and asks again, counted in the 30, with
     no error sentence on the page;
   - a chat leaves the list only after a `404 no_chat` of an R10 call that named that chat
-    alone. Another failure (a `500`, a fault of the network) ends the hunt with every chat
-    kept and no sentence; the next `404 no_chat` starts it again. A round that finds no
+    alone. Another failure (a `500`, a fault of the network) ends the hunt with no
+    sentence: a chat that an earlier call for it alone found gone has left the list, and
+    every chat not yet found gone is kept; the next `404 no_chat` starts it again. A round
+    that finds no
     gone chat ends the hunt. At a round's end it asks one token for the chats that are
     left (`tokenChats`), and hunts again when that is `404 no_chat` too;
 - the page's list of chats is the browser's, for the address's origin (lead, ec-hwa43; the
@@ -2172,10 +2190,13 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    time when each last had work (`Turns.worked`, `Memory.worked`). The host's timer reads
    them under the channel's lock (section 2).
 4. **`result` in the core, over the store.** Done (ec-o9i2n): the core gives `RESULT`,
-   whose function reads the call's output from the store (`store.call`) with no file,
+   whose function reads the call's output from the store (`store.call`) with no file, the
+   whole or its characters from `from` to before `to` (`result(id, from, to)`; `part`,
+   `packages/core/src/limit.ts:83-84`; ec-tdgk8),
    `HOSTED` (`zoom`, `date`, `result`) and `hostedLayer(declarations)`, a function of the
    stack's list (`packages/core/src/functions.ts`; ec-0di3a); and an output limit that writes no file and names
-   `result(id)` only, `noFileLayer` (`packages/core/src/limit.ts`).
+   `result(id)` and `result(id, from, to)` only, `noFileLayer`
+   (`packages/core/src/limit.ts:168-178`; `where`, `:139-142`).
 5. **The local stack as a function of a store.** Done (ec-lw754): `hostedStack`
    (`packages/local/src/hosted.ts:145-176`) builds the wire one time for the process (over
    `gatewayLayer`, when no `wire` is given), makes the list and the head one time for the
