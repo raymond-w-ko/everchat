@@ -73,6 +73,14 @@
 // the turn loop's `lock` (the person's message, the next turn of a waiting
 // message), then `order`, then the memory's own (inside `pushWith`). No one
 // holds a later one and waits for an earlier one, so they cannot deadlock.
+// Each wait for a lock can be interrupted, the memory's too (but in a part
+// that cannot be, as a stopped turn's end in its handler): a write through
+// the memory (a message's log, the person's message) waits for it under
+// `order`, and a cut wait writes and publishes nothing and takes no
+// number. Once the memory's lock is taken, its write, the publish of its
+// events and what comes next (the launch of a turn) are the memory's one
+// step (`pushWith`'s `then`), which nothing interrupts. A write that does
+// not pass through the memory takes `order` alone (`record`).
 //
 // The program's own stop (the scope closes) leaves the turn running in the
 // database: it is cut, and it goes on at the next launch. Only `stop`, the
@@ -212,8 +220,15 @@ export interface Options {
 
 export class Turns extends Context.Service<Turns, {
   // The person says something. It returns when the message is in the log.
-  // `key`: its sender's key (the head comment).
-  say(text: string, key?: string | null): Effect.Effect<Sent, StoreError>
+  // `key`: its sender's key (the head comment). `told`: run with the `Sent`
+  // that `say` gives. For a new message it runs in the step that nothing
+  // interrupts, after the commit, the publish and the launch of the turn,
+  // so a caller that interrupts `say` still learns of a message that is in
+  // the log; for a key that the chat has, before `say` returns. A `say`
+  // that fails, or whose wait is cut, never runs it. It must not call
+  // `Turns` or the memory: their locks are held, so it would wait for
+  // itself.
+  say(text: string, key?: string | null, told?: (sent: Sent) => Effect.Effect<void>): Effect.Effect<Sent, StoreError>
   // The person stops the turn that runs.
   stop(why?: string): Effect.Effect<void>
   // Waits until no turn runs.
@@ -284,19 +299,49 @@ export class Turns extends Context.Service<Turns, {
             return result
           })))
 
+        // The same for a write through the memory (`pushWith`): under
+        // `order`, the wait for the memory's lock can be interrupted, and
+        // nothing is written then; the write, the publish and `next` are the
+        // memory's one step (memory.ts, `apply`), so nothing interrupts them
+        // between the commit and the publish.
+        const recordPush = <B, A>(
+          said: ReadonlyArray<Said>,
+          also: (written: Array<Message>) => Effect.Effect<B, StoreError>,
+          key: string | null,
+          shape: (written: Array<Message>, more: B) => readonly [A, ReadonlyArray<TurnEvent>],
+          next: (result: A) => Effect.Effect<void> = () => Effect.void
+        ): Effect.Effect<A, StoreError> =>
+          order.withPermits(1)(Effect.suspend(() => {
+            let out: { readonly result: A } | null = null
+            return Effect.map(
+              memory.pushWith(said, also, key, (written, more) =>
+                Effect.gen(function*() {
+                  const [result, events] = shape(written, more)
+                  out = { result }
+                  for (const event of events) {
+                    yield* emit(event)
+                  }
+                  yield* next(result)
+                })),
+              () => out!.result
+            )
+          }))
+
         // Messages in the log, each page with its `message` row, then more
         // writes of the same event, in one transaction. `then` gives the
         // events that come after the messages' (a turn's `end`).
         const log = <B>(said: ReadonlyArray<Said>, also: Effect.Effect<B, StoreError>, then: (more: B) => ReadonlyArray<TurnEvent> = () => []) =>
-          record(Effect.map(
-            memory.pushWith(said, (written) =>
+          recordPush(
+            said,
+            (written) =>
               Effect.gen(function*() {
                 const numbers = yield* Effect.forEach(written, (message) => store.addEvent({ type: "message", msg: message.i, msgLast: message.i }))
                 return [numbers, yield* also] as const
-              })),
-            ([written, [numbers, more]]) =>
+              }),
+            null,
+            (written, [numbers, more]) =>
               [more, [...written.map((message, k): TurnEvent => ({ type: "message", n: numbers[k]!, message })), ...then(more)]] as const
-          ))
+          )
 
         // The messages that no request has taken in: the person's and the agents' reports.
         const waiting = Effect.flatMap(store.chat, (chat) => store.messagesAfter(chat.taken, ["user", "work"]))
@@ -567,7 +612,7 @@ export class Turns extends Context.Service<Turns, {
             }
           })
 
-        const say = (text: string, key?: string | null) =>
+        const say = (text: string, key?: string | null, told: (sent: Sent) => Effect.Effect<void> = () => Effect.void) =>
           lock.withPermits(1)(Effect.gen(function*() {
             // A key of another form: refused here, before the store and the
             // memory, with the error that the store's `append` gives for it;
@@ -579,17 +624,21 @@ export class Turns extends Context.Service<Turns, {
             if (key !== undefined && key !== null) {
               const known = Option.getOrNull(yield* store.keyed(key))
               if (known !== null) {
-                return { messages: known.messages, accepted: known.accepted, repeat: true } satisfies Sent
+                const sent: Sent = { messages: known.messages, accepted: known.accepted, repeat: true }
+                yield* told(sent)
+                return sent
               }
             }
             const idle = running === null
             // Its pages with its key, their `accepted`, and, when no turn
             // runs, the clear of the draft (the draft was this message) and a
             // turn with its `start`, in one transaction. The turn's fiber
-            // starts in the same step: no interruption of `say` leaves a
-            // turn running in the log with no fiber.
-            const [written, , accepted] = yield* record(Effect.map(
-              memory.pushWith([{ kind: "user", text }], (written) =>
+            // starts in the same step, then `told` runs: no interruption of
+            // `say` leaves a turn running in the log with no fiber, or a
+            // message in the log that `told` did not get.
+            const [sent] = yield* recordPush(
+              [{ kind: "user", text }],
+              (written) =>
                 Effect.gen(function*() {
                   const first = written[0]
                   const last = written[written.length - 1]
@@ -602,14 +651,16 @@ export class Turns extends Context.Service<Turns, {
                   }
                   yield* store.setDraft(null)
                   return [accepted, yield* begin(first.i)] as const
-                }), key),
-              ([written, [accepted, begun]]) =>
+                }),
+              key ?? null,
+              (written, [accepted, begun]) =>
                 [
-                  [written, begun?.turn ?? null, accepted] as const,
+                  [{ messages: written, accepted, repeat: false } satisfies Sent, begun?.turn ?? null] as const,
                   [{ type: "accepted", n: accepted, messages: written }, ...(begun === null ? [] : [started(begun)])]
-                ] as const
-            ), ([, turn]) => (turn === null ? Effect.void : launch(turn)))
-            return { messages: written, accepted, repeat: false } satisfies Sent
+                ] as const,
+              ([sent, turn]) => Effect.andThen(turn === null ? Effect.void : launch(turn), told(sent))
+            )
+            return sent
           }))
 
         const stop = (why = "Stopped.") =>

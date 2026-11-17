@@ -6,6 +6,15 @@
 // model of a slow store, reads the times, and asserts the bound that the
 // measure shows, so that a later change that makes one worse fails.
 //
+// A wait for the core's memory lock can be interrupted (memory.ts,
+// `pushWith`; lead, ec-pqhgg): the last two cases measure that. A stopped
+// load whose restart has 12 compactions answered frees the lock as risk 1
+// does, at lock + 6 × store (the compaction writes still queued when the
+// close reaches them are cut), not at 90 s as when the wait could not be
+// cut. Risk 2 is gone: a log that waits behind a compaction's write is cut
+// at the deadline, writes nothing and gives `ChatBusy`, and the lock is
+// free at the deadline itself.
+//
 // The model of a slow store (the lead's ruling 1): a wrapper over the store's
 // service that the stack gets, as turn.test.ts and host.test.ts wrap theirs.
 // Each call of the store waits a given time on the TestClock before it runs,
@@ -27,7 +36,7 @@
 // time of an event of the model.
 
 import { expect, test } from "bun:test"
-import { Clock, Context, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore, Stream } from "effect"
+import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
@@ -465,15 +474,20 @@ test("risk 1: a load stopped while it replays a restart of 14 large events reads
   )
 }, 20_000)
 
-test("a finding: the same stopped load with the 12 compactions of its restart answered: their writes queue on the memory's lock, and the close waits for each (90 s)", async () => {
+test("the same stopped load with the 12 compactions of its restart answered: the close cuts the compaction writes that wait for the memory's lock; only the one that takes it as the close begins runs, beside the restarted turn's call: the lock is free at lock + 6 × store (50 s), as in risk 1", async () => {
   const got = await measure((b, m, w, t0) => replay(w, null)(b, m, w, t0))
-  // 9 compaction writes from the deadline on, one after the other, each
-  // nearly store, before the flush: the lock is free at 89.976 s.
-  near(got.freed, 89_976)
-  expect(got.trace).toContain("transaction* 64.981-69.980, addDiagnostics* 69.980-74.979")
+  // The load's call in flight at the deadline ends at 24.989 s, and the
+  // close begins. The compaction write in flight then (19.990 s) frees the
+  // memory's lock at that moment, and the next queued write takes it before
+  // the close reaches the compactions: it runs beside the restarted turn's
+  // `messagesAfter` and costs no time of its own. Every other queued write
+  // is cut: none starts from 25 s on.
+  near(got.freed, 49_984)
+  expect(got.trace).toContain("messagesAfter* 24.989-29.988, transaction* 24.989-29.988, addDiagnostics* 29.988-34.987")
+  expect(got.trace.match(/transaction\* (2[5-9]|[3-9]\d|\d{3,})\./g)).toBeNull()
 }, 20_000)
 
-test("risk 2: a log that waits for the memory's own lock behind a compaction's write: the lock is free at 30 s (the page: 27.2 s)", async () => {
+test("risk 2 no more: a log that waits for the memory's own lock behind a compaction's write is cut at the deadline, logs nothing, and the lock is free at 20 s", async () => {
   const got = await measure((b, m, w, t0) =>
     Effect.gen(function*() {
       // The restart's log starts the compaction of its program's leaf, which
@@ -495,8 +509,10 @@ test("risk 2: a log that waits for the memory's own lock behind a compaction's w
       }
       return [t0 + 19_985]
     }))
-  // The compaction's write from 19.985 s, then the log's from 24.984 s.
-  near(got.freed, 29_983)
-  expect(got.trace).toContain("transaction* 19.985-24.984")
-  expect(got.trace).toContain("transaction 24.984-29.983")
+  // The compaction's write from 19.985 s; the log's wait for the memory's
+  // lock is cut at the deadline: no write of the log, `ChatBusy`.
+  near(got.freed, DEFAULTS.lock)
+  expect(got.trace).toContain("transaction* 19.985-")
+  expect(got.trace).not.toMatch(/transaction \d/)
+  expect(Exit.isFailure(got.exit) && Cause.findErrorOption(got.exit.cause)).toMatchObject({ _tag: "Some", value: { _tag: "ChatBusy" } })
 }, 20_000)

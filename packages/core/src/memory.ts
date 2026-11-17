@@ -571,10 +571,25 @@ export class Memory extends Context.Service<Memory, {
   // `append`); the store refuses a key of another form and one that the chat
   // has. If the write fails, the memory stops for good, as after any failed
   // write.
+  //
+  // The wait for the memory's lock can be interrupted (a deadline, a close
+  // of the scope): then nothing is changed or written (no row, no event
+  // number, no key), and the memory goes on. Once the lock is taken, the
+  // change, its write and `then` are one step that no interruption cuts.
+  // `then` runs after the commit, last in that step, and only when the write
+  // did not fail: a caller's publish of the events that the write numbered.
+  // It must not call the memory: the lock is not reentrant, so it would
+  // wait for itself.
+  //
+  // What a cut wait loses: a model's answer that was paid for and has no
+  // `usage` row (a compaction's, whose write waits for this lock too, or a
+  // turn's step); the next load or the restart asks again. A close one step
+  // earlier (in the request) loses the same.
   pushWith<B>(
     said: ReadonlyArray<Said>,
     also: (written: Array<Message>) => Effect.Effect<B, StoreError>,
-    key?: string | null
+    key?: string | null,
+    then?: (written: Array<Message>, more: B) => Effect.Effect<void>
   ): Effect.Effect<readonly [Array<Message>, B], StoreError>
 
   // The first message, from `from` on, from which the messages to the end
@@ -733,15 +748,17 @@ export class Memory extends Context.Service<Memory, {
 
       // One change of the state: the algorithm with no pause, then its
       // writes, then the jobs it started. One at a time, and never cut in
-      // the middle.
+      // the middle. The wait for the lock can be interrupted (a deadline, a
+      // close of the scope): a cut wait changes and writes nothing.
       // `wrote`: run once the writes are done, before the jobs start and
-      // the waiters wake.
+      // the waiters wake. `then`: run last, in the same step.
       const apply = <A, B = void>(
         change: () => A,
         also: ((written: Array<Message>) => Effect.Effect<B, StoreError>) | null = null,
-        wrote: (() => void) | null = null
+        wrote: (() => void) | null = null,
+        then: ((written: Array<Message>, more: B) => Effect.Effect<void>) | null = null
       ): Effect.Effect<readonly [A, Array<Message>, B], StoreError> =>
-        lock.withPermits(1)(Effect.gen(function*() {
+        lock.withPermits(1)(Effect.uninterruptible(Effect.gen(function*() {
           if (broken !== null) {
             return yield* Effect.fail(broken)
           }
@@ -761,8 +778,11 @@ export class Memory extends Context.Service<Memory, {
             yield* Effect.forkIn(run(job), scope)
           }
           yield* wake
+          if (then !== null) {
+            yield* then(written, more)
+          }
           return [result, written, more] as const
-        })).pipe(Effect.uninterruptible)
+        })))
 
       // Node (l, i)'s compaction: asked until a line fits, TRIES lines at
       // most, the shortest kept. Each try sends the same blocks. A try after
@@ -890,11 +910,11 @@ export class Memory extends Context.Service<Memory, {
 
       return Memory.of({
         push: (said) => Effect.map(apply(() => push(mem, said)), ([, written]) => written),
-        pushWith: (said, also, key) =>
+        pushWith: (said, also, key, then) =>
           Effect.map(apply(() => {
             push(mem, said)
             mem.journal.key = key ?? null
-          }, also), ([, written, more]) => [written, more] as const),
+          }, also, null, then ?? null), ([, written, more]) => [written, more] as const),
         whole,
         say,
         settle: (upto) => until(() => first(mem) >= upto),

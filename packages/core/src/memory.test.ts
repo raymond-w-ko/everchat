@@ -5,7 +5,7 @@
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Deferred, Effect, Fiber, Layer, Schedule } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Schedule } from "effect"
 import { TestClock } from "effect/testing"
 import { compactor, newFile, options, rows, withMemory } from "@everchat/local/testing"
 import {
@@ -627,6 +627,167 @@ test("`pushWith` with a key and no message reaches the store, which refuses it, 
   assert.equal(error.op, "append")
   assert.equal(String(error.cause), "Error: the sender's key has no message")
   assert.equal(also, 0)
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg"), [{ n: 0 }])
+})
+
+// The memory's lock (lead, ec-pqhgg, 1 and 2): its wait can be interrupted,
+// and a change that has taken it, its write and `then` run whole.
+// ----------------------------------------------------------------------
+
+// Lets every fiber that can run take its next steps.
+const ticks = Effect.gen(function*() {
+  for (let n = 0; n < 100; n++) yield* Effect.yieldNow
+})
+
+test("a `pushWith` that waits for the lock behind a held write and is interrupted ends before the holder; the store and the memory show nothing of it, and its key then writes one time", async () => {
+  const file = newFile()
+  const inside = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  // The store holds the append of the message "held" until the test lets it go.
+  const holding = Layer.effect(
+    Store,
+    Store.useSync((store) =>
+      Store.of({
+        ...store,
+        append: (messages, key) =>
+          messages[0]?.text === "held"
+            ? Effect.andThen(Deferred.succeed(inside, undefined), Effect.andThen(Deferred.await(gate), store.append(messages, key)))
+            : store.append(messages, key)
+      }))
+  ).pipe(Layer.provide(storeLayer(file, options())))
+  let also = 0
+  let then = 0
+  const got = await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const holder = yield* Effect.forkChild(memory.push([{ kind: "user", text: "held" }]))
+      yield* Deferred.await(inside)
+      const waiter = yield* Effect.forkChild(
+        memory.pushWith([{ kind: "user", text: "cut" }], () => Effect.sync(() => (also += 1)), "key-1", () => Effect.sync(() => (then += 1)))
+      )
+      yield* ticks
+      assert.equal(waiter.pollUnsafe(), undefined)
+      // The interruption is asked for, not awaited: the waiter has to end
+      // while the holder still holds the lock.
+      yield* Effect.forkChild(Fiber.interrupt(waiter))
+      for (let n = 0; n < 1000 && waiter.pollUnsafe() === undefined; n++) yield* Effect.yieldNow
+      const cut = waiter.pollUnsafe()
+      assert.ok(cut !== undefined && Exit.hasInterrupts(cut))
+      assert.equal(holder.pollUnsafe(), undefined)
+      const state = yield* memory.state
+      yield* Deferred.succeed(gate, undefined)
+      yield* Fiber.join(holder)
+      const [again] = yield* memory.pushWith([{ kind: "user", text: "again" }], () => Effect.void, "key-1")
+      return { count: state.count, again: again.map((message) => message.i), after: (yield* memory.state).count }
+    }).pipe(
+      // A failed check lets the write go too, so the layer can close.
+      Effect.ensuring(Deferred.succeed(gate, undefined)),
+      Effect.provide(Memory.layer.pipe(Layer.provideMerge(holding), Layer.provide(recorder().layer)))
+    )
+  )
+  // The holder's message only: the cut change never ran.
+  assert.equal(got.count, 1)
+  assert.equal(also + then, 0)
+  assert.deepStrictEqual(got.again, [1])
+  assert.equal(got.after, 2)
+  assert.deepStrictEqual(rows(file, "select i, text, sender_key from everchat_msg order by i"), [
+    { i: 0, text: "held", sender_key: null },
+    { i: 1, text: "again", sender_key: "key-1" }
+  ])
+})
+
+test("an interruption that comes after the body of `pushWith` began does not cut it: the write commits and `then` runs before the interruption ends it", async () => {
+  const file = newFile()
+  const inside = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  const seen: Array<string> = []
+  const exit = await withMemory(
+    file,
+    recorder().layer,
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      // `also` runs in the body, inside the write's transaction.
+      const writer = yield* Effect.forkChild(memory.pushWith(
+        [{ kind: "user", text: "whole" }],
+        () => Effect.andThen(Deferred.succeed(inside, undefined), Deferred.await(gate)),
+        null,
+        () => Effect.sync(() => seen.push("then"))
+      ))
+      yield* Deferred.await(inside)
+      const stopping = yield* Effect.forkChild(Effect.andThen(Fiber.interrupt(writer), Effect.sync(() => seen.push("interrupted"))))
+      yield* ticks
+      seen.push("let go")
+      yield* Deferred.succeed(gate, undefined)
+      yield* Fiber.join(stopping)
+      return yield* Fiber.await(writer)
+    }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))
+  )
+  assert.ok(Exit.hasInterrupts(exit))
+  assert.deepStrictEqual(seen, ["let go", "then", "interrupted"])
+  assert.deepStrictEqual(rows(file, "select i, text from everchat_msg"), [{ i: 0, text: "whole" }])
+})
+
+test("`then` runs after the commit, gets the pages and what `also` gave, and ends before the next change's body starts", async () => {
+  const file = newFile()
+  const inside = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  const seen: Array<unknown> = []
+  await withMemory(
+    file,
+    recorder().layer,
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      const first = yield* Effect.forkChild(memory.pushWith(
+        [{ kind: "user", text: "first" }],
+        (written) => Effect.succeed(written.length * 10),
+        null,
+        (written, more) =>
+          Effect.gen(function*() {
+            // Another connection reads the file: the rows are committed.
+            seen.push({ rows: rows(file, "select i, text from everchat_msg"), written: written.map((message) => [message.i, message.text]), more })
+            yield* Deferred.succeed(inside, undefined)
+            yield* Deferred.await(gate)
+            seen.push("then ends")
+          })
+      ))
+      yield* Deferred.await(inside)
+      const next = yield* Effect.forkChild(memory.pushWith([{ kind: "user", text: "next" }], () => Effect.sync(() => seen.push("next body"))))
+      yield* ticks
+      yield* Deferred.succeed(gate, undefined)
+      yield* Fiber.join(first)
+      yield* Fiber.join(next)
+    }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))
+  )
+  assert.deepStrictEqual(seen, [
+    { rows: [{ i: 0, text: "first" }], written: [[0, "first"]], more: 10 },
+    "then ends",
+    "next body"
+  ])
+})
+
+test("a `pushWith` whose write fails does not run `then`", async () => {
+  const file = newFile()
+  // The store, with a transaction that fails on demand.
+  let fail = false
+  const faulty = Layer.effect(
+    Store,
+    Store.useSync((store) =>
+      Store.of({
+        ...store,
+        transaction: (effect) =>
+          Effect.suspend(() => fail ? Effect.fail(new StoreError({ op: "transaction", cause: "disk full" })) : store.transaction(effect))
+      }))
+  ).pipe(Layer.provide(storeLayer(file, options())))
+  let then = 0
+  const error = await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      fail = true
+      return yield* Effect.flip(memory.pushWith([{ kind: "user", text: "lost" }], () => Effect.void, null, () => Effect.sync(() => (then += 1))))
+    }).pipe(Effect.provide(Memory.layer.pipe(Layer.provide(faulty), Layer.provide(recorder().layer))))
+  )
+  assert.ok(error instanceof StoreError)
+  assert.equal(then, 0)
   assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg"), [{ n: 0 }])
 })
 

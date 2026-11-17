@@ -4,7 +4,7 @@
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Deferred, Effect, Fiber, Layer, PubSub } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, PubSub } from "effect"
 import { TestClock } from "effect/testing"
 import * as path from "node:path"
 import { compactor, fakeWire, newFile, options, PICK, reply, rows, wireError } from "@everchat/local/testing"
@@ -18,7 +18,7 @@ import { Chats, Store, StoreError } from "./store.ts"
 import { limitLayer } from "@everchat/local/limitfile"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
 import { Sandbox } from "./sandbox.ts"
-import { CUT, cutText, HEAD, STOPPED, type TurnEvent, Turns, WHY, whyOf } from "./turn.ts"
+import { CUT, cutText, HEAD, type Sent, STOPPED, type TurnEvent, Turns, WHY, whyOf } from "./turn.ts"
 import { Stream } from "effect"
 
 type Run = (program: string) => Effect.Effect<{ output: string; failed: boolean }>
@@ -376,18 +376,18 @@ test("a listener gets the events in the order of their numbers: a message of the
       const real = yield* Memory
       return Memory.of({
         ...real,
-        pushWith: (said, also, key) =>
-          Effect.gen(function*() {
-            const out = yield* real.pushWith(said, also, key)
-            const say = window.say
-            if (say !== null && said[0]?.kind === "asst") {
-              window.say = null
-              opened = true
-              const fiber = yield* Effect.forkDetach(say)
-              yield* Effect.race(Fiber.await(fiber), Effect.sleep("100 millis"))
-            }
-            return out
-          })
+        pushWith: (said, also, key, then) =>
+          real.pushWith(said, also, key, (written, more) =>
+            Effect.gen(function*() {
+              const say = window.say
+              if (say !== null && said[0]?.kind === "asst") {
+                window.say = null
+                opened = true
+                const fiber = yield* Effect.forkDetach(say)
+                yield* Effect.race(Fiber.await(fiber), Effect.sleep("100 millis"))
+              }
+              if (then !== undefined) yield* then(written, more)
+            }))
       })
     })
   )
@@ -736,13 +736,13 @@ test("a message that is interrupted while its log writes is logged, its `start` 
     Memory.useSync((real) =>
       Memory.of({
         ...real,
-        pushWith: (said, also, key) =>
-          said[0]?.kind !== "user" ? real.pushWith(said, also, key) : Effect.gen(function*() {
-            const out = yield* real.pushWith(said, also, key)
-            yield* Deferred.succeed(inside, undefined)
-            yield* Effect.sleep("50 millis")
-            return out
-          })
+        pushWith: (said, also, key, then) =>
+          said[0]?.kind !== "user" ? real.pushWith(said, also, key, then) : real.pushWith(said, also, key, (written, more) =>
+            Effect.gen(function*() {
+              yield* Deferred.succeed(inside, undefined)
+              yield* Effect.sleep("50 millis")
+              if (then !== undefined) yield* then(written, more)
+            }))
       }))
   )
   const seen = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
@@ -758,6 +758,181 @@ test("a message that is interrupted while its log writes is logged, its `start` 
   assert.deepStrictEqual(seen.map((event) => event.type), ["accepted", "start", "text", "message", "end"])
   assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["asst", "Read."]])
   assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
+})
+
+// The memory's lock (lead, ec-pqhgg, 3): a write through the memory waits
+// for it, and that wait can be interrupted.
+
+// Holds the memory's lock until `gate`: a note's write whose `then` waits
+// (`then` runs under the lock). It returns once the lock is held.
+const hold = (gate: Deferred.Deferred<void>) =>
+  Effect.gen(function*() {
+    const memory = yield* Memory
+    const held = Deferred.makeUnsafe<void>()
+    const fiber = yield* Effect.forkDetach(
+      memory.pushWith([{ kind: "note", text: "held" }], () => Effect.void, null, () => Effect.andThen(Deferred.succeed(held, undefined), Deferred.await(gate)))
+    )
+    yield* Deferred.await(held)
+    return fiber
+  })
+
+test("a message cut while it waits for the memory's lock logs nothing and takes no event number, and the same key then logs it one time", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  const gate = Deferred.makeUnsafe<void>()
+  const got = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    const holder = yield* hold(gate)
+    const cut = yield* Effect.forkChild(turnsService.say("hello", "key-1"))
+    // It reads its key, then waits for the memory's lock.
+    yield* Effect.sleep("20 millis")
+    const waits = cut.pollUnsafe() === undefined
+    // The interruption is asked for, not awaited: the say has to end while
+    // the lock is still held.
+    yield* Effect.forkChild(Fiber.interrupt(cut))
+    yield* eventually(() => cut.pollUnsafe() !== undefined)
+    const exit = cut.pollUnsafe()
+    const after = counts(file)
+    const heard = yield* PubSub.remaining(subscription)
+    yield* Deferred.succeed(gate, undefined)
+    yield* Fiber.join(holder)
+    const sent = yield* turnsService.say("hello", "key-1")
+    yield* turnsService.idle
+    return { waits, exit, after, heard, sent, later: yield* PubSub.takeAll(subscription) }
+  }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))))
+  assert.equal(got.waits, true)
+  assert.ok(got.exit !== undefined && Exit.hasInterrupts(got.exit))
+  // The held note alone: no message of the say, no event, no turn.
+  assert.deepStrictEqual(got.after, [{ msgs: 1, events: 0, turns: 0 }])
+  assert.equal(got.heard, 0)
+  assert.equal(got.sent.repeat, false)
+  assert.equal(got.sent.accepted, 1)
+  assert.deepStrictEqual(rows(file, "select i, text, sender_key from everchat_msg where i < 2 order by i"), [
+    { i: 0, text: "held", sender_key: null },
+    { i: 1, text: "hello", sender_key: "key-1" }
+  ])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg where text = 'hello'"), [{ n: 1 }])
+  assert.deepStrictEqual(events(file).map((row) => [row.n, row.type]), [[1, "accepted"], [2, "start"], [3, "message"], [4, "end"]])
+  assert.deepStrictEqual(events(file), reported(got.later))
+  counted(file)
+})
+
+test("a turn cut while a log of it waits for the memory's lock leaves no row of that log, and its restart numbers its events with no hole and no number twice", async () => {
+  const file = newFile()
+  const gate = Deferred.makeUnsafe<void>()
+  const go = Deferred.makeUnsafe<void>()
+  // The model answers only once the test holds the memory's lock.
+  const first = fakeWire((asked) => says(asked, "Hi."))
+  const send = first.wire.send
+  let asking = false
+  first.wire.send = (asked) => Stream.unwrap(Effect.andThen(Effect.sync(() => (asking = true)), Effect.as(Deferred.await(go), send(asked))))
+  // The memory's wrapper lets the lock go when its scope closes: after the
+  // turn loop's (whose close interrupts the turn), before the memory's.
+  let released = false
+  const memory = Layer.effect(
+    Memory,
+    Effect.gen(function*() {
+      const real = yield* Memory
+      yield* Effect.addFinalizer(() => Effect.andThen(Effect.sync(() => (released = true)), Deferred.succeed(gate, undefined)))
+      return real
+    })
+  )
+  // If the close cannot end (the turn's wait cannot be cut), a watch lets
+  // the lock go after 2 s, and the case fails.
+  let stuck = false
+  await withTurns(file, first, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    yield* turnsService.say("hello")
+    yield* eventually(() => asking)
+    yield* hold(gate)
+    yield* Deferred.succeed(go, undefined)
+    // The step's answer is in; its log waits for the memory's lock.
+    yield* Effect.sleep("20 millis")
+    yield* Effect.forkDetach(Effect.gen(function*() {
+      for (let k = 0; k < 400 && !released; k++) yield* Effect.sleep("5 millis")
+      if (!released) {
+        stuck = true
+        yield* Deferred.succeed(gate, undefined)
+      }
+    }))
+  }), undefined, { memory })
+  assert.equal(stuck, false)
+  // No row of the step's log: no message, no event, no usage; the turn runs.
+  assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["note", "held"]])
+  assert.deepStrictEqual(events(file).map((row) => [row.n, row.type]), [[1, "accepted"], [2, "start"]])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_usage"), [{ n: 0 }])
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "running", why: null, first_msg: 0 }])
+  assert.deepStrictEqual(items(file), ["user"])
+  // The restart asks again and logs the step once.
+  const again = fakeWire((asked) => says(asked, "Hi again."))
+  await withTurns(file, again, noPrograms, Turns.use((turnsService) => turnsService.idle))
+  assert.equal(again.sent.length, 1)
+  assert.deepStrictEqual(messages(file).map((m) => [m.kind, m.text]), [["user", "hello"], ["note", "held"], ["asst", "Hi again."]])
+  assert.deepStrictEqual(events(file).map((row) => [row.n, row.type]), [[1, "accepted"], [2, "start"], [3, "start"], [4, "message"], [5, "end"]])
+  counted(file)
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
+})
+
+// `told` (lead, ec-fjqiq, ruling 5): the caller learns of each message that
+// is in the log, also when it interrupts `say` in the step of its commit.
+test("`told` gets the `Sent` of a say interrupted while its log writes, though its exit is an interruption; a say cut in its wait for the memory's lock does not call it; a repeat calls it with `repeat`", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Read."))
+  // The person's message "hello": once its log has committed, the step waits.
+  const inside = Deferred.makeUnsafe<void>()
+  const memory = Layer.effect(
+    Memory,
+    Memory.useSync((real) =>
+      Memory.of({
+        ...real,
+        pushWith: (said, also, key, then) =>
+          said[0]?.kind !== "user" || said[0].text !== "hello" ? real.pushWith(said, also, key, then) : real.pushWith(said, also, key, (written, more) =>
+            Effect.gen(function*() {
+              yield* Deferred.succeed(inside, undefined)
+              yield* Effect.sleep("50 millis")
+              if (then !== undefined) yield* then(written, more)
+            }))
+      }))
+  )
+  const gate = Deferred.makeUnsafe<void>()
+  const told: Array<{ readonly which: string; readonly sent: Sent }> = []
+  const tell = (which: string) => (sent: Sent) => Effect.sync(() => told.push({ which, sent }))
+  const got = await withTurns(file, wire, noPrograms, Effect.scoped(Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const subscription = yield* turnsService.subscribe
+    // Interrupted while its log writes.
+    const logging = yield* Effect.forkChild(turnsService.say("hello", "key-1", tell("logging")))
+    yield* Deferred.await(inside)
+    yield* Fiber.interrupt(logging)
+    const interrupted = yield* Fiber.await(logging)
+    yield* turnsService.idle
+    const heard = (yield* PubSub.takeAll(subscription)).map((event) => event.type)
+    // Cut in its wait for the memory's lock.
+    const holder = yield* hold(gate)
+    const waiting = yield* Effect.forkChild(turnsService.say("later", null, tell("waiting")))
+    yield* Effect.sleep("20 millis")
+    const waits = waiting.pollUnsafe() === undefined
+    yield* Effect.forkChild(Fiber.interrupt(waiting))
+    yield* eventually(() => waiting.pollUnsafe() !== undefined)
+    const cut = waiting.pollUnsafe()
+    yield* Deferred.succeed(gate, undefined)
+    yield* Fiber.join(holder)
+    // A repeat of the first key.
+    const repeat = yield* turnsService.say("hello", "key-1", tell("repeat"))
+    return { interrupted, heard, waits, cut, repeat }
+  }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))), undefined, { memory })
+  assert.ok(Exit.hasInterrupts(got.interrupted))
+  assert.deepStrictEqual(got.heard, ["accepted", "start", "text", "message", "end"])
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 0 }])
+  assert.equal(got.waits, true)
+  assert.ok(got.cut !== undefined && Exit.hasInterrupts(got.cut))
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_msg where text = 'later'"), [{ n: 0 }])
+  assert.deepStrictEqual(told.map(({ which, sent }) => [which, sent.messages.map((message) => [message.i, message.text]), sent.accepted, sent.repeat]), [
+    ["logging", [[0, "hello"]], 1, false],
+    ["repeat", [[0, "hello"]], 1, true]
+  ])
+  assert.equal(told[1]!.sent, got.repeat)
 })
 
 // Ends that are not good
