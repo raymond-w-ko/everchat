@@ -178,6 +178,17 @@ test("R2: last=0, 201, 1.5, -1, +5, 05x, an empty last and other forms get 400 b
   expect(ids(JSON.parse((await call(get(r2, A120, "?last=005"))).text).messages)).toEqual(range(115, 120))
 })
 
+test("R2: last of 17 digits with leading zeros gets 400; of 16 digits with leading zeros and a value in range passes", async () => {
+  const { r2 } = routes()
+  const long = await call(get(r2, A120, "?last=" + "5".padStart(17, "0")))
+  expect([long.status, long.text]).toEqual([400, errorText("bad_request")])
+  const sixteen = "5".padStart(16, "0")
+  expect(sixteen.length).toBe(16)
+  const answer = await call(get(r2, A120, "?last=" + sixteen))
+  expect(answer.status).toBe(200)
+  expect(ids(JSON.parse(answer.text).messages)).toEqual(range(115, 120))
+})
+
 test("R2 on a chat with no message and no event gives an empty list, seq 0, count 0 and turn null", async () => {
   const { r2 } = routes()
   const snapshot = JSON.parse((await call(get(r2, EMPTY))).text)

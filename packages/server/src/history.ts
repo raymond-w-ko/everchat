@@ -20,7 +20,10 @@
 // register no route: `serve` does.
 //
 // R2's query: `last`, a whole number from 1 to `history`, decimal digits
-// only; 50 when it is not given; else `400 bad_request`. R3's: `from` and
+// only; 50 when it is not given; else `400 bad_request`. The bound of 16
+// digits holds for every whole number of a query, R2's `last` too: of 17
+// digits, leading zeros counted, it is refused though its value is in
+// range. R3's: `from` and
 // `to`, both there, decimal digits only, at most 16 of them, with
 // `0 <= from < to` and `to - from <= history`; else `400 bad_request`. A
 // number of 16 digits above 2**53 - 1 is refused too: no message has such

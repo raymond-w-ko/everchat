@@ -7,7 +7,7 @@
 // the tests' fake wire. The secret is made-up bytes.
 
 import { expect, test } from "bun:test"
-import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore } from "effect"
+import { Clock, Context, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Ask } from "@everchat/core/ask"
@@ -176,6 +176,34 @@ const until = (check: () => boolean) =>
   })
 const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
 
+// Effect's TestClock, with the due times of the sleeps that have started
+// and not ended: a timer of a request that waits is one of them. A sleep
+// fixes its due time in the step that notes it, so a move of the clock
+// that comes before the TestClock holds the sleep still wakes it at that
+// time.
+const countingClock = Effect.map(TestClock.testClockWith(Effect.succeed), (base) => {
+  const pending: Array<number> = []
+  const clock: Clock.Clock = {
+    currentTimeMillisUnsafe: () => base.currentTimeMillisUnsafe(),
+    currentTimeMillis: base.currentTimeMillis,
+    currentTimeNanosUnsafe: () => base.currentTimeNanosUnsafe(),
+    currentTimeNanos: base.currentTimeNanos,
+    monotonicTimeNanosUnsafe: () => base.monotonicTimeNanosUnsafe(),
+    monotonicTimeNanos: base.monotonicTimeNanos,
+    sleep: (duration) =>
+      Effect.suspend(() => {
+        const due = base.currentTimeMillisUnsafe() + Duration.toMillis(duration)
+        pending.push(due)
+        return Effect.suspend(() => base.sleep(Duration.millis(Math.max(0, due - base.currentTimeMillisUnsafe())))).pipe(
+          Effect.ensuring(Effect.sync(() => {
+            pending.splice(pending.indexOf(due), 1)
+          }))
+        )
+      })
+  }
+  return { clock, pending }
+})
+
 const events = (file: string) => rows<{ n: number; type: string }>(file, "select n, type from everchat_event order by chat, n")
 const messages = (file: string) => rows<{ chat: number; i: number; text: string }>(file, "select chat, i, text from everchat_msg order by chat, i")
 const launches = (file: string) => rows<{ pid: number; ended: number | null }>(file, "select pid, ended from everchat_launch order by chat, n")
@@ -286,6 +314,29 @@ test("text/plain gets 415; application/json with charset=utf-8 passes; a key of 
       // A key of 128 bytes passes.
       expect((yield* seen(yield* b.post(chat, { body: json({ text: "keyed" }), headers: { "idempotency-key": "k".repeat(128) } }))).status).toBe(200)
       yield* idle(b, TENANT_A, chat)
+      yield* b.close
+    }))
+})
+
+test("a body type that is not JSON with a key that is not valid gets 415, not 400, and nothing of the body is read", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const chat = yield* b.real.make(TENANT_A, PICK)
+      for (const key of ["k".repeat(129), "", "a key"]) {
+        let pulled = 0
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulled += 1
+            controller.enqueue(new TextEncoder().encode(json({ text: "hello" })))
+            controller.close()
+          }
+        }, { highWaterMark: 0 })
+        const answer = yield* seen(yield* b.post(chat, { body, headers: { "content-type": "text/plain", "idempotency-key": key } }))
+        expect([key, answer.status, answer.text]).toEqual([key, 415, errorText("unsupported_type")])
+        expect(pulled).toBe(0)
+      }
+      expect(messages(file)).toEqual([])
       yield* b.close
     }))
 })
@@ -443,8 +494,12 @@ test("a message that waits past lockWait gets 503 with retry-after 1 and logs no
       const chat = yield* b.real.make(TENANT_A, PICK)
       const channel = yield* b.host.registry.held(TENANT_A, chat)
       yield* Semaphore.take(channel.lock, 1)
-      const waiting = yield* Effect.forkChild(Effect.flatMap(b.post(chat, { body: json({ text: "hello" }) }), seen))
-      yield* settle
+      const { clock, pending } = yield* countingClock
+      const waiting = yield* Effect.forkChild(
+        Effect.flatMap(b.post(chat, { body: json({ text: "hello" }) }).pipe(Effect.provideService(Clock.Clock, clock)), seen)
+      )
+      // The request waits for the lock: its `lockWait` timer has started.
+      yield* until(() => pending.includes(NOW + 500))
       yield* TestClock.adjust(499)
       yield* settle
       expect(waiting.pollUnsafe()).toBeUndefined()
@@ -504,10 +559,10 @@ test("a client that ends its request after the commit: the message is logged onc
       const b = yield* build(w)
       const chat = yield* b.real.make(TENANT_A, PICK)
       // The append is written; then it waits 5 s inside its transaction.
-      w.after = Effect.sleep("5 seconds")
-      const appends = w.appends
+      const { clock, pending } = yield* countingClock
+      w.after = Effect.provideService(Effect.sleep("5 seconds"), Clock.Clock, clock)
       const request = yield* Effect.forkChild(b.post(chat, { body: json({ text: "hello" }), headers: { "idempotency-key": "key-gone" } }))
-      yield* until(() => w.appends > appends)
+      yield* until(() => pending.includes(NOW + 5_000))
       const stopping = yield* Effect.forkChild(Fiber.interrupt(request))
       yield* settle
       expect(stopping.pollUnsafe()).toBeUndefined()

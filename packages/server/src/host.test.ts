@@ -42,14 +42,17 @@ const runs = (asked: Request, id: string, program: string): Reply =>
 const says = (asked: Request, text: string): Reply =>
   reply(asked, { text, output: [{ type: "message", content: [{ type: "output_text", text }] }] })
 
-// What a case changes: the wire's answers, the sandbox, and the gates of
-// the store's `append` (one time each): a wait before it, or a fault.
+// What a case changes: the wire's answers, the sandbox, the gates of the
+// store's `append` (one time each): a wait before it, or a fault, and a
+// wait before the load's `Chats.store` (one time).
 interface World {
   answer: (asked: Request, n: number) => Reply
   run: Run
   stall: Effect.Effect<void> | undefined
   fail: boolean
   appends: number
+  open: Effect.Effect<void> | undefined
+  opens: number
 }
 
 const world = (over: Partial<World> = {}): World => ({
@@ -58,6 +61,8 @@ const world = (over: Partial<World> = {}): World => ({
   stall: undefined,
   fail: false,
   appends: 0,
+  open: undefined,
+  opens: 0,
   ...over
 })
 
@@ -76,13 +81,19 @@ const stackOf = (w: World) => {
   }
 }
 
-// `Chats` over the real one, with the gates of `w` on the store's `append`.
+// `Chats` over the real one, with the gates of `w` on the store's `append`
+// and before `store`.
 const wrap = (real: typeof Chats.Service, w: World) =>
   Chats.of({
     make: real.make,
     reads: real.reads,
     store: (tenant, chat, launch) =>
-      Effect.map(real.store(tenant, chat, launch), (store) => ({
+      Effect.map(Effect.andThen(Effect.suspend(() => {
+        w.opens += 1
+        const open = w.open
+        w.open = undefined
+        return open ?? Effect.void
+      }), real.store(tenant, chat, launch)), (store) => ({
         ...store,
         append: (messages, key) =>
           Effect.gen(function*() {
@@ -491,7 +502,7 @@ test("a message that waits lockWait for the lock gets busy and logs nothing", as
 })
 
 test("work that passes lock is asked to stop; the lock and the hold are free only when it has ended, the lock first", async () => {
-  await run(() =>
+  await run((file) =>
     Effect.gen(function*() {
       const w = world()
       const b = yield* build(w)
@@ -509,14 +520,18 @@ test("work that passes lock is asked to stop; the lock and the hold are free onl
       expect(atLetGo).toEqual([1])
       const appends = w.appends
       w.stall = Effect.sleep("25 seconds")
-      const saying = yield* Effect.forkChild(Effect.flip(b.host.say(TENANT_A, uuid, "stalled", null)))
+      const saying = yield* Effect.forkChild(b.host.say(TENANT_A, uuid, "stalled", null))
       yield* until(() => w.appends > appends)
       yield* TestClock.adjust(b.host.limits.lock)
       yield* settle
       // The deadline asked; the append cannot be cut: all is still held.
       expect({ done: saying.pollUnsafe() !== undefined, free: free(channel), holders: channel.holders }).toEqual({ done: false, free: 0, holders: 3 })
       yield* TestClock.adjust("5 seconds")
-      expect(yield* Fiber.join(saying)).toEqual(new ChatBusy({ at: "work" }))
+      // The append committed: the work ended with success, and its end
+      // decides (lead, ec-y11ev, 2).
+      const sent = yield* Fiber.join(saying)
+      expect(sent.repeat).toBe(false)
+      expect(events(file).find((row) => row.n === sent.accepted)?.type).toBe("accepted")
       expect({ free: free(channel), holders: channel.holders, atLetGo }).toEqual({ free: 1, holders: 2, atLetGo: [1, 1] })
       yield* loadedOf(b, TENANT_A, uuid).turns.idle
       yield* b.close
@@ -603,6 +618,227 @@ test("a turn that started goes on after its caller was interrupted", async () =>
   )
 })
 
+test("a log that commits after lock gives Sent with its numbers, and the same key again gives them with repeat true", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world()
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, uuid, "load it", null)
+      yield* loadedOf(b, TENANT_A, uuid).turns.idle
+      const channel = channelOf(b, TENANT_A, uuid)
+      const appends = w.appends
+      w.stall = Effect.sleep(b.host.limits.lock + 5_000)
+      const saying = yield* Effect.forkChild(b.host.say(TENANT_A, uuid, "late", "key-late"))
+      yield* until(() => w.appends > appends)
+      yield* TestClock.adjust(b.host.limits.lock)
+      yield* settle
+      expect(saying.pollUnsafe()).toBeUndefined()
+      yield* TestClock.adjust(5_000)
+      const sent = yield* Fiber.join(saying)
+      expect({ repeat: sent.repeat, pages: sent.messages.map((m) => m.text) }).toEqual({ repeat: false, pages: ["late"] })
+      expect(events(file).find((row) => row.n === sent.accepted)?.type).toBe("accepted")
+      expect({ loaded: channel.loaded !== undefined, free: free(channel) }).toEqual({ loaded: true, free: 1 })
+      yield* loadedOf(b, TENANT_A, uuid).turns.idle
+      const before = events(file)
+      const again = yield* b.host.say(TENANT_A, uuid, "late", "key-late")
+      expect(again).toEqual({ messages: sent.messages, accepted: sent.accepted, repeat: true })
+      expect(events(file)).toEqual(before)
+      yield* b.close
+    })
+  )
+})
+
+test("work that the deadline cut (a load whose Chats.store waits past lock) gives ChatBusy at work and logs nothing; the next message loads the chat", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world({ open: Effect.sleep("1 hour") })
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      const channel = yield* b.host.registry.held(TENANT_A, uuid)
+      const saying = yield* Effect.forkChild(Effect.flip(b.host.say(TENANT_A, uuid, "cut", "key-cut")))
+      yield* until(() => w.opens > 0)
+      yield* settle
+      yield* TestClock.adjust(b.host.limits.lock - 1)
+      yield* settle
+      expect(saying.pollUnsafe()).toBeUndefined()
+      yield* TestClock.adjust(1)
+      expect(yield* Fiber.join(saying)).toEqual(new ChatBusy({ at: "work" }))
+      expect({ events: events(file), launches: launches(file), appends: w.appends, loaded: channel.loaded, free: free(channel) }).toEqual({
+        events: [],
+        launches: [],
+        appends: 0,
+        loaded: undefined,
+        free: 1
+      })
+      // The same key again is a new message: nothing was logged.
+      const sent = yield* b.host.say(TENANT_A, uuid, "cut", "key-cut")
+      expect(sent.repeat).toBe(false)
+      yield* loadedOf(b, TENANT_A, uuid).turns.idle
+      yield* b.close
+    })
+  )
+})
+
+// The deadline cuts say's waits (lead, ec-p9osd)
+// ----------------------------------------------
+// `Turns.say` runs with no uninterruptible region around it: the deadline
+// cuts each of its waits, and the core tells the `Sent` (`told`) in the
+// step that commits the message.
+
+const texts = (file: string) => rows<{ text: string }>(file, "select text from everchat_msg order by chat, i").map((row) => row.text)
+const accepted = (file: string) => events(file).filter((row) => row.type === "accepted").length
+
+// A cut `say` of the loaded chat `uuid` while `holder` holds a lock that its
+// `Turns.say` waits for: `ChatBusy` at work at the deadline, not before;
+// nothing of it in the log; the channel's lock free and its hold given back
+// while the holder still holds. Then `gate` lets the holder go, and the
+// same key is a new message. A failed check lets the holder go too, so the
+// case's scope can close.
+const cutWhileHeld = (b: Built, file: string, uuid: string, holder: Fiber.Fiber<unknown, unknown>, gate: Deferred.Deferred<void>) =>
+  Effect.gen(function*() {
+    const channel = channelOf(b, TENANT_A, uuid)
+    const before = { texts: texts(file), accepted: accepted(file) }
+    const saying = yield* Effect.forkChild(Effect.flip(b.host.say(TENANT_A, uuid, "cut", "key-cut")))
+    yield* settle
+    expect(free(channel)).toBe(0)
+    yield* TestClock.adjust(b.host.limits.lock - 1)
+    yield* settle
+    expect(saying.pollUnsafe()).toBeUndefined()
+    yield* TestClock.adjust(1)
+    yield* until(() => saying.pollUnsafe() !== undefined)
+    expect(yield* Fiber.join(saying)).toEqual(new ChatBusy({ at: "work" }))
+    // The holder still holds; the channel's lock and the hold are back.
+    expect({ holder: holder.pollUnsafe(), free: free(channel), holders: channel.holders }).toEqual({ holder: undefined, free: 1, holders: 1 })
+    expect({ texts: texts(file), accepted: accepted(file) }).toEqual(before)
+    yield* Deferred.succeed(gate, undefined)
+    yield* Fiber.join(holder)
+    expect(texts(file)).not.toContain("cut")
+    // Nothing was logged: the same key again is a new message, one time.
+    const again = yield* b.host.say(TENANT_A, uuid, "cut", "key-cut")
+    expect(again.repeat).toBe(false)
+    expect(texts(file).filter((text) => text === "cut")).toEqual(["cut"])
+    yield* loadedOf(b, TENANT_A, uuid).turns.idle
+  }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined)))
+
+test("a say whose wait for the memory's lock, behind a held write, passes the deadline is cut there: ChatBusy at work, nothing in the log, and the channel's lock is free before the holder ends", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world()
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, uuid, "load it", null)
+      const chat = loadedOf(b, TENANT_A, uuid)
+      yield* chat.turns.idle
+      // A write of the memory whose append waits for the gate: it holds the
+      // memory's lock, and not the loop's `lock` or `order`.
+      const gate = yield* Deferred.make<void>()
+      const appends = w.appends
+      w.stall = Deferred.await(gate)
+      const holder = yield* Effect.forkChild(chat.memory.push([{ kind: "user", text: "held" }]))
+      yield* until(() => w.appends > appends)
+      yield* cutWhileHeld(b, file, uuid, holder, gate)
+      // The held write is in the log before the message that was cut and sent again.
+      expect(texts(file).filter((text) => text === "held" || text === "cut")).toEqual(["held", "cut"])
+      yield* b.close
+    })
+  )
+})
+
+test("a say whose wait for the loop's lock (a say of the core that holds it) or for order (a turn's log that holds it) passes the deadline is cut there: ChatBusy at work, nothing in the log, and the channel's lock is free before the holder ends", async () => {
+  // The loop's `lock`: a `Turns.say` of the core itself, outside the
+  // channel's lock, whose append waits for the gate.
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world()
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, uuid, "load it", null)
+      const chat = loadedOf(b, TENANT_A, uuid)
+      yield* chat.turns.idle
+      const gate = yield* Deferred.make<void>()
+      const appends = w.appends
+      w.stall = Deferred.await(gate)
+      const holder = yield* Effect.forkChild(chat.turns.say("held"))
+      yield* until(() => w.appends > appends)
+      yield* cutWhileHeld(b, file, uuid, holder, gate)
+      yield* b.close
+    })
+  )
+  // `order`: a turn's log of its call's output, whose append waits for the
+  // gate; the turn runs outside the loop's `lock`.
+  await run((file) =>
+    Effect.gen(function*() {
+      const release = yield* Deferred.make<void>()
+      const started = yield* Deferred.make<void>()
+      const w = world({
+        answer: (asked, n) => (n === 1 ? runs(asked, "call_1", "slow()") : says(asked, "Done.")),
+        run: () => Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(release), { output: "2", failed: false }))
+      })
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, uuid, "do the slow thing", null)
+      const chat = loadedOf(b, TENANT_A, uuid)
+      yield* Deferred.await(started)
+      const gate = yield* Deferred.make<void>()
+      const appends = w.appends
+      w.stall = Deferred.await(gate)
+      yield* Deferred.succeed(release, undefined)
+      yield* until(() => w.appends > appends)
+      expect(yield* chat.turns.busy).toBe(true)
+      // The turn's own fiber holds `order`; it ends when the turn ends.
+      const holder = yield* Effect.forkChild(chat.turns.idle)
+      yield* cutWhileHeld(b, file, uuid, holder, gate)
+      expect(rows<{ status: string }>(file, "select status from everchat_turn order by rowid")[0]).toEqual({ status: "done" })
+      yield* b.close
+    })
+  )
+})
+
+test("a deadline that comes while the commit's step runs gives Sent: the message is in the log one time and its turn started", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world()
+      const b = yield* build(w)
+      const uuid = yield* b.real.make(TENANT_A, PICK)
+      yield* b.host.say(TENANT_A, uuid, "load it", null)
+      const chat = loadedOf(b, TENANT_A, uuid)
+      yield* chat.turns.idle
+      const channel = channelOf(b, TENANT_A, uuid)
+      const turns = rows(file, "select * from everchat_turn").length
+      // The append runs in the memory's step, under its lock: the step that
+      // commits the message. It waits for the gate past the deadline.
+      const gate = yield* Deferred.make<void>()
+      const appends = w.appends
+      w.stall = Deferred.await(gate)
+      const saying = yield* Effect.forkChild(b.host.say(TENANT_A, uuid, "in the step", "key-step"))
+      yield* until(() => w.appends > appends)
+      yield* TestClock.adjust(b.host.limits.lock)
+      yield* settle
+      // The deadline asked; the step runs whole: all is still held.
+      expect({ done: saying.pollUnsafe(), free: free(channel) }).toEqual({ done: undefined, free: 0 })
+      yield* Deferred.succeed(gate, undefined)
+      const exit = yield* Fiber.await(saying)
+      expect(Exit.isSuccess(exit) ? "Sent" : exit.cause).toBe("Sent")
+      if (!Exit.isSuccess(exit)) return
+      const sent = exit.value
+      expect({ repeat: sent.repeat, pages: sent.messages.map((m) => m.text) }).toEqual({ repeat: false, pages: ["in the step"] })
+      expect(events(file).find((row) => row.n === sent.accepted)?.type).toBe("accepted")
+      expect(texts(file).filter((text) => text === "in the step")).toEqual(["in the step"])
+      // Its turn started: a new turn row, and a `start` after `accepted`.
+      expect(rows(file, "select * from everchat_turn").length).toBe(turns + 1)
+      expect(events(file).some((row) => row.n > sent.accepted && row.type === "start")).toBe(true)
+      expect(free(channel)).toBe(1)
+      yield* chat.turns.idle
+      expect(rows<{ status: string }>(file, "select status from everchat_turn order by rowid").at(-1)).toEqual({ status: "done" })
+      // The same key again: a repeat, and nothing more in the log.
+      const again = yield* b.host.say(TENANT_A, uuid, "in the step", "key-step")
+      expect(again).toEqual({ messages: sent.messages, accepted: sent.accepted, repeat: true })
+      yield* b.close
+    })
+  )
+})
+
 // The loader's errors
 // -------------------
 
@@ -659,6 +895,88 @@ test("two tenants with one UUID text have two windows; a message in does not cou
       expect(yield* Effect.flip(b.host.count(TENANT_A, uuid))).toBeInstanceOf(TooMany)
       yield* b.host.count(TENANT_B, uuid)
       yield* loadedOf(b, TENANT_A, uuid).turns.idle
+      yield* b.close
+    })
+  )
+})
+
+// The reviewer's probe (lead, ec-y11ev, 1): X counted at 1,000 s, the clock
+// set back to 0, Y counted 30 times; at 100 s Y's window has ended.
+test("the clock set back: Y's window counts from 1 again at 100 s with no refusal under 1 second, and ends saidWindow after its own start", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const x = "11111111-1111-4111-8111-111111111111"
+      const y = "22222222-2222-4222-8222-222222222222"
+      yield* TestClock.setTime(1_000_000)
+      yield* b.host.count(TENANT_A, x)
+      yield* TestClock.setTime(0)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, y)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, y))).toEqual(new TooMany({ seconds: 60 }))
+      yield* TestClock.setTime(100_000)
+      // A new window from 100 s: 30 pass, then the refusal's seconds.
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, y)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, y))).toEqual(new TooMany({ seconds: 60 }))
+      yield* TestClock.setTime(159_999)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, y))).toEqual(new TooMany({ seconds: 1 }))
+      yield* TestClock.setTime(160_000)
+      yield* b.host.count(TENANT_A, y)
+      yield* b.close
+    })
+  )
+})
+
+test("a pair whose window ended counts from 1 again though another pair's window, counted before it, has not ended", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const x = "11111111-1111-4111-8111-111111111111"
+      const y = "22222222-2222-4222-8222-222222222222"
+      yield* TestClock.setTime(1_000_000)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, x)
+      yield* TestClock.setTime(0)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, y)
+      yield* TestClock.setTime(60_000)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, y)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, y))).toEqual(new TooMany({ seconds: 60 }))
+      // X's window started after now: X too counts from 1, from now.
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, x)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, x))).toEqual(new TooMany({ seconds: 60 }))
+      yield* b.close
+    })
+  )
+})
+
+test("a clock that steps back before the asked pair's start gives a new window from now; seconds is 1 in its last millisecond", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const chat = "11111111-1111-4111-8111-111111111111"
+      yield* TestClock.setTime(50_000)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, chat)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, chat))).toEqual(new TooMany({ seconds: 60 }))
+      yield* TestClock.setTime(49_999)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, chat)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, chat))).toEqual(new TooMany({ seconds: 60 }))
+      yield* TestClock.setTime(109_998)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, chat))).toEqual(new TooMany({ seconds: 1 }))
+      yield* TestClock.setTime(109_999)
+      yield* b.host.count(TENANT_A, chat)
+      yield* b.close
+    })
+  )
+})
+
+test("two chats of one tenant have two windows: 30 of each pass", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const one = "11111111-1111-4111-8111-111111111111"
+      const two = "22222222-2222-4222-8222-222222222222"
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, one)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, two)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, one))).toBeInstanceOf(TooMany)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, two))).toBeInstanceOf(TooMany)
       yield* b.close
     })
   )

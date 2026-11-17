@@ -25,12 +25,21 @@
 //    `503` with `retry-after: 1`), and nothing is logged.
 // 3. Under the lock, with the deadline `lock` from the moment it took the
 //    lock: it loads the chat when the channel has none, then `Turns.say`.
-//    At the deadline it interrupts that work, and gives `ChatBusy` when the
-//    work has ended. The loader's errors pass typed: `NoChat`, `LaunchLive`
-//    (`409 chat_elsewhere`), `LoadedFull` (`503`, `retry-after: 5`),
-//    `StoreError` and `StackFailed` (`500 internal`, with one line of
-//    Effect's log that names the store's operation, and no text of a
-//    message).
+//    At the deadline it interrupts that work and waits for its end: the
+//    load stops at its next wait, and so does `Turns.say` (its waits for
+//    the loop's `order` and `lock`, the keyed read, the memory's lock); a
+//    step of `Turns.say` that began runs whole (the core's rule). The core
+//    tells the `Sent` (`told`) in the step that commits the message, so a
+//    message in the log always gives its `Sent`: also when the deadline
+//    passed before the work's end, and also when the work's exit is the
+//    deadline's interruption (lead, ec-y11ev, 2; ec-p9osd). Work that the
+//    deadline cut with no `Sent` gives `ChatBusy`, and nothing of it is in
+//    the log. So a message that is in the log is never answered
+//    `ChatBusy`. The loader's errors pass typed: `NoChat`,
+//    `LaunchLive` (`409 chat_elsewhere`), `LoadedFull` (`503`,
+//    `retry-after: 5`), `StoreError` and `StackFailed` (`500 internal`,
+//    with one line of Effect's log that names the store's operation, and
+//    no text of a message).
 //
 // A deadline asks; the work's end frees (O2, Q1). The lock and the hold go
 // back when the work under the lock has ended, never before: at the
@@ -47,9 +56,12 @@
 // The rate (`count`, "Admission", 8): a fixed window of `saidWindow` that
 // starts at the first message counted, for a chat of a tenant (both: the
 // key is the pair); past `said` in a window, `TooMany` with the whole
-// seconds to the window's end, rounded up (`429 too_many`). The windows are
-// the host's, not the channel's, and a window that has ended leaves the
-// map. The caller counts; `say` does not.
+// seconds to the window's end, rounded up, and at least 1 (`429
+// too_many`). The asked pair's window is new, its count 1 from now, when it
+// has ended or when the clock is before its start (the clock stepped back;
+// lead, ec-y11ev, 1). The windows are the host's, not the channel's; a
+// window that has ended, or whose start is after now, leaves the map. The
+// caller counts; `say` does not.
 //
 // The layer's end: each client of each channel ends with `stop`, then each
 // loaded chat is unloaded (the loader's end), so each launch ends. The host
@@ -94,8 +106,8 @@ export class MessageRefused extends Schema.TaggedError<MessageRefused>()("Messag
 }) {}
 
 // A message in that waited `lockWait` for the channel's lock (`lock`), or
-// whose work under the lock passed its deadline (`work`): the routes answer
-// `503 busy` with `retry-after: 1`.
+// whose work under the lock the deadline cut (`work`: its exit is not a
+// success): the routes answer `503 busy` with `retry-after: 1`.
 export class ChatBusy extends Schema.TaggedError<ChatBusy>()("ChatBusy", {
   at: Schema.Literals(["lock", "work"])
 }) {}
@@ -201,34 +213,52 @@ const make = (options: HostOptions) =>
 
     const loader = yield* makeLoader({ stack: options.stack, launch: options.launch, limits, registry })
 
-    // The rate: the windows in the order of their start, by the pair.
+    // The rate: the windows by the pair, in the order of their start while
+    // the clock does not step back; `latest` is the time of the last count.
     const windows = new Map<string, Window>()
+    let latest = Number.NEGATIVE_INFINITY
+    // Drops each window that has ended and each whose start is after `now`.
+    // In the order of their start, a window that has neither means that no
+    // later one has: the sweep stops there. After the clock stepped back, the
+    // order may not hold, so it goes through all; what stays then starts at
+    // or before `now`, in order, and the order holds again.
+    const sweep = (now: number) => {
+      const stepped = now < latest
+      latest = now
+      for (const [key, window] of windows) {
+        const live = window.start <= now && now < window.start + limits.saidWindow
+        if (live && !stepped) break
+        if (!live) windows.delete(key)
+      }
+    }
     const count = (tenant: string, chat: string) =>
       Effect.gen(function*() {
         const now = yield* Clock.currentTimeMillis
-        // The windows that have ended leave the map, the oldest first.
-        for (const [key, window] of windows) {
-          if (now < window.start + limits.saidWindow) break
-          windows.delete(key)
-        }
         const key = JSON.stringify([tenant, chat])
         const window = windows.get(key)
-        if (window === undefined) {
+        let refused: TooMany | undefined
+        if (window === undefined || now < window.start || now >= window.start + limits.saidWindow) {
+          // A new window, from now, at the map's end.
+          windows.delete(key)
           windows.set(key, { start: now, count: 1 })
-          return
+        } else if (window.count >= limits.said) {
+          refused = new TooMany({ seconds: Math.max(1, Math.ceil((window.start + limits.saidWindow - now) / 1000)) })
+        } else {
+          window.count += 1
         }
-        if (window.count >= limits.said) {
-          return yield* new TooMany({ seconds: Math.ceil((window.start + limits.saidWindow - now) / 1000) })
-        }
-        window.count += 1
+        sweep(now)
+        if (refused !== undefined) return yield* refused
       })
 
     // The work under the lock: the load when the channel has no loaded
-    // chat, then the message's log and the start of its turn.
-    const work = (channel: Channel<LoadedChat>, text: string, key: string | null) =>
+    // chat, then the message's log and the start of its turn. Both can be
+    // cut at their waits. An interruption that lands as `Turns.say`'s commit
+    // step ends would drop its `Sent`, though its message is in the log: so
+    // `said` gets the `Sent` from the core's `told`, which runs in that step.
+    const work = (channel: Channel<LoadedChat>, text: string, key: string | null, said: (sent: Sent) => void) =>
       Effect.gen(function*() {
         const chat = channel.loaded ?? (yield* loader.load(channel))
-        return yield* chat.turns.say(text, key)
+        return yield* chat.turns.say(text, key, (sent) => Effect.sync(() => said(sent)))
       })
 
     // The end of a failed work: one line of the log, with no text of a message.
@@ -252,13 +282,24 @@ const make = (options: HostOptions) =>
           if (waited.stopped !== null) return yield* Effect.failCause(waited.stopped)
           if (Exit.isFailure(waited.exit)) return yield* new ChatBusy({ at: "lock" })
           // The work under the lock, with its deadline.
-          const done = yield* within(work(channel, text, key), limits.lock)
+          let sent: Sent | undefined
+          const done = yield* within(work(channel, text, key, (given) => {
+            sent = given
+          }), limits.lock)
           if (Exit.isFailure(done.exit)) {
             const error = Cause.findErrorOption(done.exit.cause)
+            // Every `StoreError` unloads, also the core's refusal of a key's
+            // form, which fails that say alone: the core gives it as a failed
+            // `append` with a plain error, as a write that failed may be, and
+            // only its text tells them apart; no input reaches it here (the
+            // key's check above, and the limit `key` at most 128).
             if (error._tag === "Some" && error.value instanceof StoreError) yield* loader.unload(channel)
             if (error._tag === "Some") yield* logged(error.value)
           }
           if (done.stopped !== null) return yield* Effect.failCause(done.stopped)
+          // A message in the log: its `Sent`, late or not, also when the
+          // work's exit is the deadline's interruption.
+          if (sent !== undefined) return sent
           if (done.late) return yield* new ChatBusy({ at: "work" })
           return yield* done.exit
         })))
