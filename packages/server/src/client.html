@@ -213,7 +213,10 @@ const hold = (data, list) => {
 
 // The hunt for gone chats (lead, ec-ot20g). R10's `404 no_chat` does not
 // say which chat of a list is gone, so the hunt asks R10 again for each
-// half of the list, down to the one chat, which leaves the list. It runs
+// half of the list, down to the one chat. A chat leaves the list only by a
+// `404 no_chat` of a call for it alone (lead, ec-88qxe, 1): where the
+// halves come to one chat that no call named alone (the other half was
+// there), the hunt asks for it alone first, and a `200` keeps it. It runs
 // behind: the open chat's work and "New chat" never wait for it. It makes
 // at most HUNT calls of R10 in each SPAN ms (half of the host's rate), and
 // after a `429` it waits the `retry-after` and asks again, with no
@@ -248,32 +251,39 @@ const holdsGone = async (list) => {
 }
 
 // `list` holds at least one gone chat: each gone one leaves the list.
-const search = async (list) => {
+// `named`: a call of R10 for this very list answered `404 no_chat`; else
+// that is inferred, and a chat alone is asked for first.
+const search = async (list, named) => {
   if (list.length === 1) {
-    forget(list[0])
+    if (named || (await holdsGone(list))) forget(list[0])
     return
   }
   const half = Math.ceil(list.length / 2)
   const first = list.slice(0, half)
   const second = list.slice(half)
   if (await holdsGone(first)) {
-    await search(first)
-    if (await holdsGone(second)) await search(second)
+    await search(first, true)
+    if (await holdsGone(second)) await search(second, true)
   } else {
-    await search(second)
+    await search(second, false)
   }
 }
 
 // Starts the hunt in `list`, which holds a gone chat when `gone` (else the
-// hunt asks first). One hunt at a time: its last ask covers a later list.
-const hunt = (list, gone) => {
+// hunt asks first); `named`: a call for this very list said so. One hunt at
+// a time: its last ask covers a later list.
+const hunt = (list, gone, named) => {
   if (hunting !== null || list.length === 0) return
   hunting = (async () => {
     let next = list
     let known = gone
+    let said = gone && named
     for (;;) {
       const before = chats.length
-      if (next.length > 0 && (known || (await holdsGone(next)))) await search(next)
+      if (next.length > 0) {
+        if (known) await search(next, said)
+        else if (await holdsGone(next)) await search(next, true)
+      }
       const rest = tokenChats()
       if (rest.length === 0) return
       const answer = await huntCall(rest)
@@ -286,6 +296,7 @@ const hunt = (list, gone) => {
       if (!noChat(answer) || chats.length === before) return
       next = rest
       known = true
+      said = true
     }
   })()
     .catch(() => {})
@@ -312,17 +323,19 @@ const ask = async () => {
   }
   const rest = list.filter((one) => one !== open)
   if (open === null || !list.includes(open)) {
-    hunt(rest, true)
+    // `rest` is the list that was asked.
+    hunt(rest, true, true)
     return null
   }
   const alone = await R10([open])
   if (alone.ok) {
-    hunt(rest, true)
+    // The open chat is there, so the rest holds the gone chat: inferred.
+    hunt(rest, true, false)
     return hold(alone.data, [open])
   }
   if (!noChat(alone)) throw new Error(alone.message)
   forget(open)
-  hunt(rest, false)
+  hunt(rest, false, false)
   return null
 }
 
@@ -371,7 +384,7 @@ const askFor = async (chat) => {
     forget(chat)
     return null
   }
-  hunt(list, true)
+  hunt(list, true, true)
   const error = new Error("The host gave no token for this chat.")
   error.unnamed = true
   throw error

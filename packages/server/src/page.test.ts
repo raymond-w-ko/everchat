@@ -260,7 +260,7 @@ test("(b) R9: a body whose read fails in its middle or at once is 400 bad_reques
   expect(lines.join("\n")).not.toContain("the client reset")
 })
 
-test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its seconds, rounded up (1 at 500 ms and 2 at 1,500 ms before the window's end), 1 in its last millisecond; the window's end and a clock that steps back give a new window; a store's failure is 500 and has counted", async () => {
+test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its seconds, rounded up (1 at 500 ms, 2 at 1,300 ms and at 1,500 ms before the window's end), 1 in its last millisecond; the window's end and a clock that steps back give a new window; a store's failure is 500 and has counted", async () => {
   const { find, calls } = await pageOf()
   for (let k = 0; k < 10; k++) expect((await ask(find, "chats")).status).toBe(200)
   const many = await ask(find, "chats")
@@ -268,8 +268,9 @@ test("(b) R9's rate: 10 in a window of a minute; the 11th is 429 with its second
   expect(calls.make).toBe(10)
   const late = await ask(find, "chats", { at: NOW + 59_999 })
   expect([late.status, late.headers["retry-after"]]).toEqual([429, "1"])
-  // In the middle of a second of the window: rounded up.
-  for (const [before, seconds] of [[500, "1"], [1_500, "2"]] as const) {
+  // In the middle of a second of the window: rounded up. At 1,300 ms a
+  // rounding to the nearest would give 1 (ec-6wsu1, 3).
+  for (const [before, seconds] of [[500, "1"], [1_300, "2"], [1_500, "2"]] as const) {
     const mid = await ask(find, "chats", { at: NOW + 60_000 - before })
     expect([before, mid.status, mid.headers["retry-after"]]).toEqual([before, 429, seconds])
   }
@@ -357,14 +358,14 @@ test("(c) R10 gives a token of the local tenant for the body's chats with exp 60
   expect(claimsOf((JSON.parse(wide.text) as { token: string }).token).chats).toEqual(all)
 })
 
-test("(c) R10's rate: 60 in a minute; the 61st is 429 with its seconds, rounded up (1 at 500 ms and 2 at 1,500 ms before the window's end), before its body's checks; a refused body counted too", async () => {
+test("(c) R10's rate: 60 in a minute; the 61st is 429 with its seconds, rounded up (1 at 500 ms, 2 at 1,300 ms and at 1,500 ms before the window's end), before its body's checks; a refused body counted too", async () => {
   const { find, made } = await pageOf()
   for (let k = 0; k < 59; k++) expect((await ask(find, "token", { body: tokenBody([C1]) })).status).toBe(200)
   expect((await ask(find, "token", { body: "no json" })).status).toBe(400)
   const many = await ask(find, "token", { body: "no json" })
   expect([many.status, many.headers["retry-after"], many.text]).toEqual([429, "60", errorText("too_many")])
   expect((await ask(find, "token", { body: tokenBody([C1]), at: NOW + 30_000 })).headers["retry-after"]).toBe("30")
-  for (const [before, seconds] of [[500, "1"], [1_500, "2"]] as const) {
+  for (const [before, seconds] of [[500, "1"], [1_300, "2"], [1_500, "2"]] as const) {
     const mid = await ask(find, "token", { body: tokenBody([C1]), at: NOW + 60_000 - before })
     expect([before, mid.status, mid.headers["retry-after"]]).toEqual([before, 429, seconds])
   }

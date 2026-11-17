@@ -690,6 +690,64 @@ test("(f) the waits: after busy 1 s, twice as long in a row, at most 30 s, a lon
   expect(failing.sockets.length).toBe(2)
 })
 
+test("(f) the waits, R4: a fetch with no answer is a connection that could not be made; it waits as after busy, 1 s, twice as long in a row, at most 30 s, and connects again with its last number; an end of a stream that ran connects again at once", async () => {
+  // R4's fetch fails with no answer, eight times in a row.
+  let down = 8
+  const page = await load({
+    stored: JSON.stringify([A]),
+    chats: { [A]: SNAPSHOT },
+    route: (call) => (call.path === chatPath(A, "/events") && down-- > 0 ? "network" : undefined)
+  })
+  await page.clock.advance(200_000)
+  const times = (list: Array<Sent>) => list.slice(1).map((one, k) => one.at - list[k]!.at)
+  const events = page.calls("GET", chatPath(A, "/events"))
+  expect(times(events)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000])
+  expect(events.map((one) => one.query.after)).toEqual(Array(9).fill("2"))
+  // No snapshot again: the view keeps its last number.
+  expect(page.calls("GET", chatPath(A)).length).toBe(1)
+  expect([page.streams.length, page.$("state").textContent]).toEqual([1, "connected by the stream"])
+
+  // The stream ran: its end connects again at once, after its last number.
+  const ends = page.clock.now
+  page.streams[0]!.send(...EVENTS.slice(0, 2))
+  page.streams[0]!.end()
+  await page.clock.advance(0)
+  expect(page.calls("GET", chatPath(A, "/events")).slice(9).map((one) => [one.at - ends, one.query.after])).toEqual([[0, "4"]])
+  expect(page.$("error").textContent).toBe("")
+})
+
+test("(f) the waits, R6: a socket closed before its open, with a code that is not the host's, is a connection that could not be made; it waits as after busy, and connects again with its last number; a close of a socket that ran connects again at once", async () => {
+  const page = await load({ stored: JSON.stringify([A]), chats: { [A]: SNAPSHOT } })
+  page.streams[0]!.send(...EVENTS.slice(0, 2))
+  await page.clock.flush()
+  await page.way("socket")
+  // 1 s, then 2 s, then 4 s.
+  for (const [k, ms] of [[0, 1000], [1, 2000], [2, 4000]] as const) {
+    page.sockets[k]!.end(1006)
+    await page.clock.advance(ms - 1)
+    expect([k, page.sockets.length]).toEqual([k, k + 1])
+    await page.clock.advance(1)
+    expect([k, page.sockets.length]).toEqual([k, k + 2])
+  }
+  // The fourth opens: its `auth` has the last number, and `ready` ends the row.
+  const ran = page.sockets[3]!
+  ran.open()
+  expect(ran.sent.map((one) => JSON.parse(one).after)).toEqual([4])
+  ran.give({ type: "ready" })
+  expect(page.$("state").textContent).toBe("connected by the socket")
+  // The socket ran: a close with the same code connects again at once.
+  ran.end(1006)
+  await page.clock.advance(0)
+  expect(page.sockets.length).toBe(5)
+  // And a close before the open after that row waits 1 s again.
+  page.sockets[4]!.end(1006)
+  await page.clock.advance(999)
+  expect(page.sockets.length).toBe(5)
+  await page.clock.advance(1)
+  expect(page.sockets.length).toBe(6)
+  expect(page.$("error").textContent).toBe("")
+})
+
 test("(g) a chat that R10 answers 404 no_chat for leaves the list", async () => {
   // One stored chat that the host does not have: dropped, and nothing more is asked.
   const one = await load({ stored: JSON.stringify([B]), chats: {} })
@@ -700,10 +758,11 @@ test("(g) a chat that R10 answers 404 no_chat for leaves the list", async () => 
 
   // Three, the middle one gone: R10 does not say which. The page asks for the
   // open chat (C) alone, whose token serves its R2; then, behind, for halves
-  // of the rest ([A] is there, so B is the gone one), and at the end one
+  // of the rest ([A] is there, so B may be the gone one: it is asked for
+  // alone, and leaves by its own 404; lead, ec-88qxe, 1), and at the end one
   // token for every chat that is left.
   const three = await load({ stored: JSON.stringify([A, B, C]), chats: { [A]: {}, [C]: {} } })
-  expect(three.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)).toEqual([[A, B, C], [C], [A], [A, C]])
+  expect(three.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)).toEqual([[A, B, C], [C], [A], [B], [A, C]])
   expect(JSON.parse(three.stored()!)).toEqual([A, C])
   expect(three.texts("#chats button")).toEqual([C, A])
   expect(auth(three.calls("GET", chatPath(C))[0]!)).toBe("Bearer " + three.host.issued[0])
@@ -711,7 +770,7 @@ test("(g) a chat that R10 answers 404 no_chat for leaves the list", async () => 
   expect(three.host.tokens.get(three.host.issued.at(-1)!)!.chats).toEqual([A, C])
   // A switch to A takes the last token, which names it: no more R10.
   await three.open(A)
-  expect(three.calls("POST", token("token")).length).toBe(4)
+  expect(three.calls("POST", token("token")).length).toBe(5)
   expect(auth(three.calls("GET", chatPath(A))[0]!)).toBe("Bearer " + three.host.issued.at(-1))
   expect(three.$("error").textContent).toBe("")
 })
@@ -1011,7 +1070,7 @@ test("(n) ruling 3: a 429 in the hunt waits its retry-after and asks again, with
   await page.clock.advance(6_999)
   expect(asks().length).toBe(3)
   await page.clock.advance(1)
-  expect(asks()).toEqual([[[A, B, C], 0], [[C], 0], [[A], 0], [[A], 7000], [[A, C], 7000]])
+  expect(asks()).toEqual([[[A, B, C], 0], [[C], 0], [[A], 0], [[A], 7000], [[B], 7000], [[A, C], 7000]])
   expect(JSON.parse(page.stored()!)).toEqual([A, C])
   expect([page.$("error").textContent, page.$("state").textContent]).toEqual(["", "connected by the stream"])
   expect(page.document.body.textContent).not.toContain("Too many requests")
@@ -1158,4 +1217,155 @@ test("(t) ruling 1: the one more R10's other failure shows the host's sentence, 
   expect(asks().length).toBe(8)
   expect(page.calls("GET", chatPath(made)).map((call) => call.at - t0)).toEqual([1000])
   expect(page.$("state").textContent).toBe("connected by the stream")
+})
+
+// The findings of the review ec-6wsu1 (lead, ec-88qxe).
+
+test("(u) ruling 2: a 500 and a fault of the network in the hunt leave every chat in the list, put no sentence on the page and end the hunt", async () => {
+  for (const failure of ["500", "network"] as const) {
+    const page = await load({
+      stored: JSON.stringify([A, B, C]),
+      chats: { [A]: {}, [C]: {} },
+      route: (call) =>
+        // The hunt's first call: [A], after the list and the open chat alone.
+        call.path === token("token") && call.body === JSON.stringify({ chats: [A] })
+          ? failure === "500" ? fault(500, "internal", "The host failed.") : "network"
+          : undefined
+    })
+    const asks = () => page.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)
+    expect([failure, asks()]).toEqual([failure, [[A, B, C], [C], [A]]])
+    // A minute on: no more asks, every chat is there, and nothing is said.
+    await page.clock.advance(60_000)
+    expect([failure, asks().length, JSON.parse(page.stored()!), page.texts("#chats button")]).toEqual([failure, 3, [A, B, C], [C, B, A]])
+    expect([failure, page.$("error").textContent, page.$("state").textContent]).toEqual([failure, "", "connected by the stream"])
+    expect(page.document.body.textContent).not.toContain("The host failed.")
+  }
+})
+
+test("(v) ruling 2: a host that answers 404 no_chat to the whole list though each half is fine is asked one round, the bound of the code: its halves down to each chat alone, and one ask for the whole list; then the hunt ends, with every chat kept", async () => {
+  const page = await load({
+    stored: JSON.stringify([A, B, C]),
+    chats: { [A]: {}, [B]: {}, [C]: {} },
+    route: (call) => (call.path === token("token") && call.body === JSON.stringify({ chats: [A, B, C] }) ? fault(404, "no_chat", "This tenant has no chat with this UUID.") : undefined)
+  })
+  const asks = () => page.calls("POST", token("token")).map((call) => JSON.parse(call.body!).chats)
+  // The list, the open chat alone; the hunt: [A] and [B] are there, then the
+  // whole list once more, 404 again with no chat found: the round ends it.
+  expect(asks()).toEqual([[A, B, C], [C], [A], [B], [A, B, C]])
+  // Five minutes (before the token's renewal): no more asks.
+  await page.clock.advance(300_000)
+  expect(asks().length).toBe(5)
+  expect(JSON.parse(page.stored()!)).toEqual([A, B, C])
+  expect(page.$("error").textContent).toBe("")
+})
+
+test("(w) ruling 2: the asks again after a 429 count in the hunt's 30 of each 60 s", async () => {
+  const page = await load({
+    stored: JSON.stringify([A, B, C]),
+    chats: { [A]: {}, [C]: {} },
+    route: (call) =>
+      // The hunt's [A], for two minutes: 429 with a retry-after of 1 s.
+      call.path === token("token") && call.body === JSON.stringify({ chats: [A] }) && call.at < page0 + 120_000
+        ? fault(429, "too_many", "Too many requests: try again later.", { "retry-after": "1" })
+        : undefined
+  })
+  const asks = () => page.calls("POST", token("token")).slice(2)
+  await page.clock.advance(180_000)
+  const hunt = asks()
+  // At most 30 in any 60 s, the asks again too: 30 from 0, 30 from 60 s, then the rest.
+  expect(most(hunt)).toBe(30)
+  expect(hunt.filter((call) => call.at < page0 + 120_000).length).toBe(60)
+  expect(hunt.slice(-3).map((call) => JSON.parse(call.body!).chats)).toEqual([[A], [B], [A, C]])
+  expect(JSON.parse(page.stored()!)).toEqual([A, C])
+  expect([page.$("error").textContent, page.document.body.textContent?.includes("Too many requests")]).toEqual(["", false])
+})
+// The clock's start, as every page's clock has it.
+const page0 = new Clock().now
+
+test("(x) ruling 1: 64 stored chats, the host has none, and from the N-th R10 on it has them all, for each N from 3 to 123 in steps of 6: no chat that the host has leaves the list; each chat that leaves had a 404 no_chat of its own", async () => {
+  for (let n = 3; n <= 123; n += 6) {
+    const stored = stale(64)
+    const log: Array<{ chats: Array<string>; status: number; at: number }> = []
+    let seen = 0
+    let flip = Infinity
+    const page = await load({
+      stored: JSON.stringify(stored),
+      chats: {},
+      route: (call, own) => {
+        if (call.path !== token("token")) return undefined
+        if (++seen === n) flip = call.at
+        const answer = seen >= n ? json(200, { token: "eyJ.all-" + seen + ".sig", exp: Math.floor(call.at / 1000) + 600 }) : (own(call) as Response)
+        log.push({ chats: JSON.parse(call.body!).chats, status: answer.status, at: call.at })
+        return answer
+      }
+    })
+    await page.clock.advance(900_000)
+    const left = JSON.parse(page.stored()!) as Array<string>
+    const lost = stored.filter((one) => !left.includes(one))
+    // Each lost chat: a call for it alone that the host, before it had the chats, answered 404 no_chat.
+    const unnamed = lost.filter((one) => !log.some((call) => call.status === 404 && call.chats.length === 1 && call.chats[0] === one))
+    expect([n, unnamed]).toEqual([n, []])
+    expect([n, log.filter((call) => call.status === 404 && call.at > flip)]).toEqual([n, []])
+    expect([n, page.$("error").textContent]).toEqual([n, ""])
+    for (const browser of browsers.splice(0)) await browser.close()
+  }
+})
+
+test("(y) a Send while a hunt runs, for a chat of the list that is there and is no longer open: each try goes out with a token that names that chat, on the renewal and one more R10; so does its send again after a 503; the open chat's connection goes on (lead, ec-cdeu2, 2)", async () => {
+  // D is gone; A, B and C are there. The hunt for D waits: each R10 with D
+  // in it is a 429 of 60 s while `stall` holds.
+  const D = uuid(4)
+  let stall = true
+  let first = 1
+  let lost = 1
+  let busy = 1
+  const page = await load({
+    stored: JSON.stringify([D, A, B, C]),
+    chats: { [A]: {}, [B]: {}, [C]: {} },
+    route: (call) => {
+      if (call.path === token("token") && (JSON.parse(call.body!) as { chats: Array<string> }).chats.includes(D) && first-- <= 0 && stall) {
+        return fault(429, "too_many", "Too many requests: try again later.", { "retry-after": "60" })
+      }
+      if (call.method === "POST" && call.path === chatPath(B, "/messages")) {
+        if (lost-- > 0) return "network"
+        if (busy-- > 0) return fault(503, "busy", "The host is busy.", { "retry-after": "1" })
+      }
+      return undefined
+    }
+  })
+  const t0 = page.clock.now
+  const asks = () => page.calls("POST", token("token")).map((call) => (JSON.parse(call.body!) as { chats: Array<string> }).chats)
+  const named = (call: Sent) => page.host.tokens.get(auth(call)!.replace(/^Bearer /, ""))!.chats
+  const posts = () => page.calls("POST", chatPath(B, "/messages"))
+  // The list's 404, the open chat C alone, then the hunt's first ask, which waits.
+  expect(asks()).toEqual([[D, A, B, C], [C], [D, A]])
+  // B is opened, and its Send's first try (B open) is lost to the network.
+  await page.open(B)
+  await page.say("for B")
+  // C is opened: B is no longer open, and the token held names C alone.
+  await page.open(C)
+  expect(asks()).toEqual([[D, A, B, C], [C], [D, A], [B], [C]])
+  // The try again, at 1 s: the renewal (for the open chat), and one more R10, for B.
+  await page.clock.advance(1000)
+  expect(asks().slice(5)).toEqual([[C], [B]])
+  // C's stream ends: C connects again, and the token held names C alone again.
+  page.streams.at(-1)!.end()
+  await page.clock.advance(0)
+  expect(asks().slice(7)).toEqual([[C]])
+  // After the 503, at 2 s: the renewal, and one more R10, for B; then B's message is in.
+  await page.clock.advance(2000)
+  expect(asks().slice(8)).toEqual([[C], [B]])
+  expect(posts().map((call) => [call.at - t0, named(call)])).toEqual([[0, [B]], [1000, [B]], [3000, [B]]])
+  const key = posts()[0]!.headers["idempotency-key"]
+  expect(posts().map((call) => call.headers["idempotency-key"])).toEqual([key, key, key])
+  expect(page.host.writes).toEqual([{ chat: B, text: "for B", key }])
+  // The open chat's connection went on: C's stream runs, and no error.
+  expect([page.streams.at(-1)!.chat, page.streams.at(-1)!.aborted, page.$("state").textContent, page.$("error").textContent]).toEqual([C, false, "connected by the stream", ""])
+  // The hunt was under way all this time; when the host lets it ask, D leaves.
+  expect(JSON.parse(page.stored()!)).toContain(D)
+  stall = false
+  await page.clock.advance(60_000)
+  expect(JSON.parse(page.stored()!)).toEqual([A, B, C])
+  await page.open(B)
+  expect(page.composer()).toBe("")
 })
