@@ -7,9 +7,10 @@ code batch is planned from this page, bead by bead, so each interface is given e
 
 Where this page and `docs/design.md` differ, `docs/design.md` wins. The facts of the tree
 come from the investigation ec-f7m3i; this page cites its answers as "ec-f7m3i Q1" to
-"ec-f7m3i Q10", and other facts by `path:line` at 6af6b1d (lead, ec-0r89g; lead,
-ec-olqwa; lead, ec-dkhr1; lead, ec-v3kqa; lead, ec-8nib0), or by a file and a name in it;
-a citation of code of a later commit is by a file and a name (lead, ec-8nib0). A decision
+"ec-f7m3i Q10", and other facts by `path:line` at cbbed73 (lead, ec-0r89g; lead,
+ec-olqwa; lead, ec-dkhr1; lead, ec-v3kqa; lead, ec-8nib0; lead, ec-ql3755), or by
+a file and a name in it; a citation of code of a later commit is by a file and a
+name (lead, ec-8nib0). A decision
 cites its question of the settled list (`[Q19]`), or "lead, <a bead's id>": a ruling of
 the lead in that bead. Some of those beads name their rulings: "lead, ec-mxcl": the
 lead's eleven decisions, in the bead ec-1h538; "lead, ec-vgn58": the lead's form of the
@@ -52,7 +53,7 @@ WebSocket, and a signed token (ec-f7m3i Q5, Q6). No dependency is new.
 
 The caller gives the host three things:
 
-- the tag `Chats` (`packages/core/src/store.ts:653-657`): the chats of the database, each
+- the tag `Chats` (`packages/core/src/store.ts:882-886`): the chats of the database, each
   found by its tenant and its UUID;
 - the stack of one chat, as a function of that chat's store: everything above the store
   that a loaded chat needs (the diagnostics, the memory, the wire, the sandbox, the
@@ -90,7 +91,7 @@ What the local command (`everchat serve`, section 7) adds:
 
 | Part | What `everchat serve` gives | Where it comes from |
 | --- | --- | --- |
-| `Chats` | `chatsLayer(file)` over its own file, `serve.db` in the home | `packages/sqlite/src/sqlite.ts:1433-1434` |
+| `Chats` | `chatsLayer(file)` over its own file, `serve.db` in the home | `packages/sqlite/src/sqlite.ts:210-211` |
 | the stack | the stack of a host's chat (`hostedStack`): the local stack with the hosted set of functions (below), as a function of a store (its shape below the table) | `packages/local/src/hosted.ts`, `hostedStack`; the terminal keeps its own (`packages/local/src/main.ts`, `layer`) (ec-lw754) |
 | the author's inference gateway | `gatewayLayer`, built one time for the process and given to each stack | `packages/local/src/gateway.ts:60-66` |
 | the HTTP server | `BunHttpServer.layer({ hostname: "127.0.0.1", port, ...serverOptions(limits) })`, as the inspector has it but with the numbers of `serverOptions` (at the defaults `idleTimeout: 190`, `websocket: { idleTimeout: 120, maxPayloadLength: 524288, closeOnBackpressureLimit: true, backpressureLimit: 8388608 }`; section 3, "Admission", 9) | `packages/local/src/inspector.ts:131-136`; `packages/server/src/serve.ts:168-182`, `serverOptions` |
@@ -204,7 +205,7 @@ host's own frames to a client are not gives, and a client that has not joined ge
 too (below, "The host's own frames"; lead, ec-9p347, T7). Each give
 runs under the channel's give lock, as one step that an interruption cannot split
 (`Effect.uninterruptible`, as the turn loop's `record` does,
-`packages/core/src/turn.ts:395-406`; lead, ec-vgn58, A2). A give never waits: a full
+`packages/core/src/turn.ts:491-502`; lead, ec-vgn58, A2). A give never waits: a full
 buffer ends its client (section 8, "A slow client"). The one exception is a client's own
 first read, which waits for room before each page, with no place and no lock held
 (below). Every give puts the JSON of the entry that the fit made (section 8, "The bytes of
@@ -244,7 +245,7 @@ gives it this way and only this way (lead, ec-vgn58, A1):
   N3). So no event comes between the client's read and the gives that reach the clients
   that joined: every numbered event up to `last` is in the store, because the turn loop
   publishes an event only after its commit (`record` and `recordPush`,
-  `packages/core/src/turn.ts:395-434`). And a
+  `packages/core/src/turn.ts:491-530`). And a
   client that joins has room for one largest entry at least, so a live entry does not end
   as `slow` a client that is still draining its last page. A burst after the join can
   still end it: that is the buffer's bound, as designed. Before the chat's first load the
@@ -285,9 +286,9 @@ never opens a second store of a chat that it holds: a second request for the cha
 its channel, and so its one loaded instance (lead, ec-mxcl, decision 6). Today a second
 `Chats.store` of a held chat closes the first launch as a crash, and both stores could
 write (ec-f7m3i Q2); and "one turn at a time" is held only by the one `Turns` of a chat
-(`packages/core/src/turn.ts:361, 372`; ec-f7m3i Q3). So one instance is the rule that keeps
+(`packages/core/src/turn.ts:455, 466`; ec-f7m3i Q3). So one instance is the rule that keeps
 both. Two processes on one file: the store's refusal of a live launch of this host
-(`LaunchLive`, `packages/sqlite/src/sqlite.ts:831-832`) stays the wall for the local use.
+(`LaunchLive`, `packages/sqlite/src/sql.ts:1030-1031`) stays the wall for the local use.
 The host answers it with `409 chat_elsewhere`. The lease is the server plan's [Q22].
 
 ### Load
@@ -296,11 +297,11 @@ The host loads a chat for a message in (a `POST`, or a `say` frame of a socket),
 the channel's lock:
 
 1. `Chats.store(tenant, chat, launch)`: the chat by its tenant and its UUID; `NoChat` for
-   any chat that is not the tenant's (`packages/core/src/store.ts:436-443`). The launch
+   any chat that is not the tenant's (`packages/core/src/store.ts:576-583`). The launch
    row is written.
 2. The stack, built over that store, in the loaded chat's scope. A load makes all again
    from the database (`docs/design.md`, "Tenants and isolation" [Q12, Q20]): the turn
-   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:925-943`),
+   loop restarts a cut turn and closes cut calls (`packages/core/src/turn.ts:1112-1130`),
    and the memory loads from the database (ec-f7m3i Q8). Of the stack's context the host
    takes only `Turns` and `Memory` (`packages/server/src/loaded.ts:97-103`, `LoadedChat`), and it
    calls `Turns.say` from its own fibers (`packages/server/src/host.ts:259-268`, `work`). The turn
@@ -312,14 +313,14 @@ the channel's lock:
    (lead, ec-olqwa; ec-lw754;
    the case "two chats of two stores at one time" of `packages/local/src/hosted.test.ts`).
 3. The listener: the host subscribes to the turn loop (`Turns.subscribe`,
-   `packages/core/src/turn.ts:340-343`), and reads the chat's `seq` from the store. Then,
+   `packages/core/src/turn.ts:434-437`), and reads the chat's `seq` from the store. Then,
    under the give lock, in one step, it chooses and sets `last`: the lower of that `seq`
    and the lowest `given` of the clients that have joined, or, with no client that joined,
    that `seq` (lead, ec-12a32, N1, N4; lead, ec-mhmpr, C; ec-fhxnm). A client's `after`
    never raises `last` above the store's `seq`. A client that has not joined does not count: it reads on by itself, and the
    join's check covers it. So a join cannot fall between the choice and the set. Then the
    listener reads the events after `last` from the store (`eventsAfter`,
-   `packages/core/src/store.ts:462-468`, in pages: section 8, "Pages"); gives each
+   `packages/core/src/store.ts:602-608`, in pages: section 8, "Pages"); gives each
    (above, "The give"); and drops each live event whose number is not above `last`. This
    is the rule of `packages/core/src/follow.ts:17-19`, for events. It is needed: the
    restart of step 2 writes events before anyone can subscribe.
@@ -342,7 +343,7 @@ whole, the next message finds it with no second launch row, and the timer unload
 publication closes what it made (below, "The deadline of the work under the lock").
 
 A read needs no load. The snapshot, the older messages and the events after a number
-come from the chat's reads (`Chats.reads`, `packages/core/src/store.ts:656`), which take no
+come from the chat's reads (`Chats.reads`, `packages/core/src/store.ts:885`), which take no
 launch. A client that only reads never loads a chat.
 
 ### Work, and the 6 minutes
@@ -415,8 +416,8 @@ ec-349x0, Q1; section 3, "Admission", 5).
   `lock.withPermits(1)(Effect.uninterruptible(body))`: once the lock is taken, the
   memory's change, its write and `then` are one step
   (`packages/core/src/memory.ts:777-834`), and the log of a message publishes its events
-  in `pushWith`'s `then` (`recordPush`, `packages/core/src/turn.ts:413-434`; `record`,
-  `:395-406`, does the same for a write that is not the memory's). So an interruption that
+  in `pushWith`'s `then` (`recordPush`, `packages/core/src/turn.ts:509-530`; `record`,
+  `:491-502`, does the same for a write that is not the memory's). So an interruption that
   comes in that step waits for its end: the order of the commit and the publish holds, and
   a message that was committed is published. Section 9 asks for no change of this. An
   interruption ends a wait for the memory's lock: nothing is written and no event number
@@ -426,7 +427,7 @@ ec-349x0, Q1; section 3, "Admission", 5).
   `pushWith`, `packages/core/src/memory.ts:584-587`; ec-v44v7). The step after the publish
   is in it too (section 9, item 9; ec-ts3qg): `Turns.say` forks the turn that its log
   began (`launch`) in the log's uninterruptible step, after the publish (`recordPush`'s
-  `next`, `packages/core/src/turn.ts:859`). So no interruption leaves a turn's row running
+  `next`, `packages/core/src/turn.ts:1047`). So no interruption leaves a turn's row running
   and its `start` published with no fiber to run it, which would make the next message
   begin a second turn; and a fork does not wait. The host's work calls `Turns.say(text,
   key, told)` with no uninterruptible wrap (`packages/server/src/host.ts:259-268`, `work`): the
@@ -459,16 +460,19 @@ ec-349x0, Q1; section 3, "Admission", 5).
   compactions answered frees the lock at 49.984 s at six budgets of Effect's scheduler,
   `packages/server/src/deadline.test.ts:493-511`); the flush of the
   diagnostics batch (`packages/core/src/diagnostics.ts:125-132`); the end of the launch
-  row (`packages/sqlite/src/sqlite.ts:857-862`, registered at `:882`); and the read of
+  row (`packages/sqlite/src/sql.ts:1056-1064`, registered at `:1092`); and the read of
   Unload step 2, one call for each 100 events that the load wrote (the restart's: a
   `start`, and the pages of a cut program's `tool` and `echo`,
-  `packages/core/src/turn.ts:925-943`; the restart closes a cut program through `ended`,
-  which also writes a `note` for each approval of the call that still waits, and a host's
-  chat has none: section 7, "No approval."; lead, ec-8nib0), so one call when it wrote at
-  most 100 events that fit one page; large events need more ("Accepted risks", 1).
+  `packages/core/src/turn.ts:1112-1130`; the restart closes a cut program through `ended`,
+  which reads `store.approvalsOf` and then `store.wakesOf` (in the load, before its
+  deadline, in each restart trace of `packages/server/src/deadline.test.ts`) and writes a
+  `note` for each approval of the call that still waits and for each wake-up that a call
+  of it made or stopped, and a host's chat has neither: section 7, the bullets on approval
+  and on wake-ups; lead, ec-8nib0; ec-6lu3jl), so one call when it wrote at most 100
+  events that fit one page; large events need more ("Accepted risks", 1).
 - **A turn that started is never stopped because a request ended**: it runs in the
   loaded chat's scope, not in the request's (`Turns.say`,
-  `packages/core/src/turn.ts:813-862`).
+  `packages/core/src/turn.ts:990-1050`).
 
 **What the page promises, and what it sums** (lead, ec-349x0, R1, R2). The page promises
 three things about the end of work. Ownership goes back when the work has ended, never
@@ -639,7 +643,7 @@ is one piece, and a `,` or a `;q=0` in it ends nothing:
 **No route** (lead, ec-1bxkn, 1). A request that is no route, or whose method is not its
 route's (a `HEAD` too, and `OPTIONS` on R6's path), gets `404` with no body. It takes a
 place ("Admission", 3), so with every place taken it gets `503 busy`, and it runs no check
-and no work (`packages/server/src/http.ts:701-710`, `none`).
+and no work (`packages/server/src/http.ts:714-723`, `none`).
 
 ### The checks of each request, in their order
 
@@ -654,7 +658,7 @@ gets `403 forbidden_origin` with no CORS header, and its place goes back at once
 `authority` there is no such check, and no `Host` is read: there an HTTP/1.0 request with
 no `Host` goes on to the route's checks (`packages/server/src/http.ts:410-411`). Then the
 method: another gets
-the answer of no route (above, "No route"). The order, as `packages/server/src/http.ts:509-871`
+the answer of no route (above, "No route"). The order, as `packages/server/src/http.ts:509-884`
 has it: R1 to R5 (`route`) and R8 to R10 (`local`): the place, the `Host`, the method,
 then their checks (R8 to R10: the origin, then the work; section 7); R6 (`socket`): the
 place, the `Host`, the method and `Upgrade: websocket`, check 1, then its work; R7
@@ -677,7 +681,7 @@ Each route R1 to R6 runs these checks, in this order, before it reads a body:
    `Authorization` (above, "A token's place"; below).
 3. **The chat.** A chat that the token does not name gets `404 no_chat`, the same answer
    as a chat of another tenant or a UUID that no chat has (`NoChat`,
-   `packages/core/src/store.ts:436-443`). A path's chat that has no UUID form gets this
+   `packages/core/src/store.ts:576-583`). A path's chat that has no UUID form gets this
    answer too, never `400` (`packages/server/src/http.ts:24-27`, the head comment, check 3). A
    tenant cannot learn that another tenant's chat exists, nor that a chat outside its
    token exists.
@@ -743,7 +747,7 @@ D). Each number is a limit of section 8.
    `retry-after: 1`, and nothing is logged; with a key, the client sends it again safely
    (section 5). The channel's lock is held for a load, an unload, or the log of one
    message and the start of its turn: not for the turn, which runs after the answer
-   (`Turns.say`, `packages/core/src/turn.ts:813-862`). The work under the lock has a
+   (`Turns.say`, `packages/core/src/turn.ts:990-1050`). The work under the lock has a
    deadline of 20 s, and the lock is free when that work has ended (section 2, "The
    deadline of the work under the lock"). (D4)
 5. **An end** (lead, ec-349x0, Q). However a request ends (its deadline, its client's
@@ -952,6 +956,12 @@ text of an event, a token, a query or a header's value: the gate's line has the 
 status, the error's code, the token check's number and the name of a fault
 (`packages/server/src/http.ts:349-357`, `note`); the others have a route, a reason, the name of a
 fault, an event's number and type, a size in bytes, or the name of a call of the store.
+An answer's stream that holds its request's place (each but R4's, whose place goes back
+at its client's step) and that its deadline cuts has the gate's line of the deadline (the
+fault `deadline`) exactly one time: the stream's deadline timer writes it in one step that
+is not interrupted, before the cut and before the place goes back, so a pulled stream that
+the cut ends at once has it too (`packages/server/src/http.ts`, the stream's deadline
+timer; ec-d63ch).
 
 Every answer has the inspector's headers: `cache-control: no-store`,
 `referrer-policy: no-referrer`, `x-content-type-options: nosniff`
@@ -967,7 +977,7 @@ answers `204` with `access-control-allow-methods: GET, POST`,
 `access-control-max-age: 600`. No answer allows credentials: the host uses no cookie. A
 preflight from an origin that is not on the list gets `403 forbidden_origin`. A preflight
 with no `Origin` gets `204` with no `access-control-` header. R7 takes a place, runs
-check 1 only and reads no store (`packages/server/src/http.ts:789-803`, `preflight`). R6 refuses
+check 1 only and reads no store (`packages/server/src/http.ts:802-816`, `preflight`). R6 refuses
 an upgrade from an origin that is not on the list with `403 forbidden_origin`, before the
 upgrade. `serve`'s `503 busy` after its end began ("Admission", 12) has the origin's
 headers as the gate's answers have them: for an `Origin` that is on the list, byte for
@@ -1032,7 +1042,7 @@ host's own origin (section 7).
   (ec-nz93a).
 - `200`: `{"messages": [<message>, ...]}`: the messages from `from` upward, up to and not
   with `to`, in the order of their ids (`Reading.messages`,
-  `packages/core/src/store.ts:474`). An id that the chat does not have yet gives no
+  `packages/core/src/store.ts:614`). An id that the chat does not have yet gives no
   message. The answer's JSON is at most
   `page` bytes: it closes before the message that would pass `page`, as a page of events
   closes before the entry that would pass it (lead, ec-x0hhp, U1). One message always
@@ -1250,7 +1260,7 @@ The reason text does not say why a token failed.
    or shown again. Pieces are best effort [Q10, Q17].
 5. **A chat's event numbers run with no gap**, one more each time, from 1: the store makes
    each event's number as the chat's `seq` plus 1, and writes the event's row and the new
-   `seq` in one transaction (`addEvent`, `packages/sqlite/src/sqlite.ts:1282-1294`). So a
+   `seq` in one transaction (`addEvent`, `packages/sqlite/src/sql.ts:1698-1710`). So a
    client that gets a numbered event whose number is not its last plus one drops it, and
    connects again with its last number as `after` (lead, ec-vgn58, A3). With the host's
    rules this does not happen; the rule keeps a client whole if it does.
@@ -1261,7 +1271,7 @@ One set of shapes serves R1 to R6. Each is the JSON of a type of the core.
 
 ### A message
 
-The store's `Message` (`packages/core/src/store.ts:68-80`), one page of the log:
+The store's `Message` (`packages/core/src/store.ts:69-81`), one page of the log:
 
 ```json
 {"i": 118, "kind": "user", "text": "Hello", "size": 5, "more": false, "line": null,
@@ -1273,11 +1283,11 @@ characters, `packages/core/src/pages.ts:13`). Times are milliseconds since 1970.
 
 ### The events
 
-The numbered events are the store's `Event` (`packages/core/src/store.ts:213-218`), as
+The numbered events are the store's `Event` (`packages/core/src/store.ts:215-220`), as
 JSON, field for field. The turn loop publishes the same type, with the pieces: its
-`TurnEvent` is `Event` and the three pieces (`packages/core/src/turn.ts:207-209`). The
+`TurnEvent` is `Event` and the three pieces (`packages/core/src/turn.ts:240-242`). The
 store reads them again with the same fields (`eventsAfter`,
-`packages/core/src/store.ts:462-468`):
+`packages/core/src/store.ts:602-608`):
 
 ```json
 {"type": "accepted", "n": 41, "messages": [<message>, ...]}
@@ -1322,22 +1332,22 @@ The three pieces have no number:
 }
 ```
 
-- `chat`: from `Reading.chat` (`packages/core/src/store.ts:135-144`): the UUID, the pick and
+- `chat`: from `Reading.chat` (`packages/core/src/store.ts:136-146`): the UUID, the pick and
   the goal. No draft and no views (lead, ec-mxcl, decision 7).
 - `seq`: the chat's last event number; 0 with no event (`Chat.seq`,
-  `packages/core/src/store.ts:141`).
-- `count`: the id of the chat's next message (`Reading.count`, `packages/core/src/store.ts:473`).
+  `packages/core/src/store.ts:142`).
+- `count`: the id of the chat's next message (`Reading.count`, `packages/core/src/store.ts:613`).
 - `messages`: of the last `last` messages (R2's query; 50 when not given; at most 200; R6's
   snapshot: the last 50), the longest run that ends at the chat's last message and fits
   (below), in the order of their ids. It may be empty. Its first message may have a higher
   id than the last `last` would give, and it may be a page in the middle of a text: R3
   reads the messages before it, as the client does for those before `last`.
 - `turn`: the turn that runs (`Reading.runningTurns(null)`,
-  `packages/core/src/store.ts:507`), or `null`: its id, its pick, its first message and its
+  `packages/core/src/store.ts:647`), or `null`: its id, its pick, its first message and its
   start time. Not its head, which is the whole system prompt.
 
 All five are read in one snapshot of the store (`Reading.snapshot`,
-`packages/core/src/store.ts:453`).
+`packages/core/src/store.ts:593`).
 
 **Its bound** (lead, ec-x0hhp, U1, U1a). The JSON of a snapshot, R2's answer or R6's
 `snapshot` frame whole, is at most `page` bytes. Its list keeps the newest messages that
@@ -1390,7 +1400,7 @@ to the diagnostics.
   sender's rule (only the sender knows that two sends are one message). A key is of its
   chat: the same key in another chat is another message.
 - **The key's place** (`docs/schema.html`; the column and the index came with the mark 6,
-  ec-bu4bg, and the schema's mark is 7 now, ec-3b5aw). A column `sender_key` on
+  ec-bu4bg, and the schema's mark is 8 now, ec-ft22mj). A column `sender_key` on
   `everchat_msg` (not `key`, a reserved word on MariaDB), `text` on SQLite, null for a
   message with no key, set on the row of the message's first page only, and written in the
   insert of the transaction that logs the message (the table refuses an update); and a
@@ -1411,7 +1421,7 @@ to the diagnostics.
   (`StoreError`, `append`), and that `say` alone fails: the chat's next `say` runs.
 - **What the answer says**: the `accepted` event's number and the first and last page ids
   (R1, the `said` frame). The answer comes when the message is in the log; the turn runs
-  after it (`Turns.say`, `packages/core/src/turn.ts:813-862`).
+  after it (`Turns.say`, `packages/core/src/turn.ts:990-1050`).
 - **While a turn runs** the message steers, as the turn loop does today: it is logged at
   once with its `accepted`, and the turn takes it in after its step's results; one that
   comes too late starts the next turn (ec-f7m3i Q3). The host adds no queue.
@@ -1433,7 +1443,7 @@ chats and an end time (`docs/design.md`, "Messages in, events out" [Q19, Q33, Q3
   - `exp`: the end time, in whole seconds since 1970, as JWT has it. Required.
   - Any other claim is ignored, but `nbf`: a token whose `nbf` is after now is refused.
 - A UUID as text is 36 characters: lower-case hex digits in groups of 8-4-4-4-12, as the
-  store gives it (`packages/sqlite/src/sqlite.ts:316`).
+  store gives it (`packages/sqlite/src/sql.ts:368`).
 - The largest token that `makeToken` gives, 64 chats with an `exp` of ten digits, is
   3,511 bytes, under the bound of 4,096 (measured with `Jwt.sign` of `effect/jose` and
   dummy key bytes; 100 chats would be 5,383 bytes).
@@ -1521,7 +1531,7 @@ The common fault is an `exp` made as `Date.now() / 1000 + 600`, which is a fract
 `NaN`, `Infinity` and `-Infinity` each fail with `exp_not_whole`, and sign nothing.
 
 `Chats.make` makes the tenant's row when it is not there
-(`packages/core/src/store.ts:644-657`). How a hosted deployment's backend reaches these
+(`packages/core/src/store.ts:873-886`). How a hosted deployment's backend reaches these
 functions (a library call, a command, a service of its own) is the server plan's, not this
 page's.
 
@@ -1542,7 +1552,7 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
 - **Its file.** `serve.db` in the home (`EVERCHAT_HOME`, `packages/local/src/main.ts`,
   `HOME_VARIABLE` and `homeOf`), next to the terminal's `everchat.db`. The file is its
   own, because the local layers refuse a file with more than one tenant or chat
-  (`packages/sqlite/src/sqlite.ts:350, 359`), and the host's file has many chats. It is
+  (`packages/sqlite/src/sqlite.ts:72, 81`), and the host's file has many chats. It is
   made when it is not there.
 - **No config file.** The terminal's launch reads `config.json` in the home and loads the
   functions of its MCP servers into the terminal's stack (`packages/local/src/config.ts`;
@@ -1552,16 +1562,16 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
   config's other settings (its model, its limit, the head's name and the rules file) do
   not reach the host. `hostedStack` makes the head from the list alone
   (`head(declarations)`, `packages/local/src/hosted.ts:157`;
-  `packages/core/src/head.ts:94-100`), so the head of a host's chat has the name `NAME`,
+  `packages/core/src/head.ts:103-109`), so the head of a host's chat has the name `NAME`,
   EverChat (`packages/core/src/prompt.ts:20`), and no rules, where the terminal's launch
   takes the config's `name` and `rules` (ec-j5q4x). A host's chat has
   no function from an MCP server: its set stays `HOSTED`, and no result of a host's chat
   is a shortened result of a function from outside (lead, ec-q8d7n).
 - **No approval.** The core has approval by a person: a call of a function whose entry
   has `approval: true` (`packages/core/src/functions.ts`, `Entry` and `Functions.approval`)
-  does not run and is `pending` at once (`packages/codemode/src/calls.ts:73-86`,
+  does not run and is `pending` at once (`packages/codemode/src/calls.ts:78-91`,
   `invoke`), and its answer and the run after a yes are `Approvals`
-  (`packages/core/src/approval.ts:78-92, 208`), which only the terminal's stack builds,
+  (`packages/core/src/approval.ts:86-105, 233`), which only the terminal's stack builds,
   with its `/approvals`, `/approve <n>` and `/deny <n>` (`packages/local/src/main.ts`,
   `layer`; `packages/local/src/terminal.ts:51-55`). The stack of a host's chat has none
   of it: no entry of `HOSTED` has `approval`, so its `Functions.approval` is empty;
@@ -1570,6 +1580,19 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
   So in a host's chat no call is `pending`, no row of `everchat_approval` is written, and
   no message has the kind `late`. An approval for a hosted provider's functions, with its
   answer over the host's routes, is the server plan's (lead, ec-v3kqa).
+- **No wake-up.** The core and `packages/wakeups` have wake-ups by time
+  (`docs/wakeups.md`): the functions `wake`, `wakes` and `unwake`, the source of the wake
+  messages (the kind `wake`, whose turn has a ceiling of steps and tokens; section 9, item
+  10), the firer, and the person's `/wakeups`. Only the launches of the terminal and of
+  pipe mode build any of it, with the config file's `wakeups` on (the default): the three
+  functions in both, and the source, the firer and `/wakeups` in the terminal alone;
+  `everchat serve` gets nothing (`packages/local/src/main.ts`, the head comment, "The
+  wake-ups", `layer` and `wakeupsOf`). The stack of a host's chat has none of it: `HOSTED`
+  has none of the three functions, `hostedStack` gives no `Source` and builds no firer
+  (`packages/local/src/hosted.ts`, `hostedStack`), and no route of the host makes, lists
+  or stops a wake-up. So in a host's chat no row of `everchat_wake` is written, no message
+  has the kind `wake`, and no turn has the ceiling of a wake turn. Wake-ups for a hosted
+  chat are the server plan's (lead, ec-ql3755).
 - **One process for a home** (lead, ec-wp0xs, 9). The command does not lock its file.
   One `everchat serve` for a home is the help's rule (`packages/local/src/main.ts`,
   `ABOUT_SERVE`). A second one on the same home needs another port; then a chat that one
@@ -1616,7 +1639,14 @@ modules, by a dynamic import, as `everchat inspect` loads the inspector's
   by the end of the HTTP server, not by the host: after the host's end and the wait for
   the streams, `serve` interrupts each request that still runs, and the socket's reader's
   finalizer closes it with `1001` (`packages/server/src/serve.ts`, the head comment, "The
-  end"; ec-fhomd; ec-81998).
+  end"; ec-fhomd; ec-81998). The wait for the streams counts each answer's stream at its
+  last pull, not at Bun's write of it: a slow reader of R4 gets its last frames and its
+  `close` frame from Bun's graceful stop, which Effect's server runs when its last app
+  ends (up to 20 s). So `serve` must be the last app to end on its server, and the server
+  keeps the preemptive shutdown: `everchat serve` builds it so, its own server with
+  `serve` its one app (`packages/local/src/serve.ts`, `host`; lead, ec-51b1n; ec-cknrg).
+  On a server that serves on after `serve`, such a reader loses those frames and connects
+  again from its last number (section 8, "What is not proved here").
 
 ### The start value and the page's routes
 
@@ -1753,7 +1783,7 @@ events, `text`, `body` and `entry` may rise, not fall ("The checks at start", S1
 | `text`: a message's text | 65,536 bytes | `400` |
 | `body`: a body of R1 or a socket's frame after `ready` | 512 KiB | `413`; `1009` |
 | `early`: a socket's frame before `ready` | 8 KiB | `1009` |
-| `key`: an `Idempotency-Key` | 128 bytes, and at most 128: the core's bound of a sender's key (`SENDER_KEY`, `packages/core/src/store.ts:96`); the host refuses to start with a larger `key` (ec-f0gyn, ruling 1) | `400` |
+| `key`: an `Idempotency-Key` | 128 bytes, and at most 128: the core's bound of a sender's key (`SENDER_KEY`, `packages/core/src/store.ts:97`); the host refuses to start with a larger `key` (ec-f0gyn, ruling 1) | `400` |
 | `token`, `life` and `chats`: a token, its size, its life and its chats | 4,096 bytes; a life of one hour; 1 to 64 chats | `401`; `4401`; `makeToken` fails with `TokenRefused`, R10 answers `400` |
 | `said` and `saidWindow`: messages in, for one chat | 30 in a window of 60 s (section 3, "Admission", 8) | `429 too_many` with `retry-after`; on a socket, an `error` frame |
 | `newChats` and `newChatsWindow`: R9, for the host | 10 in a window of 60 s ("Admission", 7 and 8) | `429 too_many` with `retry-after` |
@@ -1862,8 +1892,8 @@ Each queue between the turn loop and a client has a bound (lead, ec-vgn58, C):
   limits in use: at the defaults an `accepted` is at most 394,452 bytes, a `message`
   180,246, an `end` 12,087, and a `start` 61. A `call`'s `program`, an `end`'s `why` and a piece's `delta`
   have no bound in the tree: the program and the delta are what the model wrote
-  (`packages/core/src/turn.ts:568`, `:637`), and `why` a text of the turn loop or of the
-  vendor (`packages/core/src/turn.ts:641`, `:655`; the vendor's error text,
+  (`packages/core/src/turn.ts:691`, `:760`), and `why` a text of the turn loop or of the
+  vendor (`packages/core/src/turn.ts:764`, `:778`; the vendor's error text,
   `packages/openai/src/openai.ts:288-295`). The next two parts bound them.
 
 ### The bytes of one entry
@@ -1896,10 +1926,10 @@ The host bounds what it gives in bytes (lead, ec-7bi64, F).
    largest entry finite:
    - an `end`'s `why` can be a vendor's error text with no bound: the wire copies the
      vendor's `error.message` whole (`packages/openai/src/openai.ts:288-295`), and the turn
-     loop ends the turn with it (`packages/core/src/turn.ts:641`). The turn loop keeps at
+     loop ends the turn with it (`packages/core/src/turn.ts:764`). The turn loop keeps at
      most 2,000 characters of a `why`, for every use, before it stores and publishes it
      (section 9). It makes a `why` well formed one time already, so the row and the event
-     hold the same text (`packages/core/src/turn.ts:526-543`); the cut goes in the same
+     hold the same text (`packages/core/src/turn.ts:646-663`); the cut goes in the same
      place, so they stay equal;
    - a `call`'s `program` and a piece's `delta` are parts of one answer of the model. The
      stack of a host's chat gives the wire a cap on one answer (`request.max`, sent as
@@ -1921,7 +1951,7 @@ The host bounds what it gives in bytes (lead, ec-7bi64, F).
 A read from the store is given a page at a time (lead, ec-7bi64, G1). A page ends at
 1,000 events or at the limit `page`, 2 MiB of JSON after the fit, the first reached. The
 store's read takes a count only (`eventsAfter(after, limit)`,
-`packages/core/src/store.ts:462-468`), so the host reads at most 100 events in one call of
+`packages/core/src/store.ts:602-608`), so the host reads at most 100 events in one call of
 the store, fits each, and closes the page before the event that would take it past
 `page`; the next page starts after the page's last number, and the events of that call
 that did not fit are read again then. A read is at the store's end when one call gives
@@ -2000,7 +2030,7 @@ most bytes of JSON of that event when it is given whole:
 
 - `F` = 196: one message (section 4) with an empty text, each number at `N`, its `kind`
   4 bytes, `more` as `false`, and `line` as `null` (no code of the tree sets it,
-  `packages/sqlite/src/sqlite.ts:955`).
+  `packages/sqlite/src/sql.ts:1182`).
 - `P(T)` = 2 × ⌊(T − 1) / 30,000⌋ + 2: the most pages of a text of `T` bytes. A page is
   at most 30,000 characters and ends after its last newline (`packages/core/src/pages.ts:13-27`);
   so two pages in a row, but the last, hold at least 30,000 characters, and a text of `T`
@@ -2090,6 +2120,11 @@ or a later bead does, as named.
   not wait on a reader that does not read. A stream that nothing pulls still sees its
   client's end (`slow`, `stop`, `internal`): a watcher on `Client.whenEnded` runs it
   (lead, ec-5njke, 10; `packages/server/src/channel.ts:218-223`, `Client.whenEnded`).
+- **A slow reader at `serve`'s end** (lead, ec-51b1n; ec-cknrg; review ec-hh4m9): that a
+  reader of R4 that reads slowly gets its last frames and its `close` frame from Bun's
+  graceful stop, when `serve` is the last app of its server (section 7, "Its stop"). No
+  case proves the slow reader's frames, on that server or on one that serves on after
+  `serve`: the review's mutant with no wait for the streams passes every case.
 - **The size of a socket's frame**: measured (ec-1d6p0). With `maxPayloadLength` at
   `body`, a frame of `body` + 1 is refused at its header: `1009` within 1 ms, the
   connection closed before its payload was sent, nothing held whole. A frame under it,
@@ -2170,7 +2205,7 @@ or a later bead does, as named.
 - **Two processes of `everchat serve` on one file** (lead, ec-wp0xs, 9): the command does
   not lock its file, and one `everchat serve` for a home is the help's rule (section 7,
   "One process for a home"). The refusal of a live launch holds per chat
-  (`packages/sqlite/src/sqlite.ts:831-832`), but each process would take other chats. A
+  (`packages/sqlite/src/sql.ts:1030-1031`), but each process would take other chats. A
   second one on the same home needs another port; then a chat that one process has loaded
   answers `409 chat_elsewhere` to a message in the other, and the other's connected
   clients get no live event of that chat until they connect again. No data is lost. A
@@ -2204,22 +2239,23 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
 1. **The read of events, and `seq`** (ec-f7m3i Q4). The tree has both (7ee9e87):
    `Reading.eventsAfter(after, limit)`, the chat's numbered events after `after`, in the
    order of their numbers, at most `limit`, with the store's `Event`, which the turn loop
-   publishes too (`packages/core/src/store.ts:462-468`, `:213-218`); and the chat's `seq` in
-   `Chat`, 0 with no event (`packages/core/src/store.ts:141`). The host adds `cut` (section
+   publishes too (`packages/core/src/store.ts:602-608`, `:215-220`); and the chat's `seq` in
+   `Chat`, 0 with no event (`packages/core/src/store.ts:142`). The host adds `cut` (section
    4) and reads in pages (section 8, "Pages").
 2. **The key** (section 5). Done (ec-bu4bg, ec-ts3qg): the schema's column and index,
-   which came with the mark 6 (the mark is 7 now, `packages/sqlite/src/schema.ts:26`,
-   `VERSION`; ec-3b5aw); the store's append takes a key for a message's first page
+   which came with the mark 6 (the mark is 8 now, `packages/sqlite/src/schema.ts:26`,
+   `VERSION`; ec-ft22mj); the store's append takes a key for a message's first page
    (`Store.append(messages, key?)`); a read of the message of a key with its pages and its
    `accepted` number (`Reading.keyed`); and `Turns.say(text, key?)`, which, for a key that
    the chat has, writes nothing and gives the first message. `say` gives
    `Sent { messages, accepted, repeat }`: the pages, the `accepted` number, and whether
    the key was a repeat (`packages/core/src/turn.ts`).
 3. **"Busy now" and the time of the last work** (ec-f7m3i Q8, gap 1). Done (ec-9txv3): the
-   turn loop gives both, with no wait: busy while a turn or a call runs, or a stopped
-   turn's end is not yet written (`Turns.busy`; item 11); the memory gives busy while a
-   compaction runs (`Memory.busy`); and the time when each last had work (`Turns.worked`,
-   `Memory.worked`). The host's timer reads them under the channel's lock (section 2).
+   turn loop gives both, with no wait: busy while a turn or a call runs, or the stop's
+   finalizer of a stopped turn still writes its end (`Turns.busy`; item 11); the memory
+   gives busy while a compaction runs (`Memory.busy`); and the time when each last had
+   work (`Turns.worked`, `Memory.worked`). The host's timer reads them under the channel's
+   lock (section 2).
 4. **`result` in the core, over the store.** Done (ec-o9i2n): the core gives `RESULT`,
    whose function reads the call's output from the store (`store.call`) with no file, the
    whole or its characters from `from` to before `to` (`result(id, from, to)`; `part`,
@@ -2273,7 +2309,7 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    change of the log's order (O1): the log of a message stays as the core has it, whole
    from the take of the memory's lock, and a wait for that lock can be cut (section 2,
    "The deadline of the work under the lock"; `record`,
-   `packages/core/src/turn.ts:395-406`, and `recordPush`, `:413-434`; `Memory.apply`,
+   `packages/core/src/turn.ts:491-502`, and `recordPush`, `:509-530`; `Memory.apply`,
    `packages/core/src/memory.ts:777-834`), so the commit comes before the publish, a
    key's numbers on a retry are those of the message that was committed, and a turn runs
    in the loaded chat's scope, as today. One change next to it, done (ec-ts3qg):
@@ -2286,11 +2322,15 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
     `Turns.note`): a source's message starts a turn of its own when the chat is idle,
     with its pages' `message` events and then its `start`, and no `accepted` (ec-i05x2,
     ec-n8dh4, ec-0vuc2); and a note from outside is logged with its `message` event and
-    starts no turn (ec-d62xt, ec-z3f5y). Not used by the host: the stack of a host's chat
-    gives no `Source` (`packages/local/src/hosted.ts:145-176`, `hostedStack`), and nothing
-    in the host calls `ready` or `note`. So for a client of the host each turn of a host's
-    chat starts from a message in (its `accepted`, then its `start`) or from the restart
-    (a `start` alone; section 2, Load, step 2), as sections 3 and 4 say.
+    starts no turn (ec-d62xt, ec-z3f5y). It also has several sources as one, asked in the
+    order given (`Source.inOrder`), and a ceiling of steps and tokens that an offer may
+    give its turn (`Offer`); and a source is asked also while a message of the person
+    waits after a failed turn, and its turn takes that message in its first item
+    (ec-h6qej4). Not used by the host: the stack of a host's chat gives no `Source`
+    (`packages/local/src/hosted.ts:145-176`, `hostedStack`), and nothing in the host calls
+    `ready` or `note`. So for a client of the host each turn of a host's chat starts from
+    a message in (its `accepted`, then its `start`) or from the restart (a `start` alone;
+    section 2, Load, step 2), as sections 3 and 4 say.
 11. **A message after a stop** (ec-124zo; lead, ec-8nib0). The turn loop has it
     (`packages/core/src/turn.ts`, the comments of `say`, `idle` and `busy` in `Turns`, and
     `writeLost`): while a stopped turn's end is not yet written (the stop's finalizer,
@@ -2301,15 +2341,19 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
     nothing. With no turn running, `say` first writes a stopped turn's end that the stop
     could not write (a lost end, as `Turns.ready` does: one read of the running turn and
     its end, only when a lost end is kept); if that fails, `say` fails with its
-    `StoreError` and writes nothing. `Turns.idle` waits for that end too, and until it is
-    written `Turns.busy` is true and `Turns.worked` is now. Not used by the host: nothing
-    in the host calls `Turns.stop` or `Turns.idle`, so the one stop of a turn in a host's
-    chat is the close of its stack (section 2, "A load that is stopped"), which leaves the
-    turn running for the next launch, writes no end, keeps no lost end, and after which no
-    `say` comes to that stack. So in a host's chat the wait does not occur, and `say`
-    makes no call of the store for a lost end. A later route that stops a turn would get
-    it: its client sees the stopped turn's note and `end`, then the message's `accepted`
-    and its turn's `start`.
+    `StoreError` and writes nothing. `Turns.idle` waits for the stop's finalizer too, and
+    until that finalizer ends, with its end written or failed, `Turns.busy` is true and
+    `Turns.worked` is now. A lost end does not hold them: `idle` returns and `busy` is
+    false while the end is still lost and the stopped turn's row still runs (the case of
+    `packages/core/src/source.test.ts` "the stop's read of the running turn fails"), and
+    its recovery is `say`'s and `ready`'s, which write it later. Not used by the host:
+    nothing in the host calls `Turns.stop` or `Turns.idle`, so the one stop of a turn in a
+    host's chat is the close of its stack (section 2, "A load that is stopped"), which
+    leaves the turn running for the next launch, writes no end, keeps no lost end, and
+    after which no `say` comes to that stack. So in a host's chat the wait does not occur,
+    and `say` makes no call of the store for a lost end. A later route that stops a turn
+    would get it: its client sees the stopped turn's note and `end`, then the message's
+    `accepted` and its turn's `start`.
 
 ## 10. Open
 
