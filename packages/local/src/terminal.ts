@@ -61,6 +61,15 @@
 // set the terminal takes as they are: Cc, Cf, Cs, Co, Cn, Zl, Zp and
 // Default_Ignorable_Code_Point. So the person sees exactly what they answer.
 //
+// Wake-ups (docs/wakeups.md, section 9): `/wakeups` lists the chat's
+// wake-ups by time, `/wakeups stop <id>` stops one, and `/wakeups off` and
+// `/wakeups on` turn them off and on, through the wake-ups' service
+// (`Wakeups`, packages/wakeups/src/commands.ts) only. The terminal reads it
+// when the launch gives it: with none (the config file turns the wake-ups
+// off), the command says so. A stop, off and on are answered by their note
+// in the log; one that found the state already so, by a line. Each text of
+// a row goes through `visible`, as an approval's does.
+//
 // The layer must have the diagnostics' layer under it, merged
 // (diagnostics.ts): its fibers start when the layer is built.
 //
@@ -87,14 +96,15 @@ import {
   type Terminal as Tty,
   TuiMainScreen
 } from "@earendil-works/pi-tui"
-import { Clock, Context, DateTime, Deferred, Effect, FiberSet, Layer, Stream } from "effect"
+import { Clock, Context, DateTime, Deferred, Effect, FiberSet, Layer, Option, Stream } from "effect"
 import { follow, type Shown } from "@everchat/core/follow"
 import { type Pace, paced } from "@everchat/core/pace"
 import { bold, clean, dim, LOOKS, markdown, message as paint, plain, Row, THOUGHT, TOLD, Wrapped } from "./paint.ts"
 import { Approvals } from "@everchat/core/approval"
 import { visible } from "@everchat/core/functions"
-import { ANSWER_MAX, type Answered, type Approval, type Diagnostic, type Message, Store, type StoreError, WAIT } from "@everchat/core/store"
+import { ANSWER_MAX, type Answered, type Approval, type Diagnostic, type Message, Store, type StoreError, WAIT, WAKE_MISSED_MAX } from "@everchat/core/store"
 import { type TurnEvent, Turns } from "@everchat/core/turn"
+import { type Listing, type Row as WakeRow, type Stopped, type Switched, Wakeups } from "@everchat/wakeups/commands"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "terminal")
@@ -121,6 +131,7 @@ export const COMMANDS: ReadonlyArray<{ readonly name: string; readonly descripti
   { name: "approvals", description: "the calls that wait for a yes or no (/approvals 2: one whole)" },
   { name: "approve", description: "yes to an approval: /approve 2 [text]; the call runs" },
   { name: "deny", description: "no to an approval: /deny 2 [text]; the call does not run" },
+  { name: "wakeups", description: "lists the wake-ups; /wakeups stop 3, /wakeups off, /wakeups on" },
   { name: "quit", description: "ends EverChat; a turn that runs goes on at the next launch" }
 ]
 
@@ -151,14 +162,18 @@ export const WHO = "the person in the terminal"
 // `/approvals`; `/approvals <n>` shows them all.
 export const BRIEF = 100
 
-// The arguments of approval `n` on one line, cut to BRIEF characters
-// (never inside a pair of surrogates), then made visible; a cut one names
-// the command that shows them whole.
-const brief = (n: number, input: string): string => {
-  if (input.length <= BRIEF) return visible(input)
-  const code = input.charCodeAt(BRIEF - 1)
-  return visible(input.slice(0, code >= 0xd800 && code <= 0xdbff ? BRIEF - 1 : BRIEF)) + "… (" + input.length + " characters: /approvals " + n + ")"
+// A text of a model on one line: cut to BRIEF characters (never inside a
+// pair of surrogates), then made visible; a cut one ends with "…".
+const cut = (text: string): string => {
+  if (text.length <= BRIEF) return visible(text)
+  const code = text.charCodeAt(BRIEF - 1)
+  return visible(text.slice(0, code >= 0xd800 && code <= 0xdbff ? BRIEF - 1 : BRIEF)) + "…"
 }
+
+// The arguments of approval `n` on one line, by `cut`; a cut one names the
+// command that shows them whole.
+const brief = (n: number, input: string): string =>
+  input.length <= BRIEF ? cut(input) : cut(input) + " (" + input.length + " characters: /approvals " + n + ")"
 
 const when = (millis: number): string => DateTime.formatLocal(DateTime.makeUnsafe(millis), { locale: "sv-SE", dateStyle: "short", timeStyle: "short" })
 
@@ -191,6 +206,49 @@ export const answered = (n: number, got: Answered): string => {
 // How many calls wait, for the line at a turn's end.
 export const waitLine = (k: number): string => (k === 1 ? "1 approval waits: /approvals" : k + " approvals wait: /approvals")
 
+// The wake-ups (docs/wakeups.md, section 9): what `/wakeups` says.
+
+// With no wake-ups' service: the config file turned them off.
+export const NO_WAKEUPS = "The config file turns the wake-ups off: this launch has none to list or stop."
+
+// The four forms, for an argument that is none of them.
+export const WAKEUPS_USAGE = "Give one of: /wakeups, /wakeups stop 3, /wakeups off, /wakeups on."
+
+// The first line of the list while the chat's wake-ups are off.
+export const WAKEUPS_OFF = "The wake-ups of this chat are off: none fires until /wakeups on."
+
+// The list with no row.
+export const NO_WAKE = "This chat has no wake-up."
+
+// One row of the list: its id, its text on one line (`cut`), `when`, the
+// zone, the next fire and the last one on its wall clock, the missed count
+// when it is not 0, and its state. Each text of the row is made visible.
+export const wakeLine = (row: WakeRow): string =>
+  [
+    String(row.id),
+    cut(row.text),
+    visible(row.when),
+    visible(row.zone),
+    "next " + (row.next === null ? "none" : visible(row.next)),
+    "last " + (row.last === null ? "none" : visible(row.last)),
+    ...(row.missed === 0 ? [] : [row.missed + (row.missed >= WAKE_MISSED_MAX ? " or more" : "") + " missed"]),
+    row.active ? "active" : "stopped" + (row.why === null ? "" : " (" + row.why + ")")
+  ].join("  ")
+
+// What `/wakeups` shows: the first line when off, then a line for each row.
+export const wakeLines = (listing: Listing): string =>
+  [...(listing.on ? [] : [WAKEUPS_OFF]), ...(listing.rows.length === 0 ? [NO_WAKE] : listing.rows.map(wakeLine))].join("\n")
+
+// The line of a stop that found the state already so; none after a stop,
+// whose note is the answer.
+export const stopLine = (id: number, got: Stopped): string | null =>
+  got === "none" ? "No wake-up " + id + "." : got === "inactive" ? "Wake-up " + id + " is not active." : null
+
+// The line of off or on that found the switch already so; none after a
+// switch, whose note is the answer.
+export const switchLine = (on: boolean, got: Switched): string | null =>
+  got === "already" ? (on ? "The wake-ups are on already." : "The wake-ups are off already.") : null
+
 const stamp = (row: Diagnostic): string =>
   DateTime.formatLocal(DateTime.makeUnsafe(row.created), { locale: "sv-SE", dateStyle: "short", timeStyle: "medium" }) + " " + row.level + " " + row.source + ": " + row.text
 
@@ -214,6 +272,9 @@ export class Terminal extends Context.Service<Terminal, {
         const store = yield* Store
         const turns = yield* Turns
         const approvals = yield* Approvals
+        // The wake-ups' service, when the config file turns them on: the
+        // layer does not need it.
+        const wakeups = yield* Effect.serviceOption(Wakeups)
         // What a key starts runs in this layer's scope, with its context.
         const fork = yield* FiberSet.makeRuntime<never, void, never>()
         const done = yield* Deferred.make<void>()
@@ -464,6 +525,27 @@ export class Terminal extends Context.Service<Terminal, {
               }
               const got = yield* approvals.answer(n, { yes: name === "approve", who: WHO, text: said === "" ? null : said })
               return tell(answered(n, got))
+            }
+            case "wakeups": {
+              if (Option.isNone(wakeups)) {
+                return tell(NO_WAKEUPS)
+              }
+              const service = wakeups.value
+              if (argument === "") {
+                return tell(wakeLines(yield* service.list))
+              }
+              if (argument === "off" || argument === "on") {
+                const on = argument === "on"
+                const line = switchLine(on, yield* (on ? service.on : service.off))
+                return line === null ? undefined : tell(line)
+              }
+              const found = /^stop\s+(\S+)$/.exec(argument)
+              const n = found === null ? null : numberOf(found[1]!)
+              if (n === null) {
+                return tell(WAKEUPS_USAGE)
+              }
+              const line = stopLine(n, yield* service.stop(n))
+              return line === null ? undefined : tell(line)
             }
             default: {
               return tell("No slash command /" + name + ". /help lists them.")

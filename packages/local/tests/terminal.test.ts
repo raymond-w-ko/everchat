@@ -3,7 +3,7 @@
 // what a key does, and what the database holds after.
 
 import { expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Layer, PubSub, Stream } from "effect"
+import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Stream } from "effect"
 import * as path from "node:path"
 import { Ask, AskDelay } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
@@ -16,9 +16,10 @@ import { type Pace, QUIET } from "@everchat/core/pace"
 import type { Event, Reply, Request, WireError } from "@everchat/core/request"
 import { Shell } from "../src/shell.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { ANSWER_MAX, type Answered, type Approval, type ApprovalAnswer, Store, type StoreError } from "@everchat/core/store"
+import { ANSWER_MAX, type Answered, type Approval, type ApprovalAnswer, Store, StoreError } from "@everchat/core/store"
 import { Approvals } from "@everchat/core/approval"
-import { BRIEF, COMMANDS, expires, HELP, SHOWN, Terminal, usage, WHO } from "../src/terminal.ts"
+import { BRIEF, COMMANDS, expires, HELP, NO_WAKE, NO_WAKEUPS, SHOWN, Terminal, usage, WAKEUPS_OFF, WAKEUPS_USAGE, WHO } from "../src/terminal.ts"
+import { type Listing, type Row as WakeRow, type Stopped, type Switched, Wakeups } from "@everchat/wakeups/commands"
 import { visible, waits as waitsNote } from "@everchat/core/functions"
 import { threadLayer } from "@everchat/codemode/thread"
 import { type TurnEvent, Turns } from "@everchat/core/turn"
@@ -84,7 +85,8 @@ const launch = <A, E>(
   return Effect.runPromise(effect.pipe(Effect.provide(terminal), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
-// Waits, in real time, until the screen's text passes `check`.
+// Polls the screen on the real clock until its text passes `check`: a
+// screen has no signal (lead, ec-h66pfl, T3).
 const until = (screen: Screen, what: string, check: (text: string) => boolean) =>
   Effect.gen(function*() {
     let text = ""
@@ -577,10 +579,13 @@ const withFake = <A, E>(
   screen: Screen,
   fake: ReturnType<typeof fakeTurns>,
   effect: Effect.Effect<A, E, Terminal | Turns | Store>,
-  approvals: ReturnType<typeof fakeApprovals> = fakeApprovals()
+  approvals: ReturnType<typeof fakeApprovals> = fakeApprovals(),
+  wakeups: Layer.Layer<never> | Layer.Layer<Wakeups> = Layer.empty
 ) => {
   const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options())))
-  return Effect.runPromise(effect.pipe(Effect.provide(Terminal.layer({ tty: screen }).pipe(Layer.provideMerge(fake.layer), Layer.provide(approvals.layer), Layer.provideMerge(store)))))
+  return Effect.runPromise(
+    effect.pipe(Effect.provide(Terminal.layer({ tty: screen }).pipe(Layer.provideMerge(fake.layer), Layer.provide(approvals.layer), Layer.provide(wakeups), Layer.provideMerge(store))))
+  )
 }
 
 test("no message is shown twice or left out, whenever its event comes: before the subscription, just after it, or never", async () => {
@@ -737,7 +742,7 @@ const unwrapped = (rows: ReadonlyArray<string>) => rows.map((row) => row.replace
 const quiet = () => fakeTurns(() => Effect.void)
 
 test("/help lists /approvals, /approve and /deny", () => {
-  expect(COMMANDS.map((one) => one.name)).toEqual(["help", "stop", "diagnostics", "approvals", "approve", "deny", "quit"])
+  expect(COMMANDS.map((one) => one.name)).toEqual(["help", "stop", "diagnostics", "approvals", "approve", "deny", "wakeups", "quit"])
   for (const name of ["approvals", "approve", "deny"]) {
     expect(HELP).toContain("  /" + name.padEnd(13))
   }
@@ -1112,4 +1117,162 @@ test("comparison: the terminal refuses an answer's text exactly when the store d
       }
     }
   }), approvals)
+})
+
+// Wake-ups
+// --------
+
+// A fake wake-ups' service: `listing` is what `list` gives; `asked` keeps
+// each call; `stop` gives the answer for each id (by default: stopped, and
+// a fault for 13); `offs` and `ons` give the answers of `off` and `on`, in
+// order (then: switched). Each member, as it is called, records the call
+// in `asked`, then offers it to `calls` (lead, ec-h66pfl, T1): a case
+// waits for a call by taking from `calls`, and a call that never comes is
+// the test's timeout (T2).
+const fakeWakeups = (listing: Listing, answers: { stop?: (id: number) => Stopped; offs?: Array<Switched>; ons?: Array<Switched> } = {}) => {
+  const asked: Array<string> = []
+  const calls = Effect.runSync(Queue.unbounded<string>())
+  const record = (call: string) => Effect.andThen(Effect.sync(() => asked.push(call)), Queue.offer(calls, call))
+  const layer = Layer.succeed(
+    Wakeups,
+    Wakeups.of({
+      list: Effect.as(record("list"), listing),
+      stop: (id) =>
+        id === 13
+          ? Effect.andThen(record(`stop ${id}`), Effect.fail(new StoreError({ op: "stopWake", cause: new Error("a fault") })))
+          : Effect.andThen(record(`stop ${id}`), Effect.sync(() => answers.stop?.(id) ?? "stopped")),
+      off: Effect.andThen(record("off"), Effect.sync(() => answers.offs?.shift() ?? "switched")),
+      on: Effect.andThen(record("on"), Effect.sync(() => answers.ons?.shift() ?? "switched"))
+    })
+  )
+  return { asked, calls, layer }
+}
+
+// The rows that the terminal told, without their indent.
+const toldRows = (rows: ReadonlyArray<string>) => rows.filter((row) => row.startsWith("  ")).map((row) => row.slice(2))
+
+const ROWS: Array<WakeRow> = [
+  { id: 3, text: "Read my mail.", when: "0 9 * * *", zone: "Europe/Berlin", next: "2026-11-17 09:00 Europe/Berlin", last: "2026-11-16 09:00 Europe/Berlin", missed: 2, active: true, why: null },
+  { id: 5, text: "Call the bank.", when: "2026-11-18T09:00", zone: "Europe/Berlin", next: "2026-11-18 09:00 Europe/Berlin", last: null, missed: 0, active: true, why: null },
+  { id: 7, text: "Every hour.", when: "0 * * * *", zone: "UTC", next: "2026-11-17 10:00 UTC", last: "2026-11-16 10:00 UTC", missed: 1000, active: true, why: null },
+  { id: 1, text: "Old.", when: "0 8 * * *", zone: "UTC", next: null, last: "2026-11-15 08:00 UTC", missed: 0, active: false, why: "person" },
+  { id: 2, text: "Older.", when: "0 7 * * *", zone: "UTC", next: null, last: null, missed: 0, active: false, why: "failed" }
+]
+
+test("/help and the autocomplete have /wakeups with its four forms", async () => {
+  const one = COMMANDS.find((command) => command.name === "wakeups")
+  expect(one?.description).toBe("lists the wake-ups; /wakeups stop 3, /wakeups off, /wakeups on")
+  expect(HELP).toContain("  /wakeups      lists the wake-ups; /wakeups stop 3, /wakeups off, /wakeups on")
+  const file = newFile()
+  const screen = new Screen(100, 30)
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    screen.type("/wak")
+    yield* sees(screen, "wakeups", "lists the wake-ups")
+  }))
+})
+
+test("/wakeups with no service: each of the four forms says the config file's line, and nothing else", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 30)
+  const count = (text: string, part: string) => text.split(part).length - 1
+  // The terminal's build does not need the service: with none, it runs.
+  const ran = await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    for (const sent of ["/wakeups", "/wakeups stop 3", "/wakeups off", "/wakeups on"]) {
+      send(screen, sent)
+    }
+    yield* until(screen, "four lines", (text) => count(text, NO_WAKEUPS) === 4)
+    return toldRows(yield* Effect.promise(() => screen.all()))
+  })).then((told) => ({ told }), (error: unknown) => ({ failed: String(error) }))
+  expect(ran).toEqual({ told: [NO_WAKEUPS, NO_WAKEUPS, NO_WAKEUPS, NO_WAKEUPS] })
+  expect(NO_WAKEUPS).toBe("The config file turns the wake-ups off: this launch has none to list or stop.")
+  expect(messages(file)).toEqual([])
+})
+
+test("/wakeups lists the rows: none; then each field of each row (a waiting fire, a missed count, at the bound, a stopped row with its why); with the first line when off", async () => {
+  const file = newFile()
+  const screen = new Screen(200, 30)
+  const listing: { on: boolean; rows: Array<WakeRow> } = { on: true, rows: [] }
+  const fake = fakeWakeups(listing)
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/wakeups")
+    yield* sees(screen, NO_WAKE)
+    expect(toldRows(yield* Effect.promise(() => screen.all()))).toEqual(["This chat has no wake-up."])
+    listing.rows = ROWS
+    send(screen, "/wakeups")
+    yield* sees(screen, "Older.")
+    listing.on = false
+    send(screen, "/wakeups")
+    yield* sees(screen, WAKEUPS_OFF)
+    const lines = [
+      "3  Read my mail.  0 9 * * *  Europe/Berlin  next 2026-11-17 09:00 Europe/Berlin  last 2026-11-16 09:00 Europe/Berlin  2 missed  active",
+      "5  Call the bank.  2026-11-18T09:00  Europe/Berlin  next 2026-11-18 09:00 Europe/Berlin  last none  active",
+      "7  Every hour.  0 * * * *  UTC  next 2026-11-17 10:00 UTC  last 2026-11-16 10:00 UTC  1000 or more missed  active",
+      "1  Old.  0 8 * * *  UTC  next none  last 2026-11-15 08:00 UTC  stopped (person)",
+      "2  Older.  0 7 * * *  UTC  next none  last none  stopped (failed)"
+    ]
+    expect(toldRows(yield* Effect.promise(() => screen.all()))).toEqual(["This chat has no wake-up.", ...lines, "The wake-ups of this chat are off: none fires until /wakeups on.", ...lines])
+  }), fakeApprovals(), fake.layer)
+  expect(fake.asked).toEqual(["list", "list", "list"])
+})
+
+test("/wakeups shows a row on one line: a text with a line end and a hidden code point, cut as an approval's arguments are; a zone with a line end", async () => {
+  const file = newFile()
+  const screen = new Screen(250, 30)
+  const text = "a\nb\u202e" + "x".repeat(200)
+  const fake = fakeWakeups({ on: true, rows: [{ id: 9, text, when: "0 9 * * *", zone: "Europe/Berlin\nX", next: null, last: null, missed: 0, active: true, why: null }] })
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/wakeups")
+    yield* sees(screen, "  active")
+    expect(toldRows(yield* Effect.promise(() => screen.all()))).toEqual([
+      "9  a\\x0ab\\u{202e}" + "x".repeat(96) + "…  0 9 * * *  Europe/Berlin\\x0aX  next none  last none  active"
+    ])
+  }), fakeApprovals(), fake.layer)
+})
+
+test("/wakeups stop 3, off and on: the member called one time with its argument; a stop or a switch shows no line (its note is the answer); each answer of already so has its line; a fault is the command's line", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 30)
+  const fake = fakeWakeups({ on: true, rows: [] }, { stop: (id) => (id === 9 ? "none" : id === 4 ? "inactive" : "stopped"), offs: ["switched", "already"], ons: ["switched", "already"] })
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    const sent = ["/wakeups stop 3", "/wakeups stop 9", "/wakeups   stop   4", "/wakeups off", "/wakeups off", "/wakeups on", "/wakeups on", "/wakeups stop 13"]
+    const taken: Array<string> = []
+    for (const one of sent) {
+      send(screen, one)
+      // One at a time: each command runs in its own fiber; the next is
+      // sent when the fake was called for this one.
+      taken.push(yield* Queue.take(fake.calls))
+    }
+    expect(taken).toEqual(["stop 3", "stop 9", "stop 4", "off", "off", "on", "on", "stop 13"])
+    yield* sees(screen, "The slash command failed")
+    expect(toldRows(yield* Effect.promise(() => screen.all()))).toEqual([
+      "No wake-up 9.",
+      "Wake-up 4 is not active.",
+      "The wake-ups are off already.",
+      "The wake-ups are on already.",
+      "The slash command failed: the database refused it (stopWake). /diagnostics shows more."
+    ])
+  }), fakeApprovals(), fake.layer)
+  expect(fake.asked).toEqual(["stop 3", "stop 9", "stop 4", "off", "off", "on", "on", "stop 13"])
+})
+
+test("/wakeups stop, stop x, stop 0, stop 1.5, stop 3 4 and /wakeups later give the line of the four forms, and the service is not called", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 30)
+  const fake = fakeWakeups({ on: true, rows: [] })
+  const count = (text: string, part: string) => text.split(part).length - 1
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    for (const sent of ["/wakeups stop", "/wakeups stop x", "/wakeups stop 0", "/wakeups stop 1.5", "/wakeups stop 3 4", "/wakeups later"]) {
+      send(screen, sent)
+    }
+    yield* until(screen, "six lines", (text) => count(text, WAKEUPS_USAGE) === 6)
+    expect(toldRows(yield* Effect.promise(() => screen.all()))).toEqual(Array.from({ length: 6 }, () => WAKEUPS_USAGE))
+  }), fakeApprovals(), fake.layer)
+  expect(WAKEUPS_USAGE).toBe("Give one of: /wakeups, /wakeups stop 3, /wakeups off, /wakeups on.")
+  expect(fake.asked).toEqual([])
 })

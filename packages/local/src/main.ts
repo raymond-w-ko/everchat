@@ -126,11 +126,27 @@
 // refusal is in the log (the source `mcp`), not on the screen. With no
 // server, a start loads no module of the client: it is imported only when
 // a server is named. `everchat inspect` and `everchat serve` start none.
+//
+// The wake-ups
+//
+// The config file's `wakeups` (docs/wakeups.md, section 9) gives `layer` its
+// option, in each branch of the test of the terminal. With `on: false`, no
+// option: no function, no source, no firer and no service of the wake-ups,
+// and the launch is as it was before them. On (the default), the chat's one
+// list is the built-ins, then `wake`, `wakes` and `unwake`, then the
+// functions from outside, for the head of the turns, the compactor's head
+// and the sandbox, in the terminal and in pipe mode alike. The terminal
+// alone also has the wake-ups' source, asked after the approvals'
+// (`Source.inOrder`), the firer, whose fiber ends with the launch's scope,
+// and the service of `/wakeups`. Pipe mode has none of the three: its end
+// waits for the turn loop's idle, so a source there would chain a wake
+// turn into it, and a wake-up made there fires at the next start of the
+// terminal. `everchat inspect` and `everchat serve` get nothing.
 
 // Only this module of the package: its index loads all of it (an HTTP
 // server, sockets, a cluster), and each start would pay for that.
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Cause, Config, Console, Deferred, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
+import { Cause, Config, Console, type DateTime, Deferred, Effect, Exit, FileSystem, Layer, Logger, Option, Path, Runtime, Schema, Stdio } from "effect"
 import { CliConfig, CliError, Command, Flag, GlobalFlag } from "effect/cli"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -155,7 +171,11 @@ import { readsLayer, storeLayer } from "@everchat/sqlite/bun"
 import { type Pick, Store } from "@everchat/core/store"
 import { Terminal } from "./terminal.ts"
 import { threadLayer } from "@everchat/codemode/thread"
-import { Turns } from "@everchat/core/turn"
+import { Source, Turns } from "@everchat/core/turn"
+import { Wakeups } from "@everchat/wakeups/commands"
+import { firer } from "@everchat/wakeups/firer"
+import * as WakeFunctions from "@everchat/wakeups/functions"
+import { source as wakeSource } from "@everchat/wakeups/source"
 
 export const VERSION = "0.1.0"
 
@@ -222,12 +242,14 @@ const WORKER = new URL("./worker.ts", import.meta.url)
 // program on stdio gets the launch's run tag, and the sweep of that tag is
 // registered before the load: at the scope's end it runs after the client
 // has closed the connections, and kills what is left (connectors.ts).
-const connect = (servers: ReadonlyArray<ConfigFile.Server>, cwd: string, limit: number | undefined) =>
+// `beside`: the chat's own functions (the built-ins, and the wake-ups' when
+// on), whose names a server's function may not take.
+const connect = (servers: ReadonlyArray<ConfigFile.Server>, cwd: string, limit: number | undefined, beside: ReadonlyArray<Declaration>) =>
   Effect.gen(function*() {
     const tag = (yield* Store).launch.runTag
     const [{ connectors, swept }, { load }] = yield* Effect.promise(() => Promise.all([import("./connectors.ts"), import("@everchat/mcp")]))
     yield* swept(tag)
-    return yield* load(connectors(servers, cwd, tag), limit === undefined ? { beside: DECLARATIONS } : { beside: DECLARATIONS, load: limit })
+    return yield* load(connectors(servers, cwd, tag), limit === undefined ? { beside } : { beside, load: limit })
   })
 
 // The functions from outside of a launch: none, with no server.
@@ -237,13 +259,28 @@ interface Outside {
 }
 const NOTHING: Outside = { declarations: [], entries: [] }
 
+// The wake-ups of a launch (the head comment, "The wake-ups"): `layer`'s
+// option. None (not given): the config file's `on: false`. "functions":
+// the three functions only, for pipe mode. "all": the functions, the
+// source, the firer and the service of `/wakeups`, for the terminal.
+// `zone`: the config file's zone, for `wake`; null with none.
+export interface WakeupsOption {
+  readonly with: "functions" | "all"
+  readonly zone: DateTime.TimeZone.Named | null
+}
+
+// The option of a launch from the config file's section: none when off.
+export const wakeupsOf = (settings: ConfigFile.Wakeups, mode: WakeupsOption["with"]): WakeupsOption | undefined =>
+  settings.on ? { with: mode, zone: settings.zone } : undefined
+
 // The program but its interface, for one launch.
 // `limit`: the output limit in characters; with none, limit.ts's.
 // `servers`: the config's servers, whose functions the launch loads
 // (connectors.ts); none when not given. `load`: the load's time limit in
 // ms, for a test; the client's when not given. `name`, `rules`: the
 // agent's name and the text of the person's rules, for the head; none when
-// not given.
+// not given. `wakeups`: the wake-ups of the launch (`WakeupsOption`); none
+// when not given.
 export const layer = (given: {
   readonly home: string
   readonly file: string
@@ -255,29 +292,44 @@ export const layer = (given: {
   readonly load?: number | undefined
   readonly name?: string | undefined
   readonly rules?: string | undefined
+  readonly wakeups?: WakeupsOption | undefined
 }) => {
   const launch = { pid: process.pid, host: os.hostname(), cwd: given.cwd, version: VERSION, runTag: crypto.randomUUID(), pick: given.pick }
   const base = Diagnostics.layer.pipe(
     Layer.provideMerge(storeLayer(given.file, { launch, pick: given.pick ?? { vendor: "openai", model: MODEL, effort: EFFORT, speed: "slow" } }))
   )
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, openaiLayer.pipe(Layer.provide(gatewayLayer)))), Layer.provideMerge(base))
+  const wakeups = given.wakeups
+  // The chat's own functions: the built-ins, then the wake-ups' three when
+  // they are on. A server's function may not take one of their names.
+  const own: ReadonlyArray<Declaration> = wakeups === undefined ? DECLARATIONS : [...DECLARATIONS, ...WakeFunctions.declarations]
   // The chat's functions: one list, for the head and the sandbox
   // (functions.ts, "One list for each stack"): the built-ins, then the
-  // functions from outside. The head is made one time, from that list, the
-  // rules and the name, for the turns and the compactions.
-  const stack = (outside: Outside) => {
-    const declarations: ReadonlyArray<Declaration> = [...DECLARATIONS, ...outside.declarations]
+  // wake-ups' three when on, then the functions from outside, with the
+  // entries in that same order. The head is made one time, from that list,
+  // the rules and the name, for the turns and the compactions. `wakes`:
+  // the entries of the wake-ups' three, over the store; none when off.
+  const stack = (outside: Outside, wakes: ReadonlyArray<Entry>) => {
+    const declarations: ReadonlyArray<Declaration> = [...own, ...outside.declarations]
     const made = head(declarations, given.rules ?? null, given.name)
     const memory = Memory.layer.pipe(Layer.provide(Compactor.layer({ pick: given.compactor, head: made })))
     const limits = limitLayer({ limit: given.limit }).pipe(Layer.provideMerge(memory))
-    const functions = functionsLayer(declarations, { cwd: given.cwd, more: outside.entries }).pipe(Layer.provideMerge(limits))
+    const functions = functionsLayer(declarations, { cwd: given.cwd, more: [...wakes, ...outside.entries] }).pipe(Layer.provideMerge(limits))
     const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
     // The approvals (approval.ts): their source, the result of a run after
     // a yes, below the turn loop; the answers and the runs over it. Its
     // build is a load: a run that a crash left is cut, the expired ones get
-    // their notes, a yes that did not run yet runs.
-    const turns = Turns.layer({ head: made }).pipe(Layer.provide(Approvals.source), Layer.provideMerge(sandbox))
-    return Approvals.layer.pipe(Layer.provideMerge(turns))
+    // their notes, a yes that did not run yet runs. In the terminal with
+    // the wake-ups on, the sources in order, the approvals' first: an
+    // approval's result that waits starts its turn before a wake-up's fire.
+    const sources = wakeups?.with === "all" ? Source.inOrder(Approvals.source, wakeSource) : Approvals.source
+    const turns = Turns.layer({ head: made }).pipe(Layer.provide(sources), Layer.provideMerge(sandbox))
+    // Over the turn loop: the approvals' answers and runs; in the terminal
+    // with the wake-ups on, beside them the firer (its fiber ends with the
+    // launch's scope, before the store closes) and the service of
+    // `/wakeups`, which the terminal reads at its build.
+    const above = wakeups?.with === "all" ? Layer.mergeAll(Approvals.layer, firer, Wakeups.layer) : Approvals.layer
+    return above.pipe(Layer.provideMerge(turns))
   }
   // The shell is built before the load, and so ends after it: its end
   // kills what carries the run tag, and the servers carry it too, so the
@@ -285,10 +337,13 @@ export const layer = (given: {
   const shell = Shell.layer({ cwd: given.cwd }).pipe(Layer.provideMerge(asking))
   const servers = given.servers ?? []
   // The load runs where the diagnostics are up, so its refusals are in the
-  // log, and its scope is the layer's: the launch's.
+  // log, and its scope is the layer's: the launch's. The wake-ups' entries
+  // need the store's service: they are made in the same step, where the
+  // store is up, with no server too.
+  const entriesOf = Effect.map(Store, (store) => wakeups === undefined ? [] : WakeFunctions.entries(store, wakeups.zone === null ? {} : { zone: wakeups.zone }))
   const loaded = servers.length === 0
-    ? stack(NOTHING)
-    : Layer.unwrap(Effect.map(connect(servers, given.cwd, given.load), stack))
+    ? wakeups === undefined ? stack(NOTHING, []) : Layer.unwrap(Effect.map(entriesOf, (wakes) => stack(NOTHING, wakes)))
+    : Layer.unwrap(Effect.flatMap(connect(servers, given.cwd, given.load, own), (outside) => Effect.map(entriesOf, (wakes) => stack(outside, wakes))))
   return loaded.pipe(Layer.provideMerge(shell))
 }
 
@@ -395,7 +450,10 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
     ? undefined
     : { vendor: "openai", model: model ?? MODEL, effort: effort ?? EFFORT, speed: "slow" }
   const compactor: Pick = { vendor: "openai", model: compacting ?? COMPACTOR, effort: "low", speed: "slow" }
-  const parts = layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor, limit: settings.limit, servers: settings.servers, name: settings.name, rules })
+  // The parts of the launch, with the wake-ups of its interface (the head
+  // comment, "The wake-ups"): built in each branch below.
+  const parts = (mode: WakeupsOption["with"]) =>
+    layer({ home, file: path.join(home, Database.FILE), cwd, pick, compactor, limit: settings.limit, servers: settings.servers, name: settings.name, rules, wakeups: wakeupsOf(settings.wakeups, mode) })
 
   if ((yield* stdio.stdinIsTerminal) && (yield* stdio.stdoutIsTerminal)) {
     // The failures of the terminal's input, until the process ends
@@ -421,7 +479,7 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
       })
     )
     yield* Effect.raceFirst(Terminal.use((terminal) => terminal.quit), Deferred.await(failed)).pipe(
-      Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts))),
+      Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts("all")))),
       // The check after it reads `failed` in the same run of the fiber, so
       // what this tells is what the launch fails with: no error is told
       // twice, and none is left.
@@ -432,7 +490,7 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
     if (yield* Deferred.isDone(failed)) return yield* Deferred.await(failed)
     return
   }
-  const well = yield* Pipe.use((pipe) => pipe.end).pipe(Effect.provide(Pipe.layer.pipe(Layer.provideMerge(parts))))
+  const well = yield* Pipe.use((pipe) => pipe.end).pipe(Effect.provide(Pipe.layer.pipe(Layer.provideMerge(parts("functions")))))
   if (!well) {
     return yield* new TurnFailed()
   }

@@ -5,8 +5,12 @@
 // No test here sends a request to a real model (tests/vendor.ts).
 
 import { afterEach, expect, test } from "bun:test"
+import { Effect } from "effect"
 import * as fs from "node:fs"
-import { rows } from "./help.ts"
+import * as path from "node:path"
+import { Store } from "@everchat/core/store"
+import { rows, withStore } from "./help.ts"
+import { Pty } from "./pty.ts"
 import { env, place, PROGRAM, program, text, vendor } from "./vendor.ts"
 
 const open: Array<() => unknown> = []
@@ -255,4 +259,80 @@ test("the arguments: the usage, the version, the completions, and a wrong one", 
   expect((await run(at, "http://127.0.0.1:1", "", ["a message"])).code).toBe(2)
   // None of them made a home.
   expect(fs.existsSync(at.home)).toBe(false)
+}, 25_000)
+
+// The wake-ups (main.ts, "The wake-ups")
+// --------------------------------------
+
+// The config file in the home.
+const configure = (at: ReturnType<typeof place>, config: unknown) => {
+  fs.mkdirSync(at.home, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(at.home, "config.json"), JSON.stringify(config))
+}
+
+// A wake-up's row as the firer and the source see it.
+const wakeRow = (file: string) =>
+  rows(file, "select n as id, text, zone, at, due, pending, fired, last_turn, stopped is not null as stopped, why from everchat_wake order by n")
+
+test("the functions in a program: wake gets its result in the config's zone, and the note of the make is in the log", async () => {
+  const at = place()
+  configure(at, { wakeups: { zone: "Asia/Tokyo" } })
+  const server = fake((n) => (n === 1 ? program("call_1", 'return await wake({ when: "2030-01-01T09:00", text: "Call the bank." })') : text("It is set.")))
+  const ran = await run(at, server.address, "remind me\n")
+  // The result, then the loop's note of the make at the program's close.
+  expect(ran).toEqual({
+    out: "› remind me\n\n" +
+      '▸ return await wake({ when: "2030-01-01T09:00", text: "Call the bank." })\n\n' +
+      '◂ {\n    "id": 1,\n    "next": "2030-01-01 09:00 Asia/Tokyo"\n  }\n\n' +
+      "· Wake-up 1 set: next 2030-01-01 09:00 Asia/Tokyo\n\n" +
+      "It is set.\n",
+    err: "",
+    code: 0
+  })
+  expect(messages(at.file).filter((one) => one.kind === "note")).toEqual([{ kind: "note", text: "Wake-up 1 set: next 2030-01-01 09:00 Asia/Tokyo" }])
+  expect(wakeRow(at.file)).toMatchObject([{ id: 1, text: "Call the bank.", zone: "Asia/Tokyo", fired: 0, stopped: 0 }])
+})
+
+test("pipe mode ends with no wake turn: a row due before the start, and a row whose fire waits from an earlier launch, wait through pipe mode (no pend, no offer, one request); a later start of the terminal fires both", async () => {
+  const at = place()
+  fs.mkdirSync(at.home, { recursive: true, mode: 0o700 })
+  const when = Date.now() - 60_000
+  // Row 1 is due; row 2's fire waits (pended, as a firer of an earlier
+  // launch of the terminal leaves it).
+  await withStore(at.file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.makeWake({ text: "Water the plants.", at: when, zone: "UTC", first: when }, 20)
+    yield* store.makeWake({ text: "Feed the cat.", at: when, zone: "UTC", first: when }, 20)
+    yield* store.pendWake(2, { pending: when, missed: 0, due: null })
+  }))
+  const before = wakeRow(at.file)
+  expect(before).toEqual([
+    { id: 1, text: "Water the plants.", zone: "UTC", at: when, due: when, pending: null, fired: 0, last_turn: null, stopped: 0, why: null },
+    { id: 2, text: "Feed the cat.", zone: "UTC", at: when, due: null, pending: when, fired: 0, last_turn: null, stopped: 0, why: null }
+  ])
+  const server = fake((n) => text("Answer " + n + "."))
+  const ran = await run(at, server.address, "hello\n")
+  expect(ran).toEqual({ out: "› hello\n\nAnswer 1.\n", err: "", code: 0 })
+  expect(server.bodies.length).toBe(1)
+  expect(messages(at.file).map((one) => one.kind)).toEqual(["user", "asst"])
+  // The rows still wait, as they were: pipe mode has no firer and no source.
+  expect(wakeRow(at.file)).toEqual(before)
+  // The terminal's start: the source offers the waiting fire, and the
+  // firer's first round pends the due row, which fires after it.
+  const pty = new Pty([...PROGRAM, "--model", "gpt-test"], env(at, server.address), at.work, 100, 30)
+  open.push(async () => {
+    if (pty.code === null) {
+      pty.kill("SIGKILL")
+      await pty.ends()
+    }
+  })
+  await pty.sees("◷ [1] due", "◷ [2] due", "Answer 2.", "Answer 3.", "idle · gpt-test medium")
+  pty.type("\x04")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  expect(messages(at.file).map((one) => one.kind)).toEqual(["user", "asst", "wake", "asst", "wake", "asst"])
+  expect(wakeRow(at.file)).toMatchObject([
+    { id: 1, pending: null, fired: 1, stopped: 1, why: "fired" },
+    { id: 2, pending: null, fired: 1, stopped: 1, why: "fired" }
+  ])
 }, 25_000)

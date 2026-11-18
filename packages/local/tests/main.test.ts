@@ -6,10 +6,14 @@
 // vendor's address, and a home directory of its own with no gateway file.
 
 import { afterEach, expect, test } from "bun:test"
+import { Effect } from "effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { head } from "@everchat/core/head"
+import { Store } from "@everchat/core/store"
+import { DECLARATIONS } from "../src/localfunctions.ts"
 import { ending, terminalLost } from "../src/main.ts"
-import { rows, write } from "./help.ts"
+import { rows, withStore, write } from "./help.ts"
 import { Pty } from "./pty.ts"
 import { env, place, PROGRAM, program, text, vendor } from "./vendor.ts"
 
@@ -731,4 +735,80 @@ test("when only one of the standard input and the standard output is a terminal,
   expect(typed.code).toBe(0)
   expect(fs.readFileSync(file, "utf8")).toBe("› again\n\nHello.\n")
   expect(messages(at.file).map((one) => one.text)).toEqual(["hello", "Hello.", "again", "Hello."])
+})
+
+// The wake-ups (main.ts, "The wake-ups")
+// --------------------------------------
+
+// A reminder whose time passed a minute before the start, written into the
+// chat's file before it: due already, so the firer's first round fires it,
+// with no time of the wall clock to wait for.
+const dueBefore = async (at: ReturnType<typeof place>) => {
+  fs.mkdirSync(at.home, { recursive: true, mode: 0o700 })
+  const when = Date.now() - 60_000
+  await withStore(at.file, Effect.asVoid(Effect.flatMap(Store, (store) => store.makeWake({ text: "Water the plants.", at: when, zone: "UTC", first: when }, 20))))
+}
+
+const wakeRow = (file: string) =>
+  rows(file, "select n as id, fired, last_turn, pending, stopped is not null as stopped, why from everchat_wake order by n")
+
+// The head of a request: its tool's description.
+const toolOf = (body: any): string => body.tools[0].description
+
+test("the terminal fires: a reminder due before the start shows its wake message with its mark and the answer of its turn, with no message typed; /wakeups lists it as stopped by its fire; the log has one wake message", async () => {
+  const at = place()
+  await dueBefore(at)
+  const server = fake(() => text("Watered."))
+  const pty = start(at, server.address)
+  await pty.sees("◷ [1] due", "Water the plants.", "Watered.", IDLE)
+  pty.type("/wakeups\r")
+  // The row's line, which wraps at the screen's 100 columns before "(fired)".
+  await pty.sees("  1  Water the plants.  ", "UTC  next none  last ", "(fired)")
+  pty.type("\x04")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  expect(server.bodies.length).toBe(1)
+  // The request of the wake turn has the wake-ups' three in its head.
+  expect(toolOf(server.bodies[0])).toContain("declare function wake(")
+  expect(messages(at.file).map((one) => one.kind)).toEqual(["wake", "asst"])
+  expect(messages(at.file)[0]!.text).toContain("Water the plants.")
+  expect(wakeRow(at.file)).toEqual([{ id: 1, fired: 1, last_turn: 1, pending: null, stopped: 1, why: "fired" }])
+  expect(launches(at.file).map((one) => [one.ended !== null, one.why])).toEqual([[true, "exit"], [true, "exit"]])
+})
+
+test("the functions in a program, in the terminal: wake gets its result, and the note of the make is in the log and on the screen", async () => {
+  const at = place()
+  const server = fake((n) => (n === 1 ? program("call_1", 'return await wake({ when: "2030-01-01T09:00", text: "Call the bank.", zone: "UTC" })') : text("It is set.")))
+  const pty = start(at, server.address)
+  await pty.sees(IDLE)
+  pty.type("remind me\r")
+  await pty.sees("Wake-up 1 set: next 2030-01-01 09:00 UTC", "It is set.", IDLE)
+  pty.type("\x04")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  expect(messages(at.file).filter((one) => one.kind === "note")).toEqual([{ kind: "note", text: "Wake-up 1 set: next 2030-01-01 09:00 UTC" }])
+  expect(rows(at.file, "select fn, output, status from everchat_call where parent is not null")).toEqual([
+    { fn: "wake", output: '{"id":1,"next":"2030-01-01 09:00 UTC"}', status: "done" }
+  ])
+})
+
+test("on: false in the config file: a due row does not fire in the terminal, the request's head has none of the three (today's head), and /wakeups says that the config file turns them off", async () => {
+  const at = place()
+  await dueBefore(at)
+  fs.writeFileSync(path.join(at.home, "config.json"), JSON.stringify({ wakeups: { on: false } }))
+  const server = fake(() => text("Hello."))
+  const pty = start(at, server.address)
+  await pty.sees(IDLE)
+  pty.type("hello\r")
+  await pty.sees("› hello", "Hello.", IDLE)
+  pty.type("/wakeups\r")
+  await pty.sees("The config file turns the wake-ups off: this launch has none to list or stop.")
+  pty.type("\x04")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  expect(server.bodies.length).toBe(1)
+  expect(toolOf(server.bodies[0])).toBe(head(DECLARATIONS).tools[0]!.description)
+  expect(toolOf(server.bodies[0])).not.toContain("wake")
+  expect(messages(at.file).map((one) => one.kind)).toEqual(["user", "asst"])
+  expect(wakeRow(at.file)).toEqual([{ id: 1, fired: 0, last_turn: null, pending: null, stopped: 0, why: null }])
 })

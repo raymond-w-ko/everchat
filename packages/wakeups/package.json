@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./commands": "./src/commands.ts",
     "./firer": "./src/firer.ts",
+    "./functions": "./src/functions.ts",
     "./source": "./src/source.ts",
     "./time": "./src/time.ts"
   },

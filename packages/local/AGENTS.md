@@ -94,6 +94,34 @@ pipe mode has no commands, and none of this):
   cut first, then `visible`), for every reader; the approval's row keeps
   its `input` exact.
 
+The terminal's command for the wake-ups (`/wakeups`; docs/wakeups.md,
+section 9; pipe mode has none):
+
+- Four forms, through the wake-ups' service (`Wakeups`,
+  `@everchat/wakeups/commands`) only: `/wakeups` lists the rows,
+  `/wakeups stop <id>` stops one, `/wakeups off` and `/wakeups on` turn
+  the chat's wake-ups off and on. A stop, off and on are each a note in the
+  log, with its write in the note's transaction; the note is the answer,
+  shown as each message of the log is. One that finds the state already so
+  writes nothing and says one line: `No wake-up 9.`, `Wake-up 3 is not
+  active.`, `The wake-ups are off already.`, `The wake-ups are on
+  already.`
+- `/wakeups`: a first line when the chat's wake-ups are off (`WAKEUPS_OFF`),
+  then a line for each row, the active ones first (`wakeLine`): its id, its
+  text on one line (cut at 100 characters as an approval's arguments are,
+  then `visible`), `when`, the zone, `next` and `last` on the row's wall
+  clock (or `none`), the missed count when it is not 0, and `active` or
+  `stopped (<why>)`; each text of the row goes through `visible`. With no
+  row, one line: `This chat has no wake-up.`
+- `/wakeups` with another argument (`stop` with no whole number of 1 or
+  more, `stop 3 4`, `later`) says the line of the four forms
+  (`WAKEUPS_USAGE`) and calls nothing. A fault of the service is the line
+  of each command's fault.
+- The terminal reads the service with `Effect.serviceOption` at its build:
+  `Terminal.layer` does not need it. With none (the config file turns the
+  wake-ups off), each form says one line, `NO_WAKEUPS`: "The config file
+  turns the wake-ups off: this launch has none to list or stop."
+
 How to test them:
 
 - `packages/local/tests/pipe.test.ts` runs the whole program in pipe mode, as a
@@ -153,10 +181,28 @@ How to test them:
     part of the content.
   - The name and the rules make the launch's one head: a change of either
     applies at the next launch. Neither takes `${NAME}`.
+  - `wakeups`: the wake-ups' section (`docs/wakeups.md`, section 9), an
+    object with two optional fields. `on`, a boolean: the wake-ups are on
+    unless the file says `on: false`, which is how the factory turns them
+    off. `zone`, a text: the IANA name of the person's zone for the
+    wake-ups. The settings hold `wakeups: { on, zone }`, with `zone` the
+    named zone that the check gives (`america/new_york` is
+    `America/New_York`), or null; with no section, `{ on: true, zone: null }`.
+    The zone is checked by `zone` of `@everchat/wakeups/time`, the one check
+    that the function `wake` runs, so the file takes no zone that `wake`
+    would refuse: bounds first (over `ZONE_MAX`, 100, the fault gives the
+    length and no part of it), then the IANA form and the engine's zones.
+    `on: false` does not skip the check. A bad zone is a fault of the start
+    at `wakeups.zone`, with the check's own text, which shows the zone
+    between double quotes with the core's `visible` escapes, on one line. A
+    zone is no secret and takes no `${NAME}`. The zone of a wake-up is the
+    function's argument, else this field, else the machine's; the machine's
+    is not read here. An unknown field of the section is refused, and a
+    build older than the section refuses a file that has it.
   - A field that is not in this list is refused, at any depth.
 - The faults: a file that cannot be read, a link to no file, that is not
-  JSON or not one object, a field of a wrong type or out of its bounds, an
-  unknown field, an unset variable or the gateway's key, a rules file that cannot be used. Each fault stops the start: the program writes it as one
+  JSON or not one object, a field of a wrong type or out of its bounds, a
+  `wakeups.zone` that the wake-ups' check refuses, an unknown field, an unset variable or the gateway's key, a rules file that cannot be used. Each fault stops the start: the program writes it as one
   line on the standard error, with the file's path and the field's path,
   and ends with the code 1, before the screen is up and before the database
   is opened.
@@ -166,7 +212,8 @@ How to test them:
   not set refuses the start. No other form: no default, no escape. Never
   put a secret in the file itself. No fault, message or test output holds a
   value of the file or a replaced one: a fault names the field and the
-  variable only. Keep that rule when you add a field.
+  variable only. Keep that rule when you add a field. The one exception is
+  `wakeups.zone`, which is no secret: its fault shows the zone, escaped.
 - The gateway's key is no variable of the file: `${EVERCHAT_GATEWAY_KEY}`
   (`KEY_VARIABLE` of `gateway.ts`) in any of the four places is a fault,
   set or not, that names the field and the variable, and it is never
@@ -272,6 +319,44 @@ How to test them:
 - A gated function comes from a server whose config sets `approval: "ask"`
   ("The config file"). The person answers in the terminal ("The terminal
   and pipe mode": `/approvals`, `/approve`, `/deny`).
+
+## The wake-ups at a launch
+
+- The config file's `wakeups` ("The config file") gives `layer` of
+  `packages/local/src/main.ts` its option (`WakeupsOption`, from
+  `wakeupsOf`), in each branch of the test of the terminal. Three states:
+  - none (the config's `on: false`): no function, no source, no firer and
+    no service of the wake-ups; the launch is as it was before them, and
+    the head is today's (the hash `TODAY` of
+    `packages/local/tests/connectors.test.ts`);
+  - `"functions"` (pipe mode, on): the three functions only;
+  - `"all"` (the terminal, on): the functions, the source, the firer and
+    the service of `/wakeups`.
+- What each stack has (`docs/wakeups.md`, section 10): the terminal has
+  `wake`, `wakes` and `unwake`, the wake-ups' source after the approvals',
+  the firer and `/wakeups`; pipe mode has the three functions only (its end
+  waits for the loop's idle, so a source there would chain a wake turn into
+  it: a wake-up made there, or one that comes due, fires at the next start
+  of the terminal); `everchat serve` and `everchat inspect` get nothing.
+- The one list of the chat's functions, for the head of the turns, the
+  compactor's head and the sandbox: the built-ins, then `wake`, `wakes`
+  and `unwake`, then the functions from outside, with the entries in that
+  same order in `functionsLayer`'s `more`. The entries
+  (`@everchat/wakeups/functions`, `entries(store, { zone })`, with the
+  config's zone) need the store's service: they are made in the
+  `Layer.unwrap` step where the store is up, with no server too. The load
+  of the servers gets the built-ins and the three as `beside`, so a server
+  named `wake` (or `wakes`, `unwake`) is refused with the client's
+  diagnostic, and the launch goes on.
+- The sources, below the turn loop, in the terminal:
+  `Source.inOrder(Approvals.source, source)`: an approval's result that
+  waits starts its turn before a wake-up's fire. Above it, beside
+  `Approvals.layer`: the firer's layer (`@everchat/wakeups/firer`), whose
+  fiber ends with the launch's scope, before the store closes, and
+  `Wakeups.layer` (`@everchat/wakeups/commands`), which the terminal reads
+  at its build. Pipe mode keeps `Approvals.source` alone.
+- The head changes on purpose with the default (on): its hash is `WAKING`
+  in `packages/local/tests/connectors.test.ts`.
 
 ## The inspector
 

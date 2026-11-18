@@ -22,6 +22,20 @@ the rules for every file.
   counts a wake turn's end; `stoppedText`, the note of a row stopped at two
   failures; and `SLEEP`, the longest sleep between two rounds (see "The
   firer").
+- `./functions` (`packages/wakeups/src/functions.ts`): `declarations`, the
+  three declarations `wake`, `wakes` and `unwake`, in that order, and
+  `entries(store, options)`, their entries in the same order over the
+  store's service (`Store["Service"]`) and `options.zone`, the config
+  file's zone (`DateTime.TimeZone.Named`, or none); `ACTIVE_MAX`, the most
+  active wake-ups of a chat (20); `SHOWN_MAX`, the most characters of the
+  model's input that a refusal repeats; the types `Options` and `Listed`, a
+  row as `wakes` gives it (see "The functions").
+- `./commands` (`packages/wakeups/src/commands.ts`): `Wakeups`, the
+  service of the person's command `/wakeups`, and its layer
+  `Wakeups.layer` over `Store` and `Turns`; its types `Listing`, `Row`,
+  `Stopped` and `Switched`; `rowOf`, a row of the store as `list` gives
+  it; and its notes `stopText(id)`, `OFF_TEXT` and `ON_TEXT` (see "The
+  command's service").
 - The tests of one module sit next to it, in `packages/wakeups/src/`.
 
 ## What it is not
@@ -31,7 +45,9 @@ the rules for every file.
   members, and writes only `fireWake`, in the offer's transaction;
   `firer.ts` writes only `pendWake` and `settleWake` (alone, or as the
   `write` of the note of a stop at two failures), and starts no turn
-  itself.
+  itself; `functions.ts` writes only `makeWake` and `stopWake`;
+  `commands.ts` writes only `stopWake` and `setWakeups`, each as the
+  `write` of a note.
 - No config: `time.ts` reads no clock either; a caller gives the zone, the
   text and now. `source.ts` and `firer.ts` read now from `effect`'s
   `Clock`, and the firer sleeps on it.
@@ -193,8 +209,9 @@ runs at once, at the build; then a round after each sleep. A round:
   transaction, so a fault leaves neither, and the next launch writes both.
   A row read as stopped already is settled with no note. The rows of a
   round settled first can fire in it.
-- **Off**: the chat's `wakeups` is false: the rows are not read, and
-  nothing is pended.
+- **Off**: the chat's `wakeups` is false: the round reads no due row
+  (`dueWakes`) and writes no `pendWake`; it still reads the active rows
+  (`wakes({ active: true })`) for its sleep, and calls `Turns.ready`.
 - **On**: for each row of `dueWakes(now)`, `pendOf` gives what to write
   with `pendWake`: a reminder's time, with no count and no next slot; a
   routine's newest slot at or before now, the count of its slots before
@@ -225,8 +242,107 @@ sleep, which ends a round, and a case moves the clock only then. A case
 may hold the listener back (its events wait behind a gate), so that only
 the clock's round settles.
 
+## The functions
+
+`functions.ts` (docs/wakeups.md, section 8): the model makes, lists and
+stops the wake-ups of its chat; they are the only way to make a row. Each
+has a hand-written signature and no approval: `wake` and `unwake` take one
+object, `wakes` none. A launch gives the declarations to its head and the
+entries (`entries(store, { zone })`) to its functions, with the wake-ups on.
+
+- **`wake({ when, text, zone? })`**: the zone is the argument's, else
+  `options.zone` (the config file's), else the machine's (`machineZone`),
+  and it is kept on the row as the engine names it. `when` and the zone go
+  through `time.ts` (`zone`, `parse`, their bounds first). A reminder's
+  first fire (`first`) is its time (`reminderAt`); a routine's is its next
+  slot after now (`nextSlot`). The text is 1 to `WAKE_TEXT_MAX` (2,000)
+  characters, checked before the store is asked. The row gets the caller's
+  turn and call, and `makeWake` counts the `ACTIVE_MAX` (20) active rows in
+  its transaction. It gives `{ id, next }`, `next` the row's `first` on its
+  wall clock (`2026-11-16 09:00 Europe/Berlin`), the time of the make's
+  note. **`off: true`** comes only when the chat's `wakeups` was false at
+  the make: the row is made all the same (the limit holds), and fires only
+  after `/wakeups on`.
+- **`wakes()`**: every row, the active rows first, then the stopped rows,
+  each group by id: `{ id, text, when, zone, next, last, fired, missed,
+  stopped, why }`. `when` is the routine, or the reminder's time as `wake`
+  takes it (`2026-11-18T09:00`, with its seconds when not 0); `next` the
+  fire that waits, else `due`; `last` the last slot fired; `stopped` when it
+  stopped; each time on the row's wall clock, or null. The result is data
+  for the program: the text is exact, with no escape. Stopped rows have no
+  limit: a built-in function's result reaches the program whole, its call's
+  row keeps it, and the model reads the program's echo cut to the output
+  limit (`LIMIT`, `packages/core/src/limit.ts`).
+- **`unwake({ id })`**: `stopWake(id, "unwake", call)`, always with the
+  caller's call, so that `wakesOf` finds the stop. It gives
+  `{ id, stopped: true }`; a fire that waited goes with the row.
+- **The refusals**: each is a `FunctionError` whose message the model
+  reads: it names the field, says what is wrong and gives a right example.
+  The decoders refuse a call that is not one object (none, two, a text, a
+  list), a field of the wrong type or missing, a field that is not known,
+  and an id that is not a whole number over 0; a trailing null is an
+  argument left out, and so is `zone: null`. `wake` also refuses what
+  `time.ts` refuses (with its message), a reminder in the past, a text out
+  of its bounds, and the 21st active row (`makeWake` gives `full`); `unwake`
+  an id that is not there and a row that has stopped. A text of the
+  model's input that a message repeats goes through the core's `visible`,
+  cut to `SHOWN_MAX` (200) characters. A `StoreError` is no refusal: the
+  call fails as the core's functions' store faults do (`stored`).
+- **The notes are the loop's**: no function writes to the log. At the
+  program's close the turn loop reads `wakesOf` and logs
+  `Wake-up 3 set: next ...` and `Wake-up 3 stopped.`, after the approvals'
+  notes, in the order of the calls. No function reads the config file.
+
+The tests (`functions.test.ts`) run each program in a fake sandbox that
+writes each call's row and runs the entry with that caller, as the
+sandbox's `invoke` does, under the turn loop of `source.test.ts`, on a
+`TestClock`; the chain of reminders adds the firer.
+
+## The command's service
+
+`commands.ts` (docs/wakeups.md, sections 7 and 9): what `/wakeups` in the
+terminal does, with no terminal in it. It is the person's only control
+over the turns that start with no message of theirs. The service gives
+values; the terminal (`packages/local/src/terminal.ts`) makes the lines,
+and reads the service with `Effect.serviceOption`: a launch with the
+wake-ups off gives none.
+
+- **`list`**: `{ on, rows }`, the chat's switch and every row, the active
+  rows first, then the stopped ones, each group by id, from one read
+  (`rowOf`): `{ id, text, when, zone, next, last, missed, active, why }`.
+  `text`, `when` and `zone` are the row's own, exact; `when` is the
+  routine, or the reminder's time as `wake` takes it; `next` the fire that
+  waits, else `due`, else null; `last` the last slot fired; both on the
+  row's wall clock (`wallClock`). It reads only.
+- **`stop(id)`**, **`off`**, **`on`**: each the `write` of a
+  `Turns.note`, in the note's one transaction, under the loop's lock,
+  which an offer holds too (lead, ec-ur3a5, M1): `stopText(id)`
+  (`Wake-up 3 stopped by the person.`) with `stopWake(id, "person")`;
+  `OFF_TEXT` (`The person turned the wake-ups off.`) with
+  `setWakeups(false)`; `ON_TEXT` (`The person turned the wake-ups on.`)
+  with `setWakeups(true)`. A fault in the note's transaction leaves no
+  note and no write.
+- **Already so**: each member reads the state first. Where it is already
+  what was asked, it writes nothing, logs no note, and says so: `stop`
+  gives `none` (no row with that id, or an id that is not a whole number
+  over 0) or `inactive` (a row that has stopped, a reminder that fired),
+  else `stopped`; `off` and `on` give `already`, else `switched`. A write
+  that finds its row changed since that read (the firer's stop at two
+  failures, an `unwake`) changes nothing, and the note stays: accepted
+  (docs/wakeups.md, section 7, M1 and M16); the row keeps its first `why`.
+- **`ready` after `on`**: when its note committed, `on` calls
+  `Turns.ready`, so a fire that waited through the off time is offered at
+  once, with its missed count, with no round of the firer. Not after
+  `off`, a stop, or an `on` that was on already.
+- A `StoreError` of a read, of the note or of `ready` fails the member;
+  the terminal writes it as its other commands' faults.
+
+The tests (`commands.test.ts`) run the service over the turn loop of
+`source.test.ts`, with no firer, on a `TestClock`; the lock's orders and
+the row changed since the read are held by gates.
+
 ## Its check
 
 The scoped check of the package (the root `AGENTS.md`, "Checks"):
-`just scoped packages/wakeups/src/firer.test.ts packages/wakeups/src/source.test.ts packages/wakeups/src/time.test.ts`.
+`just scoped packages/wakeups/src/commands.test.ts packages/wakeups/src/firer.test.ts packages/wakeups/src/functions.test.ts packages/wakeups/src/source.test.ts packages/wakeups/src/time.test.ts`.
 `just check` checks the types of its two programs.

@@ -19,6 +19,11 @@
 //                              prompt.ts says the form)
 //   rules                      the path of a file of the person's own
 //                              instructions, 1 to 4,096 characters
+//   wakeups                    `{ on?, zone? }`: `on` a boolean, on unless
+//                              `false`; `zone` the IANA name of the
+//                              wake-ups' zone, checked by `zone` of the
+//                              wake-ups' time.ts (the check that `wake`
+//                              runs), and kept as the zone that it gives
 //
 // `rules` names a file, and `rulesOf` reads it: a relative path is resolved
 // against the work directory, not the home. Its text, at most 32,768 bytes
@@ -26,6 +31,14 @@
 // (the core's head.ts); a blank file gives no rules. A fault of the file
 // names the field `rules` and what is wrong, never a part of its content.
 // Neither field takes `${NAME}`.
+//
+// `wakeups.zone` is checked as `wake` checks the zone of a call, by the same
+// function, so the file takes no zone that `wake` would refuse; `on: false`
+// does not skip the check. Its fault is the check's own text, which shows
+// the zone between double quotes with its escapes (the core's `visible`),
+// on one line; over `ZONE_MAX` it shows no part of it. A zone is no secret
+// and takes no `${NAME}`. With no zone, the machine's is not read here: it
+// is the function's last choice.
 //
 // A server's name is an identifier: it becomes the namespace of the server's
 // functions. A server is a program on stdio, `{ command, args?, env?, cwd? }`,
@@ -57,7 +70,8 @@
 // the variables and the addresses are looked at when the form is right.
 
 import { nameFault } from "@everchat/core/head"
-import { Effect, FileSystem, Path, Schema, SchemaIssue } from "effect"
+import { zone } from "@everchat/wakeups/time"
+import { DateTime, Effect, FileSystem, Path, Result, Schema, SchemaIssue } from "effect"
 import * as nodeFs from "node:fs"
 import { KEY_VARIABLE } from "./gateway.ts"
 
@@ -109,6 +123,13 @@ export interface HttpServer extends Common {
 
 export type Server = StdioServer | HttpServer
 
+// The wake-ups' section: on unless the file says `on: false`; the zone that
+// the check gave for `zone`, or null with none.
+export interface Wakeups {
+  readonly on: boolean
+  readonly zone: DateTime.TimeZone.Named | null
+}
+
 // What the file sets. A field that the file does not give is undefined.
 export interface Settings {
   readonly model: string | undefined
@@ -121,10 +142,15 @@ export interface Settings {
   readonly name: string | undefined
   // The path of the rules' file, as written (`rulesOf` reads it).
   readonly rules: string | undefined
+  // The wake-ups' section; with none, `{ on: true, zone: null }`.
+  readonly wakeups: Wakeups
 }
 
+// The wake-ups' section of a file that has none.
+export const WAKEUPS: Wakeups = { on: true, zone: null }
+
 // The settings of no file, and of `{}`.
-export const NONE: Settings = { model: undefined, effort: undefined, compactor: undefined, limit: undefined, servers: [], name: undefined, rules: undefined }
+export const NONE: Settings = { model: undefined, effort: undefined, compactor: undefined, limit: undefined, servers: [], name: undefined, rules: undefined, wakeups: WAKEUPS }
 
 // The picks of a launch's flags, or of the file: undefined when not given.
 export interface Picks {
@@ -198,7 +224,19 @@ const SettingsSchema = Schema.Struct({
   name: Schema.optionalKey(Schema.String.check(Schema.makeFilter((name) => nameFault(name)))),
   rules: Schema.optionalKey(
     Schema.String.check(Schema.makeFilter((rules) => (rules.length >= 1 && rules.length <= RULES_PATH_MAX ? undefined : `Expected a path of 1 to ${RULES_PATH_MAX} characters`)))
-  )
+  ),
+  wakeups: Schema.optionalKey(Schema.Struct({
+    on: Schema.optionalKey(Schema.Boolean),
+    // The check's own text: bounds first, the zone shown with its escapes.
+    zone: Schema.optionalKey(Schema.String.check(Schema.makeFilter((name) => Result.match(zone(name), { onFailure: (error) => error.message, onSuccess: () => undefined }))))
+  }))
+})
+
+// The section as the settings hold it. The zone passed the check in the
+// decode, so the check gives its zone here.
+const wakeupsOf = (decoded: Decoded["wakeups"]): Wakeups => ({
+  on: decoded?.on !== false,
+  zone: decoded?.zone === undefined ? null : Result.getOrThrow(zone(decoded.zone))
 })
 
 // A path of the file, as a person would write it in code: `servers.git.args[0]`.
@@ -331,7 +369,8 @@ export const read = Effect.fnUntraced(function*(home: string, env: Readonly<Reco
     limit: settings.limit,
     servers: made.servers,
     name: settings.name,
-    rules: settings.rules
+    rules: settings.rules,
+    wakeups: wakeupsOf(settings.wakeups)
   } satisfies Settings
 })
 

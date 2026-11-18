@@ -15,7 +15,7 @@
 // twice for a load (its probe of the version runs on a process of its own).
 
 import { afterAll, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Clock, Duration, Effect, type Fiber, Option, Queue, Result } from "effect"
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -24,13 +24,17 @@ import { AskDelay } from "@everchat/core/ask"
 import { Functions } from "@everchat/core/functions"
 import { head } from "@everchat/core/head"
 import type { Head } from "@everchat/core/request"
-import { Store } from "@everchat/core/store"
+import { type NewWake, Store } from "@everchat/core/store"
 import { Turns } from "@everchat/core/turn"
+import { Wakeups } from "@everchat/wakeups/commands"
+import { SLEEP } from "@everchat/wakeups/firer"
+import { declarations as WAKE_DECLARATIONS } from "@everchat/wakeups/functions"
+import { zone } from "@everchat/wakeups/time"
 import type { StdioServer } from "../src/config.ts"
 import { KEY_VARIABLE, URL_VARIABLE } from "../src/gateway.ts"
 import { DECLARATIONS } from "../src/localfunctions.ts"
-import { layer } from "../src/main.ts"
-import { PICK, rows } from "./help.ts"
+import { layer, type WakeupsOption, wakeupsOf } from "../src/main.ts"
+import { fakeWire, PICK, reply, rows, withChat } from "./help.ts"
 import { env, place, PROGRAM, program, type Sent, text, vendor } from "./vendor.ts"
 
 const EXAMPLE = path.join(import.meta.dir, "../../../tools/mcpexample.ts")
@@ -176,26 +180,25 @@ const isCompaction = (body: unknown) => JSON.stringify(body).includes("Compactio
 
 // A fake vendor: a compaction gets a line; the n-th request of a turn runs
 // `programs[n - 1]`, and then the model says "Done.". "hold": the reply
-// starts and never ends.
+// starts and never ends. `compacted`: an effect that ends when the first
+// compaction's request has come (lead, ec-p4rfa4, V1); its body is then in
+// `bodies`, which `vendor` fills before it calls back. One that never comes
+// is the case's own timeout (V3).
 const fake = (...programs: ReadonlyArray<string | "hold">) => {
   let step = 0
+  const compaction = Promise.withResolvers<void>()
   const made = vendor((_n, body): Array<Sent> | "hold" => {
-    if (isCompaction(body)) return text("a line")
+    if (isCompaction(body)) {
+      compaction.resolve()
+      return text("a line")
+    }
     step += 1
     const one = programs[step - 1]
     return one === undefined ? text("Done.") : one === "hold" ? "hold" : program("c" + step, one)
   })
   stops.push(made.stop)
-  return made
+  return { ...made, compacted: Effect.promise(() => compaction.promise) }
 }
-
-const until = (check: () => boolean) =>
-  Effect.gen(function*() {
-    for (let k = 0; k < 1000 && !check(); k++) {
-      yield* Effect.sleep("10 millis")
-    }
-    if (!check()) return yield* Effect.die("the test waited 10 s for a state that did not come")
-  })
 
 const say = (message: string) =>
   Effect.gen(function*() {
@@ -205,22 +208,27 @@ const say = (message: string) =>
   })
 
 // One launch of the terminal's stack in this process, with `servers` as
-// the config's, until `effect` ends.
+// the config's, until `effect` ends. `wakeups`: the launch's wake-ups (main.ts,
+// `WakeupsOption`); none when not given. `file`: the chat's file, for a case
+// that writes it before the start; a new one when not given. `clock`: the
+// launch's clock, for a case that watches the firer's sleeps.
 const launch = async <A, E>(
   address: string,
   servers: ReadonlyArray<StdioServer>,
   effect: Effect.Effect<A, E, Turns | Functions | Store>,
-  load?: number
+  load?: number,
+  more: { readonly wakeups?: WakeupsOption | undefined; readonly file?: string; readonly clock?: Clock.Clock } = {}
 ) => {
   const root = fs.mkdtempSync(path.join(dir, "home-"))
-  const file = path.join(root, "chat.db")
+  const file = more.file ?? path.join(root, "chat.db")
   process.env[URL_VARIABLE] = address
   process.env[KEY_VARIABLE] = "test-key"
   try {
-    const exit = await Effect.runPromiseExit(effect.pipe(
-      Effect.provide(layer({ home: root, file, cwd: root, pick: PICK, compactor: COMPACTOR, servers, load })),
+    const run = effect.pipe(
+      Effect.provide(layer({ home: root, file, cwd: root, pick: PICK, compactor: COMPACTOR, servers, load, wakeups: more.wakeups })),
       Effect.provideService(AskDelay, () => Effect.succeed(0))
-    ))
+    )
+    const exit = await Effect.runPromiseExit(more.clock === undefined ? run : Effect.provideService(run, Clock.Clock, more.clock))
     return { exit, file }
   } finally {
     delete process.env[URL_VARIABLE]
@@ -261,7 +269,7 @@ test("the terminal's stack with the example as the config's server: the head of 
   const { exit, file } = await launch(vendor.address, [stdio("example", EXAMPLE)], Effect.gen(function*() {
     // A message longer than a node: its leaf is a compaction.
     yield* say("a long one " + "and more ".repeat(80))
-    yield* until(() => vendor.bodies.some(isCompaction))
+    yield* vendor.compacted
     expect(marked().length).toBe(1)
     return yield* Functions
   }))
@@ -347,6 +355,166 @@ test("the terminal's stack with a server that starts a helper: a call answers; a
   expect(pidsIn(ENDED)).toContain(wrapper)
 }, 20_000)
 
+// The wake-ups at a launch (main.ts, "The wake-ups")
+// -------------------------------------------------
+
+const WAKE_NAMES = ["wake", "wakes", "unwake"]
+// The wake-ups of the terminal and of pipe mode, with no zone of the config.
+const ALL: WakeupsOption = { with: "all", zone: null }
+const M = 60_000
+// A reminder whose time passed a minute before the start: due already, so
+// the firer's first round pends it.
+const due = (): NewWake => {
+  const at = Date.now() - M
+  return { text: "Water the plants.", at, zone: "UTC", first: at }
+}
+
+test("on, the default, in the terminal's stack with the example as the config's server: the head of the turn's row, the head that the compactor sends and Functions.names are one list: the built-ins, then wake, wakes and unwake, then example.add and example.send", async () => {
+  const vendor = fake()
+  const { exit, file } = await launch(vendor.address, [stdio("example", EXAMPLE)], Effect.gen(function*() {
+    yield* say("a long one " + "and more ".repeat(80))
+    yield* vendor.compacted
+    return yield* Functions
+  }), undefined, { wakeups: ALL })
+  expect(exit._tag).toBe("Success")
+  const functions = exit._tag === "Success" ? exit.value : undefined
+  const names = [...BUILT_INS, ...WAKE_NAMES, "example.add", "example.send"]
+  expect(functions?.names).toEqual(names)
+  const shown = head(functions?.declarations ?? [])
+  expect(named(shown)).toEqual(names)
+  expect(functions?.declarations.slice(BUILT_INS.length, BUILT_INS.length + 3)).toEqual([...WAKE_DECLARATIONS])
+  const turns = turnHeads(file).map((body) => JSON.parse(body) as Head)
+  expect(turns).toEqual([shown])
+  const compactions = vendor.bodies.filter(isCompaction).map(headOf)
+  expect(compactions.length).toBeGreaterThan(0)
+  expect(compactions).toEqual(compactions.map(() => shown))
+  expect(vendor.bodies.filter((body) => !isCompaction(body)).map(headOf)).toEqual([shown])
+  expect(marked()).toEqual([])
+}, 20_000)
+
+test("on, the default, in the terminal's stack with no server: the head and Functions.names are the built-ins, then wake, wakes and unwake; the service of /wakeups is there, and a program's wake makes a row in the config's zone", async () => {
+  const vendor = fake('return await wake({ when: "2030-01-01T09:00", text: "Call the bank." })')
+  const { exit, file } = await launch(vendor.address, [], Effect.gen(function*() {
+    yield* say("remind me")
+    const service = yield* Effect.serviceOption(Wakeups)
+    const listed = Option.isSome(service) ? yield* service.value.list : null
+    return { names: (yield* Functions).names, service: Option.isSome(service), listed }
+  }), undefined, { wakeups: { with: "all", zone: Result.getOrThrow(zone("Asia/Tokyo")) } })
+  expect(exit._tag).toBe("Success")
+  const got = exit._tag === "Success" ? exit.value : undefined
+  expect(got?.names).toEqual([...BUILT_INS, ...WAKE_NAMES])
+  expect(got?.service).toBe(true)
+  expect(got?.listed?.on).toBe(true)
+  expect(got?.listed?.rows.map((one) => [one.id, one.text, one.zone, one.next, one.active])).toEqual([[1, "Call the bank.", "Asia/Tokyo", "2030-01-01 09:00 Asia/Tokyo", true]])
+  expect(turnHeads(file).map((body) => named(JSON.parse(body) as Head))).toEqual([[...BUILT_INS, ...WAKE_NAMES]])
+  expect(rows(file, "select fn, status from everchat_call where parent is not null")).toEqual([{ fn: "wake", status: "done" }])
+  expect(rows<{ text: string }>(file, "select text from everchat_msg_read where kind = 'note'").map((one) => one.text)).toEqual(["Wake-up 1 set: next 2030-01-01 09:00 Asia/Tokyo"])
+}, 20_000)
+
+test("on: false: the config's section gives no option, and the stack is today's: the head is head(DECLARATIONS) for the turn and the compactor, Functions.names has none of the three, no service of /wakeups, and a program that calls wake fails as a call of an unknown name does", async () => {
+  expect(wakeupsOf({ on: false, zone: null }, "all")).toBeUndefined()
+  expect(wakeupsOf({ on: false, zone: null }, "functions")).toBeUndefined()
+  expect(wakeupsOf({ on: true, zone: null }, "functions")).toEqual({ with: "functions", zone: null })
+  const vendor = fake('return await wake({ when: "2030-01-01T09:00", text: "Call the bank." })', "return await nosuch({ when: 1 })")
+  const { exit, file } = await launch(vendor.address, [], Effect.gen(function*() {
+    yield* say("remind me")
+    yield* say("a long one " + "and more ".repeat(80))
+    yield* vendor.compacted
+    return { names: (yield* Functions).names, service: Option.isSome(yield* Effect.serviceOption(Wakeups)) }
+  }), undefined, { wakeups: wakeupsOf({ on: false, zone: null }, "all") })
+  expect(exit._tag).toBe("Success")
+  expect(exit._tag === "Success" ? exit.value : undefined).toEqual({ names: BUILT_INS, service: false })
+  const today = head(DECLARATIONS)
+  expect(turnHeads(file).map((body) => JSON.parse(body))).toEqual([today, today])
+  const compactions = vendor.bodies.filter(isCompaction).map(headOf)
+  expect(compactions.length).toBeGreaterThan(0)
+  expect(compactions).toEqual(compactions.map(() => today))
+  // The two calls fail alike: each name is unknown to the program.
+  const echoes = rows<{ text: string }>(file, "select text from everchat_msg_read where kind = 'echo' order by i").map((one) => one.text)
+  expect(echoes.length).toBe(2)
+  expect(echoes[1]!.replaceAll("nosuch", "wake")).toBe(echoes[0]!)
+  expect(echoes[0]).toContain("wake")
+  expect(rows(file, "select count(*) as n from everchat_wake")).toEqual([{ n: 0 }])
+}, 20_000)
+
+// The firer's sleeps, as a queue: the clock of the launch, whose `sleep`
+// of `SLEEP` (the firer's, after a round with no row due sooner) offers its
+// fiber before it sleeps. Every other sleep is the clock's own.
+const watchedClock = (asleep: Queue.Queue<Fiber.Fiber<unknown, unknown>>): Clock.Clock => {
+  const real = Effect.runSync(Clock.clockWith(Effect.succeed))
+  return Object.assign(Object.create(real) as Clock.Clock, {
+    sleep: (duration: Duration.Duration) =>
+      Duration.toMillis(duration) === SLEEP
+        ? Effect.andThen(Effect.flatMap(Effect.fiber, (fiber) => Queue.offer(asleep, fiber)), real.sleep(duration))
+        : real.sleep(duration)
+  })
+}
+
+test("two sources, in the terminal's stack: an approval's result and a wake-up's fire both wait at the start; the approval's turn comes first, then the wake's", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(dir, "home-")), "chat.db")
+  // A launch with no source: a program's send waits for a yes, the yes
+  // comes and its run ends done, not told; a reminder's fire waits.
+  const holder: { store: Store["Service"] | null } = { store: null }
+  const wire = fakeWire((asked, n) =>
+    n === 1
+      ? reply(asked, { text: "", output: [{ type: "custom_tool_call", call_id: "t1", name: "run", input: "send('hi')" }], calls: [{ id: "t1", name: "run", input: "send('hi')" }] })
+      : reply(asked, { text: "Sent." })
+  )
+  await withChat(file, wire, (_program) =>
+    Effect.gen(function*() {
+      const store = holder.store!
+      const turn = (yield* store.runningTurns(null))[0]!
+      const program = (yield* store.calls(turn.id)).find((one) => one.parent === null)!
+      const call = yield* store.startCall({ turn: turn.id, parent: program.id, fn: "send", input: JSON.stringify(["hi"]) })
+      const n = yield* store.pendCall(call, () => "{}")
+      yield* store.answerApproval(n, { yes: true, who: "the person" })
+      yield* store.startApproval(n)
+      yield* store.endApproval(n, { status: "done", output: "sent" })
+      return { output: "ran", failed: false }
+    }).pipe(Effect.orDie), Effect.gen(function*() {
+      const store = yield* Store
+      holder.store = store
+      const reminder = due()
+      yield* store.makeWake(reminder, 20)
+      yield* store.pendWake(1, { pending: reminder.at!, missed: 0, due: null })
+      yield* (yield* Turns).say("send hi")
+      yield* (yield* Turns).idle
+    }))
+  const before = rows<{ kind: string }>(file, "select kind from everchat_msg_read order by i").length
+  const vendor = fake()
+  const { exit } = await launch(vendor.address, [], Effect.gen(function*() {
+    yield* (yield* Turns).idle
+  }), undefined, { wakeups: ALL, file })
+  expect(exit._tag).toBe("Success")
+  const log = rows<{ kind: string; turn: number | null }>(file, `select kind, turn from everchat_msg_read where i >= ${before} and kind in ('late', 'wake', 'asst') order by i`)
+  expect(log).toEqual([
+    { kind: "late", turn: null },
+    { kind: "asst", turn: 2 },
+    { kind: "wake", turn: null },
+    { kind: "asst", turn: 3 }
+  ])
+}, 20_000)
+
+test("the end, in the terminal's stack: the launch ends while the firer sleeps; the firer's fiber was cut before the store closed, and nothing was written after the launch's end", async () => {
+  const asleep = Effect.runSync(Queue.unbounded<Fiber.Fiber<unknown, unknown>>())
+  const vendor = fake()
+  const { exit, file } = await launch(vendor.address, [], Effect.gen(function*() {
+    // The firer's first round, then its sleep.
+    return yield* Queue.take(asleep)
+  }), undefined, { wakeups: ALL, clock: watchedClock(asleep) })
+  expect(exit._tag).toBe("Success")
+  const firer = exit._tag === "Success" ? exit.value : undefined
+  // The run gave back after the layer's scope closed: the fiber had ended,
+  // cut.
+  const ended = firer?.pollUnsafe()
+  expect(ended !== undefined && ended._tag === "Failure").toBe(true)
+  expect(ended !== undefined && ended._tag === "Failure" ? ended.cause.reasons.every((one) => one._tag === "Interrupt") : false).toBe(true)
+  const launches = rows<{ ended: number | null; why: string | null }>(file, "select ended, why from everchat_launch")
+  expect(launches.map((one) => one.ended !== null)).toEqual([true])
+  const last = launches[0]!.ended!
+  expect(rows(file, `select count(*) as n from everchat_log where created > ${last}`)).toEqual([{ n: 0 }])
+}, 20_000)
+
 // The whole program, in pipe mode
 // -------------------------------
 
@@ -359,8 +527,13 @@ const run = async (at: ReturnType<typeof place>, address: string, input: string)
 }
 
 // The head of compactor.test.ts's hash case: the bytes of the head of a
-// chat with no server.
+// chat with no server, as it was before the wake-ups, and as it is with the
+// config's `wakeups: { on: false }`.
 const TODAY = "eebd350dbe3dc76071fca1dc6db7997d1f496f58302b131a5a77ee46e317da79"
+// The bytes of the head of a chat with no server and the wake-ups on (the
+// default): the built-ins, then wake, wakes and unwake. It changed on
+// purpose with the wake-ups' launch (docs/wakeups.md, section 9).
+const WAKING = "faa7199c4586331828dfd093d0cade1ce5628562372c290bd6467889e04f01b0"
 
 // Writes, at the process's exit, the modules that it loaded.
 const MODULES = path.join(dir, "modules.ts")
@@ -383,15 +556,25 @@ const loadedBy = async (at: ReturnType<typeof place>, address: string) => {
 }
 const client = (modules: ReadonlyArray<string>) => modules.filter((one) => one.includes("/packages/mcp/") || one.includes("@modelcontextprotocol"))
 
-test("with no server, the head is today's (the hash), and no module of the client is loaded; with one, the client is loaded", async () => {
+test("with no server, the head is the built-ins and the wake-ups' three (the hash; with the config's wakeups on false, today's), and no module of the client is loaded; with one, the client is loaded", async () => {
   const none = place()
   const modules = await loadedBy(none, fake().address)
   expect(modules).toContain(MAIN)
   expect(client(modules)).toEqual([])
   expect(modules.filter((one) => one.endsWith("/connectors.ts"))).toEqual([])
+  // The wake-ups are on by default: the head changed on purpose, from
+  // TODAY to WAKING.
   const heads = turnHeads(none.file)
-  expect(heads.map((body) => createHash("sha256").update(body).digest("hex"))).toEqual([TODAY])
-  expect(heads.map((body) => JSON.parse(body))).toEqual([head(DECLARATIONS)])
+  expect(heads.map((body) => createHash("sha256").update(body).digest("hex"))).toEqual([WAKING])
+  expect(heads.map((body) => JSON.parse(body))).toEqual([head([...DECLARATIONS, ...WAKE_DECLARATIONS])])
+  // Off in the config file: the head of before the wake-ups, byte for byte.
+  const off = place()
+  fs.mkdirSync(off.home, { recursive: true })
+  fs.writeFileSync(path.join(off.home, "config.json"), JSON.stringify({ wakeups: { on: false } }))
+  await loadedBy(off, fake().address)
+  const offHeads = turnHeads(off.file)
+  expect(offHeads.map((body) => createHash("sha256").update(body).digest("hex"))).toEqual([TODAY])
+  expect(offHeads.map((body) => JSON.parse(body))).toEqual([head(DECLARATIONS)])
 
   // The probe sees the client when a server is named.
   const one = place()
@@ -537,7 +720,7 @@ test("pipe mode with a relay of the example that drops tools/list and hears neit
   }
 }, 40_000)
 
-test("pipe mode with a server named as a built-in function (shell): the load refuses each of its functions with its sentence, the launch goes on with the built-in functions, and the head of its turn is that of a chat with no server; no child is left", async () => {
+test("pipe mode with a server named as a built-in function (shell): the load refuses each of its functions with its sentence, the launch goes on with the chat's own functions, and the head of its turn is that of a chat with no server; no child is left", async () => {
   const at = place()
   fs.mkdirSync(at.home, { recursive: true })
   fs.writeFileSync(path.join(at.home, "config.json"), configOf([stdio("shell", EXAMPLE)]))
@@ -548,10 +731,32 @@ test("pipe mode with a server named as a built-in function (shell): the load ref
       { level: "warn", text: 'A function from outside is refused: server "shell", tool "add": Its namespace "shell" is the name of another function.' },
       { level: "warn", text: 'A function from outside is refused: server "shell", tool "send": Its namespace "shell" is the name of another function.' }
     ])
-    // The head of a chat with no server, as the core makes it.
+    // The head of a chat with no server, as the core makes it: the
+    // built-ins, then the wake-ups' three, which are on by default (it
+    // changed on purpose with the wake-ups' launch).
     const heads = turnHeads(at.file)
-    expect(heads.map((body) => JSON.parse(body))).toEqual([head(DECLARATIONS)])
-    expect(heads.map((body) => named(JSON.parse(body) as Head))).toEqual([BUILT_INS])
+    expect(heads.map((body) => JSON.parse(body))).toEqual([head([...DECLARATIONS, ...WAKE_DECLARATIONS])])
+    expect(heads.map((body) => named(JSON.parse(body) as Head))).toEqual([[...BUILT_INS, ...WAKE_NAMES]])
+    expect(marked()).toEqual([])
+  } finally {
+    await stopMarked()
+  }
+}, 20_000)
+
+test("pipe mode with a server named as a wake-ups' function (wake) beside the example: the load refuses each of its functions with the client's sentence, the example loads, the launch does not die, and the head is the built-ins, the three, then the example's; no child is left", async () => {
+  const at = place()
+  fs.mkdirSync(at.home, { recursive: true })
+  fs.writeFileSync(path.join(at.home, "config.json"), configOf([stdio("wake", EXAMPLE), stdio("example", EXAMPLE)]))
+  try {
+    const ran = await run(at, fake("return await example.add({ a: 2, b: 3 })").address, "add two and three\n")
+    expect({ err: ran.err, code: ran.code }).toEqual({ err: "", code: 0 })
+    expect(rows(at.file, "select level, text from everchat_log where source = 'mcp' order by n")).toEqual([
+      { level: "warn", text: 'A function from outside is refused: server "wake", tool "add": Its namespace "wake" is the name of another function.' },
+      { level: "warn", text: 'A function from outside is refused: server "wake", tool "send": Its namespace "wake" is the name of another function.' }
+    ])
+    expect(rows(at.file, "select fn, output, status from everchat_call where parent is not null")).toEqual([{ fn: "example.add", output: '{"sum":5}', status: "done" }])
+    const heads = turnHeads(at.file)
+    expect(heads.map((body) => named(JSON.parse(body) as Head))).toEqual([[...BUILT_INS, ...WAKE_NAMES, "example.add", "example.send"]])
     expect(marked()).toEqual([])
   } finally {
     await stopMarked()

@@ -4,11 +4,12 @@
 
 import { expect, test } from "bun:test"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Effect, Exit, FileSystem, Stream } from "effect"
+import { zone, ZONE_MAX } from "@everchat/wakeups/time"
+import { DateTime, Effect, Exit, FileSystem, Result, Stream } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { ConfigFault, FILE, NONE, picks, read, RULES_IO, RULES_MAX, rulesOf, type RulesIo, type Settings, type StdioServer } from "./config.ts"
+import { ConfigFault, FILE, NONE, picks, read, RULES_IO, RULES_MAX, rulesOf, type RulesIo, type Settings, type StdioServer, WAKEUPS } from "./config.ts"
 import { KEY_VARIABLE } from "./gateway.ts"
 
 const home = () => fs.mkdtempSync(path.join(os.tmpdir(), "everchat-config-"))
@@ -48,7 +49,7 @@ const stdio = (name: string, rest: Partial<StdioServer> = {}): StdioServer => ({
 test("no file and the file {} give no setting", async () => {
   expect(await settings(home())).toEqual(NONE)
   expect(await settings(write({}))).toEqual(NONE)
-  expect(Object.entries(NONE)).toEqual([["model", undefined], ["effort", undefined], ["compactor", undefined], ["limit", undefined], ["servers", []], ["name", undefined], ["rules", undefined]])
+  expect(Object.entries(NONE)).toEqual([["model", undefined], ["effort", undefined], ["compactor", undefined], ["limit", undefined], ["servers", []], ["name", undefined], ["rules", undefined], ["wakeups", { on: true, zone: null }]])
 })
 
 test("each field: the picks, the limit, and a server of each form with its approvals", async () => {
@@ -339,6 +340,172 @@ test("a fault: a name that the prompt refuses, an empty or a long rules path, an
   expect(await faults(write({ rules: "" }))).toEqual(["rules: Expected a path of 1 to 4096 characters"])
   expect(await faults(write({ rules: "r".repeat(4_097) }))).toEqual(["rules: Expected a path of 1 to 4096 characters"])
   expect(await faults(write({ name: 5, rules: ["a"] }))).toEqual(["name: Expected string", "rules: Expected string"])
+})
+
+// The wake-ups' section
+// ---------------------
+
+// The zone that the wake-ups' own check gives for a name it takes.
+const named = (name: string): DateTime.TimeZone.Named => Result.getOrThrow(zone(name))
+
+// The message of the wake-ups' check for a name it refuses.
+const refusal = (name: string): string => {
+  const checked = zone(name)
+  if (Result.isSuccess(checked)) throw new Error("the check took the zone")
+  return checked.failure.message
+}
+
+// The fault's lines of the home's file, after an assertion that the file
+// was refused (a file taken fails here by an assertion, with its section).
+const refused = async (at: string): Promise<ReadonlyArray<string>> => {
+  const exit = await settle(at)
+  const file = fs.readFileSync(path.join(at, FILE), "utf8")
+  expect({ file, refused: Exit.isFailure(exit) }).toEqual({ file, refused: true })
+  return faults(at)
+}
+
+test("wakeups: no file, a file with no section and an empty section are on, with no zone", async () => {
+  expect(WAKEUPS).toEqual({ on: true, zone: null })
+  expect((await settings(home())).wakeups).toEqual({ on: true, zone: null })
+  expect((await settings(write({ model: "gpt-file" }))).wakeups).toEqual({ on: true, zone: null })
+  expect((await settings(write({ wakeups: {} }))).wakeups).toEqual({ on: true, zone: null })
+})
+
+test("wakeups: on false, on true, a zone alone and both, the zone as the wake-ups' check gives it", async () => {
+  expect((await settings(write({ wakeups: { on: false } }))).wakeups).toEqual({ on: false, zone: null })
+  expect((await settings(write({ wakeups: { on: true } }))).wakeups).toEqual({ on: true, zone: null })
+  const alone = (await settings(write({ wakeups: { zone: "Europe/Berlin" } }))).wakeups
+  expect(alone).toEqual({ on: true, zone: named("Europe/Berlin") })
+  expect(DateTime.isTimeZoneNamed(alone.zone!)).toBe(true)
+  expect(DateTime.zoneToString(alone.zone!)).toBe("Europe/Berlin")
+  // The zone as the engine names it, not the text as written.
+  const both = (await settings(write({ wakeups: { on: false, zone: "america/new_york" } }))).wakeups
+  expect(both).toEqual({ on: false, zone: named("America/New_York") })
+  expect(DateTime.zoneToString(both.zone!)).toBe("America/New_York")
+  // The section beside the other fields changes none of them.
+  const got = await settings(write({ model: "gpt-file", wakeups: { zone: "UTC" } }))
+  expect({ ...got, wakeups: undefined }).toEqual({ ...NONE, model: "gpt-file", wakeups: undefined })
+  expect(got.wakeups).toEqual({ on: true, zone: named("UTC") })
+})
+
+test("wakeups: each fault, with its exact text and the field's path; a bad zone with on false is still a fault", async () => {
+  for (const value of [5, "on", true, null, ["on"]]) expect(await refused(write({ wakeups: value }))).toEqual(["wakeups: Expected object"])
+  expect(await refused(write({ wakeups: { on: "false" } }))).toEqual(["wakeups.on: Expected boolean"])
+  expect(await refused(write({ wakeups: { on: 0 } }))).toEqual(["wakeups.on: Expected boolean"])
+  expect(await refused(write({ wakeups: { zone: 1 } }))).toEqual(["wakeups.zone: Expected string"])
+  expect(await refused(write({ wakeups: { zone: null } }))).toEqual(["wakeups.zone: Expected string"])
+  const NOWHERE = "wakeups.zone: \"Europe/Nowhere\" is not a time zone: give an IANA name, such as Europe/Berlin."
+  expect(await refused(write({ wakeups: { zone: "Europe/Nowhere" } }))).toEqual([NOWHERE])
+  expect(await refused(write({ wakeups: { on: false, zone: "Europe/Nowhere" } }))).toEqual([NOWHERE])
+  expect(await refused(write({ wakeups: { on: true, zone: "Europe/Nowhere" } }))).toEqual([NOWHERE])
+  expect(await refused(write({ wakeups: { zone: "" } }))).toEqual(["wakeups.zone: \"\" is not a time zone: give an IANA name, such as Europe/Berlin."])
+  expect(await refused(write({ wakeups: { zone: "+01:00" } }))).toEqual(["wakeups.zone: \"+01:00\" is not a time zone: give an IANA name, such as Europe/Berlin."])
+  // Over the bound: the length and the bound, no part of the text; at the
+  // bound the text is read, and shown.
+  const over = "Europe/" + "x".repeat(ZONE_MAX - 6)
+  expect(over.length).toBe(ZONE_MAX + 1)
+  expect(await refused(write({ wakeups: { zone: over } }))).toEqual(["wakeups.zone: A time zone's name of 101 characters is over the bound of 100: give an IANA name, such as Europe/Berlin."])
+  expect(await refused(write({ wakeups: { on: false, zone: over } }))).toEqual(["wakeups.zone: A time zone's name of 101 characters is over the bound of 100: give an IANA name, such as Europe/Berlin."])
+  const at = over.slice(0, ZONE_MAX)
+  expect(await refused(write({ wakeups: { zone: at } }))).toEqual([`wakeups.zone: "${at}" is not a time zone: give an IANA name, such as Europe/Berlin.`])
+  expect(await refused(write({ wakeups: { zone: "UTC", every: "day" } }))).toEqual(["wakeups.every: Unknown field"])
+  expect(await refused(write({ wakeups: { on: true, On: false } }))).toEqual(["wakeups.On: Unknown field"])
+  // The faults of the form come together, the section's beside the others'.
+  expect(await refused(write({ limit: 1, wakeups: { on: "no", zone: "Mars/Olympus", x: 1 } }))).toEqual([
+    "limit: Expected a whole number from 2000 to 1000000",
+    "wakeups.x: Unknown field",
+    "wakeups.on: Expected boolean",
+    "wakeups.zone: \"Mars/Olympus\" is not a time zone: give an IANA name, such as Europe/Berlin."
+  ])
+})
+
+test("wakeups: a fault with a zone that holds a line end or a hidden code point is on one line, with the escapes of the wake-ups' check", async () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["Europe/Berlin\n", "\"Europe/Berlin\\x0a\""],
+    ["Europe/\r\nBerlin", "\"Europe/\\x0d\\x0aBerlin\""],
+    ["Europe/Ber\u202elin", "\"Europe/Ber\\u{202e}lin\""],
+    ["UTC\u001b[2J", "\"UTC\\x1b[2J\""],
+    ["Europe/Berlin\u2028", "\"Europe/Berlin\\u{2028}\""],
+    ["Asia/\u200bTokyo", "\"Asia/\\u{200b}Tokyo\""]
+  ]
+  for (const [name, shown] of cases) {
+    const at = write({ wakeups: { zone: name } })
+    const lines = await refused(at)
+    expect(lines).toEqual(["wakeups.zone: " + refusal(name)])
+    expect(lines).toEqual([`wakeups.zone: ${shown} is not a time zone: give an IANA name, such as Europe/Berlin.`])
+    const exit = await settle(at)
+    const message = Exit.isFailure(exit) ? (exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error as ConfigFault).message : ""
+    expect(message).toBe(path.join(at, FILE) + ": " + lines[0])
+    expect(message.split(/\r\n|[\n\r\u2028\u2029\u0085]/)).toHaveLength(1)
+    expect(message).not.toContain(name)
+  }
+})
+
+// Seeded texts: the config file takes a text as its zone exactly when the
+// wake-ups' check takes it, as the zone that the check gives, and refuses it
+// with the check's own text otherwise.
+const ZONE_SEED = 0x5eed2a7c
+
+test("wakeups: one check: for seeded texts the file takes the zone exactly when the wake-ups' zone takes it", async () => {
+  let state = ZONE_SEED
+  // xorshift32: a number in 0 .. n - 1.
+  const rand = (n: number): number => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    return (state >>> 0) % n
+  }
+  const pick = <A,>(list: ReadonlyArray<A>): A => list[rand(list.length)]!
+  const names = Intl.supportedValuesOf("timeZone")
+  const LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ/_-+0"
+  const ENDS = ["\n", "\r", "\r\n", "\u2028", "\u0085", "\t", "\u0000"]
+  const kinds: ReadonlyArray<() => string> = [
+    // An IANA name, as the engine has it, or in other cases.
+    () => pick(names),
+    () => pick(names).toLowerCase(),
+    () => pick(names).toUpperCase(),
+    // A name with one letter changed.
+    () => {
+      const name = pick(names)
+      const i = rand(name.length)
+      return name.slice(0, i) + pick([...LETTERS]) + name.slice(i + 1)
+    },
+    // Long texts, beside the bound.
+    () => {
+      const length = ZONE_MAX - 2 + rand(5)
+      const base = pick(names) + "/"
+      return (base + "a".repeat(length)).slice(0, length)
+    },
+    () => "Etc/" + "x".repeat(rand(ZONE_MAX * 2)),
+    // A line end or a control code before, inside or after a name.
+    () => {
+      const name = pick(names)
+      const i = rand(name.length + 1)
+      return name.slice(0, i) + pick(ENDS) + name.slice(i)
+    },
+    // Offsets, the Etc zones, the empty text and spaces.
+    () => pick(["", " ", "UTC", "utc", " UTC", "Etc/GMT+5", "Etc/GMT+15", "GMT", "Z", "+01:00", "-0500", "local", "Europe/", "/Europe/Berlin", "Europe//Berlin"])
+  ]
+  let taken = 0
+  let refused = 0
+  for (let i = 0; i < 120; i++) {
+    const name = pick(kinds)()
+    const input = { seed: `0x${ZONE_SEED.toString(16)}`, i, zone: name }
+    const checked = zone(name)
+    const at = write({ wakeups: { zone: name } })
+    const exit = await settle(at)
+    if (Result.isSuccess(checked)) {
+      taken += 1
+      expect({ input, taken: Exit.isSuccess(exit) }).toEqual({ input, taken: true })
+      if (Exit.isSuccess(exit)) expect({ input, zone: exit.value.wakeups.zone }).toEqual({ input, zone: checked.success })
+    } else {
+      refused += 1
+      const lines = Exit.isFailure(exit) ? (exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error as ConfigFault).faults : ["taken"]
+      expect({ input, lines }).toEqual({ input, lines: ["wakeups.zone: " + checked.failure.message] })
+    }
+  }
+  // Both sides of the check are reached.
+  expect({ seed: `0x${ZONE_SEED.toString(16)}`, taken: taken >= 20, refused: refused >= 20 }).toEqual({ seed: `0x${ZONE_SEED.toString(16)}`, taken: true, refused: true })
 })
 
 // rulesOf: a work directory and a home, each in a root of its own case.
