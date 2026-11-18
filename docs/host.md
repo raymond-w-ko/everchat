@@ -7,21 +7,23 @@ code batch is planned from this page, bead by bead, so each interface is given e
 
 Where this page and `docs/design.md` differ, `docs/design.md` wins. The facts of the tree
 come from the investigation ec-f7m3i; this page cites its answers as "ec-f7m3i Q1" to
-"ec-f7m3i Q10", and other facts by `path:line` at 108e6fa (lead, ec-0r89g; lead,
-ec-olqwa; lead, ec-dkhr1), or by a file and a name in it. A decision cites its question
-of the settled list (`[Q19]`), or "lead, <a bead's id>": a ruling of the lead in that
-bead. Some of those beads name their rulings: "lead, ec-mxcl": the lead's eleven
-decisions, in the bead ec-1h538; "lead, ec-vgn58": the lead's form of the fixes of the
-page's two reviews, by its rule's name (A1 to E); "lead, ec-7bi64": the lead's form of
-the fixes of its two re-reviews, by its rule's name (F1 to K); "lead, ec-12a32": the
-lead's form of the fixes of its two second re-reviews, by its rule's name (L1 to P5);
-"lead, ec-349x0": the lead's rules after its third re-review, by their names (Q1 to S3);
-"lead, ec-9p347": the lead's rulings on the points that the page's reviews left open, by
-their names (T1 to T11); "lead, ec-uoo8x": the lead's fixes of the reviews of those
-rulings, by their names (T5a, T6a); "lead, ec-x0hhp": the lead's rulings on the bound of
-the answers that hold messages, by their names (U1 to U4, U1a); "lead, ec-hp7pq": the
-lead's ruling on the life of an R5 with a `wait` above 0, by its name (V1); "lead,
-ec-jbry3": the lead's rulings of the page's second catch-up, by their names (X1 to X6).
+"ec-f7m3i Q10", and other facts by `path:line` at 6af6b1d (lead, ec-0r89g; lead,
+ec-olqwa; lead, ec-dkhr1; lead, ec-v3kqa; lead, ec-8nib0), or by a file and a name in it;
+a citation of code of a later commit is by a file and a name (lead, ec-8nib0). A decision
+cites its question of the settled list (`[Q19]`), or "lead, <a bead's id>": a ruling of
+the lead in that bead. Some of those beads name their rulings: "lead, ec-mxcl": the
+lead's eleven decisions, in the bead ec-1h538; "lead, ec-vgn58": the lead's form of the
+fixes of the page's two reviews, by its rule's name (A1 to E); "lead, ec-7bi64": the
+lead's form of the fixes of its two re-reviews, by its rule's name (F1 to K); "lead,
+ec-12a32": the lead's form of the fixes of its two second re-reviews, by its rule's name
+(L1 to P5); "lead, ec-349x0": the lead's rules after its third re-review, by their names
+(Q1 to S3); "lead, ec-9p347": the lead's rulings on the points that the page's reviews
+left open, by their names (T1 to T11); "lead, ec-uoo8x": the lead's fixes of the reviews
+of those rulings, by their names (T5a, T6a); "lead, ec-x0hhp": the lead's rulings on the
+bound of the answers that hold messages, by their names (U1 to U4, U1a); "lead,
+ec-hp7pq": the lead's ruling on the life of an R5 with a `wait` above 0, by its name
+(V1); "lead, ec-jbry3": the lead's rulings of the page's second catch-up, by their names
+(X1 to X6).
 The words are those of `GLOSSARY.md`; the new words are listed at the end.
 
 ## Contents
@@ -429,7 +431,9 @@ ec-349x0, Q1; section 3, "Admission", 5).
   begin a second turn; and a fork does not wait. The host's work calls `Turns.say(text,
   key, told)` with no uninterruptible wrap (`packages/server/src/host.ts:259-268`, `work`): the
   deadline cuts `say`'s waits for the turn loop's lock, for `order` and for the memory's
-  lock; `told` runs in the uncut step after the launch.
+  lock, and its wait for a stopped turn's end, which does not occur in a host's chat
+  (section 9, item 11; a cut wait writes nothing there too); `told` runs in the uncut
+  step after the launch.
 - **The store bounds the part that cannot be interrupted** (O3). Each call of the store
   ends, done or with a typed fault, within the limit `store` (5 s), by the store's own
   timer on the call (section 9, item 9); a transaction counts as one call. On SQLite the
@@ -458,8 +462,10 @@ ec-349x0, Q1; section 3, "Admission", 5).
   row (`packages/sqlite/src/sqlite.ts:857-862`, registered at `:882`); and the read of
   Unload step 2, one call for each 100 events that the load wrote (the restart's: a
   `start`, and the pages of a cut program's `tool` and `echo`,
-  `packages/core/src/turn.ts:685-706`), so one call when it wrote at most 100 events
-  that fit one page; large events need more ("Accepted risks", 1).
+  `packages/core/src/turn.ts:925-943`; the restart closes a cut program through `ended`,
+  which also writes a `note` for each approval of the call that still waits, and a host's
+  chat has none: section 7, "No approval."; lead, ec-8nib0), so one call when it wrote at
+  most 100 events that fit one page; large events need more ("Accepted risks", 1).
 - **A turn that started is never stopped because a request ended**: it runs in the
   loaded chat's scope, not in the request's (`Turns.say`,
   `packages/core/src/turn.ts:813-862`).
@@ -2209,11 +2215,11 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
    the chat has, writes nothing and gives the first message. `say` gives
    `Sent { messages, accepted, repeat }`: the pages, the `accepted` number, and whether
    the key was a repeat (`packages/core/src/turn.ts`).
-3. **"Busy now" and the time of the last work** (ec-f7m3i Q8, gap 1). Done (ec-9txv3):
-   the turn loop gives both, with no wait: busy while a turn or a call runs
-   (`Turns.busy`); the memory gives busy while a compaction runs (`Memory.busy`); and the
-   time when each last had work (`Turns.worked`, `Memory.worked`). The host's timer reads
-   them under the channel's lock (section 2).
+3. **"Busy now" and the time of the last work** (ec-f7m3i Q8, gap 1). Done (ec-9txv3): the
+   turn loop gives both, with no wait: busy while a turn or a call runs, or a stopped
+   turn's end is not yet written (`Turns.busy`; item 11); the memory gives busy while a
+   compaction runs (`Memory.busy`); and the time when each last had work (`Turns.worked`,
+   `Memory.worked`). The host's timer reads them under the channel's lock (section 2).
 4. **`result` in the core, over the store.** Done (ec-o9i2n): the core gives `RESULT`,
    whose function reads the call's output from the store (`store.call`) with no file, the
    whole or its characters from `from` to before `to` (`result(id, from, to)`; `part`,
@@ -2285,6 +2291,25 @@ The list that the code beads take, from ec-f7m3i Q3, Q4 and Q8:
     in the host calls `ready` or `note`. So for a client of the host each turn of a host's
     chat starts from a message in (its `accepted`, then its `start`) or from the restart
     (a `start` alone; section 2, Load, step 2), as sections 3 and 4 say.
+11. **A message after a stop** (ec-124zo; lead, ec-8nib0). The turn loop has it
+    (`packages/core/src/turn.ts`, the comments of `say`, `idle` and `busy` in `Turns`, and
+    `writeLost`): while a stopped turn's end is not yet written (the stop's finalizer,
+    after the turn's fiber is cut), `Turns.say` waits for that end under the loop's lock,
+    then logs its message and starts its turn, so its pages, their `accepted` and the
+    turn's `start` come after the stopped turn's note and `end`, and two turns never run.
+    A key that the chat has answers with no wait, and a `say` cut while it waits writes
+    nothing. With no turn running, `say` first writes a stopped turn's end that the stop
+    could not write (a lost end, as `Turns.ready` does: one read of the running turn and
+    its end, only when a lost end is kept); if that fails, `say` fails with its
+    `StoreError` and writes nothing. `Turns.idle` waits for that end too, and until it is
+    written `Turns.busy` is true and `Turns.worked` is now. Not used by the host: nothing
+    in the host calls `Turns.stop` or `Turns.idle`, so the one stop of a turn in a host's
+    chat is the close of its stack (section 2, "A load that is stopped"), which leaves the
+    turn running for the next launch, writes no end, keeps no lost end, and after which no
+    `say` comes to that stack. So in a host's chat the wait does not occur, and `say`
+    makes no call of the store for a lost end. A later route that stops a turn would get
+    it: its client sees the stopped turn's note and `end`, then the message's `accepted`
+    and its turn's `start`.
 
 ## 10. Open
 

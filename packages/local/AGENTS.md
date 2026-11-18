@@ -319,6 +319,11 @@ How to test it:
 - Its file is `serve.db` in the home, next to `everchat.db`, with one
   local tenant. Its secret is new at each start and held in memory only, so
   a token of an earlier start opens nothing.
+- The page's list of chats is the browser's, kept in its `localStorage` for
+  the address's origin (`client.html`, `loadChats`): a start on a port that
+  this browser has not used (`--port 0` too, which takes a new one at each
+  start) shows an empty list; a port that it used before shows that origin's
+  list, and the chats stay in the home's database.
 - Run one `everchat serve` for a home: the command does not lock its file.
   A second one on another port gets `409 chat_elsewhere` for a chat that the
   first has loaded, and its clients get no live event of that chat.
