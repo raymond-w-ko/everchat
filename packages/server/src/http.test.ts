@@ -1027,6 +1027,49 @@ test("a stream answer's deadline counts from the request's head, not from the ha
   }))
 })
 
+// The lead's ruling on ec-zj6tv: a deadline's cut of a pulled stream has its
+// line of the log exactly one time, whoever ends first. Here the cut ends the
+// stream at once (it waits on its pull, interruptibly), so its end stops the
+// deadline's timer at once too.
+test("a pulled stream answer that the deadline's cut ends at once has the deadline's line of the log one time, there before its place goes back", async () => {
+  const gate = gateOf()
+  await run(Effect.gen(function*() {
+    let started = false
+    let ended = false
+    const never = Stream.unwrap(Effect.sync(() => {
+      started = true
+      return Stream.never
+    })).pipe(Stream.ensuring(Effect.sync(() => {
+      ended = true
+    })))
+    const response = yield* call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
+      Effect.succeed(HttpServerResponse.stream(never, { contentType: "text/plain" })))
+    // The stream runs with the case's logger, so that a line written at its
+    // end is seen too.
+    const reader = HttpServerResponse.toWeb(response, { context: yield* Effect.context<never>() }).body!.getReader()
+    const state = { read: "pending" as "pending" | "done" | "failed", linesAtEnd: -1 }
+    const from = lines.length
+    void reader.read().then((chunk) => {
+      state.read = chunk.done ? "done" : "pending"
+    }, () => {
+      state.read = "failed"
+    })
+    // The case waits, in real time, until the stream has started and is
+    // pulled.
+    expect(yield* until(() => started, 5_000)).toBe(true)
+    expect([gate.inFlight(), state.read]).toEqual([1, "pending"])
+    yield* TestClock.adjust(DEFAULTS.request)
+    expect(yield* until(() => {
+      if (gate.inFlight() === 0 && state.linesAtEnd === -1) state.linesAtEnd = deadlineLines(from).length
+      return gate.inFlight() === 0 && state.read !== "pending"
+    }, 5_000)).toBe(true)
+    expect([gate.inFlight(), state.read, ended]).toEqual([0, "failed", true])
+    expect(deadlineLines(from).map((line) => line.annotations)).toEqual([{ route: "R2", status: 200, fault: "deadline", closed: true }])
+    // The line was there when the place had gone back.
+    expect(state.linesAtEnd).toBe(1)
+  }))
+})
+
 test("a stream answer that nothing starts gives its place back at the deadline, and fails if it starts later: no work of it runs", async () => {
   const gate = gateOf()
   let ran = false

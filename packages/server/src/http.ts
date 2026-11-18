@@ -651,28 +651,41 @@ export const makeGate = (options: GateOptions): Gate => {
             // its fiber is interrupted, which ends it where it waits. The second
             // step alone would do; the first keeps Bun from printing an
             // interruption for each stream cut at the deadline.
+            // The deadline's line of the log is written by the timer alone, one
+            // time, in its first step, which no interruption cuts: before the
+            // cut, so that a stream that the cut ends at once (its `finished`
+            // then stops the timer) still has its line, and before the place
+            // goes back.
             let runner: Fiber.Fiber<unknown, unknown> | undefined
             let past = false
             let over = false
             const cut = Deferred.makeUnsafe<never, DeadlinePassed>()
             const streamTimer = yield* noted(Effect.forkDetach(Effect.andThen(
               Effect.sleep(left),
-              Effect.suspend(() => {
-                if (over) return Effect.void
-                past = true
-                const running = runner
-                if (running === undefined) {
-                  give()
-                  return note({ route: name, status: response.status, fault: "deadline" })
-                }
-                Deferred.doneUnsafe(cut, Exit.fail(new DeadlinePassed()))
-                return Effect.repeat(Effect.yieldNow, { times: 10 }).pipe(
-                  Effect.andThen(Effect.sync(() => {
-                    if (!over) running.interruptUnsafe()
-                  })),
-                  Effect.andThen(note({ route: name, status: response.status, fault: "deadline", closed: true }))
-                )
-              })
+              Effect.flatMap(
+                Effect.uninterruptible(Effect.suspend(() => {
+                  if (over) return Effect.succeed(undefined)
+                  past = true
+                  const running = runner
+                  if (running === undefined) {
+                    return Effect.as(Effect.andThen(note({ route: name, status: response.status, fault: "deadline" }), Effect.sync(give)), undefined)
+                  }
+                  return Effect.as(
+                    Effect.andThen(
+                      note({ route: name, status: response.status, fault: "deadline", closed: true }),
+                      Effect.sync(() => Deferred.doneUnsafe(cut, Exit.fail(new DeadlinePassed())))
+                    ),
+                    running
+                  )
+                })),
+                (running) =>
+                  running === undefined ? Effect.void : Effect.andThen(
+                    Effect.repeat(Effect.yieldNow, { times: 10 }),
+                    Effect.sync(() => {
+                      if (!over) running.interruptUnsafe()
+                    })
+                  )
+              )
             ), { startImmediately: true }))
             const finished = Effect.sync(() => {
               over = true

@@ -256,7 +256,7 @@ test("each route over a real server: R1 logs a message; R4 (frames), R5 (JSON) a
   }
 }, 15_000)
 
-test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and parameters aside, is R4 (a `q` that is no number, `q=0.001`, or one more part with no `q=0`, too); `application/json`, `*/*`, `text/event-streams`, none, and a part whose `q` is zero (`q=0` to `q=0.000`, `Q` too) are R5", async () => {
+test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and parameters aside, is R4 (a `q` that is no number, `q=0.001`, or one more part with no `q=0`, too); `application/json`, `*/*`, `text/event-streams`, none, and a part whose `q` is zero (`q=0` to `q=0.000`, `Q` too, a space after it too) are R5", async () => {
   const s = await served()
   try {
     const token = await s.token(TENANT_A, [s.a1])
@@ -279,7 +279,9 @@ test("R4 or R5 by `Accept`: `text/event-stream` in its list, letter case and par
       "text/event-stream;q=0.0",
       "text/event-stream; Q=0.000",
       "text/event-stream;q=0.00",
-      "text/event-stream ; charset=utf-8 ; q=0"
+      "text/event-stream ; charset=utf-8 ; q=0",
+      // A space after the `q` value, before the `,`: the value is `0`.
+      "text/event-stream;q=0 , application/json"
     ]
     for (const accept of [...r4, ...r5]) {
       const controller = new AbortController()

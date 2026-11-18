@@ -449,7 +449,7 @@ test("a socket that connected before the end and sends its auth after the host's
   }
 }, 15_000)
 
-test("after the mark, serve's 503 busy has the origin's headers as the gate's 503 busy has them: for a GET of a route, an OPTIONS and a path that is no route, a listed Origin gets access-control-allow-origin with it and vary: origin; an Origin off the list and none get no access-control header; none gets access-control-allow-credentials; each answer is the gate's for the same request before the mark, header for header; no line of the gate's log after the mark", async () => {
+test("after the mark, serve's 503 busy has the origin's headers as the gate's 503 busy has them: for a GET of a route, an OPTIONS and a path that is no route, a listed Origin gets access-control-allow-origin with it and vary: origin; an Origin off the list (the listed one in another letter case, with a port or with a slash at its end too) and none get no access-control header; none gets access-control-allow-credentials; each answer is the gate's for the same request before the mark, header for header; no line of the gate's log after the mark", async () => {
   const s = await served({ request: 4_000, requests: 1 })
   const gate = Effect.runSync(Deferred.make<void>())
   try {
@@ -468,8 +468,10 @@ test("after the mark, serve's 503 busy has the origin's headers as the gate's 50
     )
     expect(await within(() => s.opens > opens, 2_000)).toBe(true)
     // Each request, with each kind of `Origin`: its status, its headers but
-    // `date`, and its body.
-    const origins = [ORIGIN, "https://other.example", undefined]
+    // `date`, and its body. The listed origin in another letter case, with
+    // its port and with a slash at its end is off the list: the match is byte
+    // for byte.
+    const origins = [ORIGIN, "https://other.example", "https://APP.example", "https://app.example:443", "https://app.example/", undefined]
     const requests = origins.flatMap((origin) => {
       const from: Record<string, string> = origin === undefined ? {} : { origin }
       return [
