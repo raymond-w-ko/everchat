@@ -127,6 +127,12 @@ The rest:
 - Full check: `just full`, about 500 s (the whole run at the landing of
   `48bcf8b`: 2,037 tests in 432.37 s, then 60 tests in 62.23 s, with the
   fleet at work; at a load over 40 the unit tier took 837 s at `2b6fb45`).
+- Full check of one file: `just alone`, with the file's path from the root
+  as its one argument (`just alone packages/server/src/reads.test.ts`). It
+  runs the tests of that file as `just full` runs them, with no check of
+  the types: a file of `packages/mariadb` on the two MariaDB servers, and
+  a file of `just test-build` from the source and then on the executable.
+  A file that failed in the full check runs alone by it.
 - MariaDB check: `just test-mariadb`, every test of `packages/mariadb` (the
   helper `packages/mariadb/tests/server.ts`, the driver's client, and the
   schema's files of `schema/mariadb/`, made on each server) on two
