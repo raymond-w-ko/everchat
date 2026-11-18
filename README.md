@@ -48,9 +48,10 @@ wait for your yes or no: those of a tool that the config file sets to `ask`.
 reference client's page and the chats of one local tenant, in `serve.db` in
 the home, on 127.0.0.1 port 4681 (`--port <n>`). It prints the page's
 address. Run one for a home. The page's list of chats is the browser's, for
-the address's origin: a start on another port (`--port 0` too, which takes a
-new one at each start) shows an empty list, and the chats stay in the home's
-database.
+the address's origin: a start on a port that this browser has not used
+(`--port 0` too, which takes a new one at each start) shows an empty list; a
+port that it used before shows that origin's list, and the chats stay in the
+home's database.
 
 License
 -------
