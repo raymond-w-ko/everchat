@@ -16,9 +16,9 @@ import { type Pace, QUIET } from "@everchat/core/pace"
 import type { Event, Reply, Request, WireError } from "@everchat/core/request"
 import { Shell } from "../src/shell.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { type Answered, type Approval, type ApprovalAnswer, Store, type StoreError } from "@everchat/core/store"
+import { ANSWER_MAX, type Answered, type Approval, type ApprovalAnswer, Store, type StoreError } from "@everchat/core/store"
 import { Approvals } from "@everchat/core/approval"
-import { COMMANDS, expires, HELP, SHOWN, Terminal, usage, WHO } from "../src/terminal.ts"
+import { BRIEF, COMMANDS, expires, HELP, SHOWN, Terminal, usage, WHO } from "../src/terminal.ts"
 import { visible, waits as waitsNote } from "@everchat/core/functions"
 import { threadLayer } from "@everchat/codemode/thread"
 import { type TurnEvent, Turns } from "@everchat/core/turn"
@@ -759,7 +759,7 @@ test("/approvals with none, then with two: each with its number, its function, i
     const text = yield* sees(screen, "Calls that wait for approval")
     expect(text).toContain("  Calls that wait for approval (/approve n, /deny n):\n" +
       "    1  acme.send  [{\"to\":\"ann\"}]  expires " + expires(approval(1)) + "\n" +
-      "    2  acme.post  " + long.slice(0, 100) + "… (" + long.length + " characters: /approvals <n>)  expires " + expires(approval(2)))
+      "    2  acme.post  " + long.slice(0, 100) + "… (" + long.length + " characters: /approvals 2)  expires " + expires(approval(2)))
     // Seven days after it was made.
     expect(expires(approval(1))).toBe(new Date(MADE + 7 * 24 * 3600 * 1000).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" }))
   }), approvals)
@@ -930,6 +930,52 @@ test("an approval's text with characters that draw as nothing or change the orde
     expect(text).toContain("(" + input.length + " characters):\n  [\"Lunch at noon?" + shown + "\"]")
     expect(text).toContain("Approval 1 was answered already: yes, by " + WHO + shown + " (\"fine" + shown + "\").")
   }), approvals)
+})
+
+test("a long approval's row in /approvals: cut first at BRIEF, never inside a pair, then each hidden code point before the cut is its escape; no hidden code point and no half of a pair reaches the screen", async () => {
+  const file = newFile()
+  const screen = new Screen(400, 40)
+  // Two hidden code points near the start, each 8 characters as an escape;
+  // a pair (😀) at 85-86 of the arguments, which their escapes move to
+  // 99-100 (an escape before the cut would split it); and a pair at 99-100
+  // of the arguments, across BRIEF, which the cut leaves out whole.
+  const input = "[\"" + "\u202e\u200b" + "a".repeat(81) + "😀" + "b".repeat(12) + "😀" + "c".repeat(50) + "\"]"
+  expect(input.indexOf("😀")).toBe(85)
+  expect(input.lastIndexOf("😀")).toBe(BRIEF - 1)
+  expect(visible(input).indexOf("😀")).toBe(BRIEF - 1)
+  const row = visible(input.slice(0, BRIEF - 1))
+  expect(row).toBe("[\"\\u{202e}\\u{200b}" + "a".repeat(81) + "😀" + "b".repeat(12))
+  const approvals = fakeApprovals([approval(3, { input })])
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approvals")
+    const text = yield* sees(screen, "Calls that wait for approval")
+    expect(text).toContain("    3  acme.send  " + row + "… (" + input.length + " characters: /approvals 3)  expires ")
+    expect([...text].filter((one) => HIDDEN_ONE.test(one) && one !== "\n").map((one) => one.codePointAt(0)!.toString(16))).toEqual([])
+    expect(text).not.toContain("\ufffd")
+    expect(text.split("😀").length - 1).toBe(1)
+  }), approvals)
+})
+
+test("an answer's text of ANSWER_MAX characters is answered; one more is refused by the terminal with a line that names the limit, and the service is not asked", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 60)
+  const approvals = fakeApprovals([approval(2)], results)
+  const most = "y".repeat(ANSWER_MAX)
+  const over = "n".repeat(ANSWER_MAX + 1)
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/deny 2 " + over)
+    // The refusal, or the line of an answer that the service gave.
+    const refused = "The text of an answer is at most 4096 characters; this one has 4097. Nothing was answered."
+    const text = yield* until(screen, "a line of the /deny", (now) => now.includes(refused) || now.includes("Approval 2: no."))
+    expect(text).toContain(refused)
+    expect(approvals.asked).toEqual([])
+    send(screen, "/approve 2 " + most)
+    yield* sees(screen, "Approval 2: yes. The call runs now; its result starts a turn.")
+  }), approvals)
+  expect(ANSWER_MAX).toBe(4096)
+  expect(approvals.asked).toEqual([{ n: 2, answer: { yes: true, who: WHO, text: most } }])
 })
 
 test("an approval's text with é, 日本語, a Hebrew word, an emoji of one code point and U+00A0 is shown as it is", async () => {

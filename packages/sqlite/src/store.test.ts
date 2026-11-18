@@ -749,6 +749,23 @@ test("pendCall: the approval's row takes the call's turn, function and input fro
   ])
 })
 
+test("pendCall: a call of a later turn gives its approval that turn, read from the call's row", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const first = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    yield* store.endTurn(first.id, "done")
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const program = yield* store.startCall({ turn: turn.id, vendorId: "call_1", fn: "run", input: "await send(1)" })
+    const send = yield* store.startCall({ turn: turn.id, parent: program, fn: "send", input: "{\"to\":\"x\"}" })
+    const approval = yield* store.pendCall(send, (n) => `send waits: approval ${n}`)
+    return { turns: [first.id, turn.id], send, approval: Option.getOrThrow(yield* store.approval(approval)) }
+  }))
+  expect(got.turns).toEqual([1, 2])
+  expect([got.approval.turn, got.approval.call]).toEqual([2, got.send])
+  expect(rows(file, "select turn, call from everchat_approval where chat = 1")).toEqual([{ turn: 2, call: got.send }])
+})
+
 test("pendCall: a call that is not running, a program, a call that waits already and a call that is not there are refused with StoreError, and nothing is written", async () => {
   const file = newFile()
   const got = await withStore(file, Effect.gen(function*() {

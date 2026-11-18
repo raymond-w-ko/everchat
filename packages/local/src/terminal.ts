@@ -55,9 +55,11 @@
 // through the service `Approvals` only. They work while a turn runs too: a
 // command runs in its own fiber. At each turn's end, when calls wait, one
 // line says how many. Every text of an approval that the terminal shows
-// was written by a model or a server: each control character in it is
-// shown as an escape (`visible`), so the person sees exactly what they
-// answer, and no text can move the cursor or hide a part.
+// was written by a model or a server: each code point in it that could
+// move the cursor, change the screen or hide a part is shown as an escape
+// by the core's `visible` (packages/core/src/functions.ts), whose rule and
+// set the terminal takes as they are: Cc, Cf, Cs, Co, Cn, Zl, Zp and
+// Default_Ignorable_Code_Point. So the person sees exactly what they answer.
 //
 // The layer must have the diagnostics' layer under it, merged
 // (diagnostics.ts): its fibers start when the layer is built.
@@ -149,12 +151,13 @@ export const WHO = "the person in the terminal"
 // `/approvals`; `/approvals <n>` shows them all.
 export const BRIEF = 100
 
-// The arguments on one line, cut to BRIEF characters (never inside a pair
-// of surrogates), then made visible.
-const brief = (input: string): string => {
+// The arguments of approval `n` on one line, cut to BRIEF characters
+// (never inside a pair of surrogates), then made visible; a cut one names
+// the command that shows them whole.
+const brief = (n: number, input: string): string => {
   if (input.length <= BRIEF) return visible(input)
   const code = input.charCodeAt(BRIEF - 1)
-  return visible(input.slice(0, code >= 0xd800 && code <= 0xdbff ? BRIEF - 1 : BRIEF)) + "… (" + input.length + " characters: /approvals <n>)"
+  return visible(input.slice(0, code >= 0xd800 && code <= 0xdbff ? BRIEF - 1 : BRIEF)) + "… (" + input.length + " characters: /approvals " + n + ")"
 }
 
 const when = (millis: number): string => DateTime.formatLocal(DateTime.makeUnsafe(millis), { locale: "sv-SE", dateStyle: "short", timeStyle: "short" })
@@ -431,7 +434,7 @@ export class Terminal extends Context.Service<Terminal, {
                   rows.length === 0
                     ? "No call waits for approval."
                     : ["Calls that wait for approval (/approve n, /deny n):", ...rows.map((one) =>
-                      "  " + one.id + "  " + visible(one.fn) + "  " + brief(one.input) + "  expires " + expires(one)
+                      "  " + one.id + "  " + visible(one.fn) + "  " + brief(one.id, one.input) + "  expires " + expires(one)
                     )].join("\n")
                 )
               }
@@ -453,8 +456,11 @@ export class Terminal extends Context.Service<Terminal, {
                 return tell(usage(name))
               }
               const said = (found?.[2] ?? "").trim()
-              if (said.length > ANSWER_MAX) {
-                return tell("The text of an answer is at most " + ANSWER_MAX + " characters.")
+              // The store's rule (`answerApproval`): at most ANSWER_MAX
+              // UTF-16 units once well-formed. Tested here, so a text over
+              // it asks nothing.
+              if (said.toWellFormed().length > ANSWER_MAX) {
+                return tell("The text of an answer is at most " + ANSWER_MAX + " characters; this one has " + said.length + ". Nothing was answered.")
               }
               const got = yield* approvals.answer(n, { yes: name === "approve", who: WHO, text: said === "" ? null : said })
               return tell(answered(n, got))

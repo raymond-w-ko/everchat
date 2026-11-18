@@ -9,7 +9,12 @@
 //
 // - The answer (`Approvals.answer`): the store records it (`answerApproval`)
 //   and it returns. A no is told to the chat as a note at once. A yes wakes
-//   the layer's one worker.
+//   the layer's one worker. Only the record can fail the answer: a step
+//   after it (the note of this answer, the expiry of the others and their
+//   notes) that fails is a diagnostic, and the answer gives what the store
+//   recorded, for the person's answer stands. Nothing is lost by it: a note
+//   that fails is given by the next load, and the 7 days are checked again
+//   at the next answer and at a load.
 // - The run: one at a time for a chat, in the order of the answers as the
 //   store keeps them, in the worker, a fiber of the layer's scope. At each
 //   wake, and after each run, the worker reads the rows still `yes` and
@@ -37,6 +42,9 @@
 //   in the log, and a note that fails is given by the next load.
 // - The 7 days (`WAIT`) are checked at a load and at an answer; nothing
 //   waits in memory, so an unload, a crash or an upgrade loses no approval.
+//   `waiting` leaves out a `pending` row whose 7 days are over, by the
+//   store's own test (`now - created > WAIT`, with Effect's `Clock`), and
+//   writes nothing: the expiry and its note stay at an answer and at a load.
 // - A load (the layer's build), in this order: a run that an earlier launch
 //   left (`running`) is `cut`, never run again; the approvals past their 7
 //   days expire, each with its note; the worker is woken for the rows still
@@ -44,10 +52,10 @@
 //   row not told yet gets its note; then `Turns.ready`, for a run that
 //   ended and was not told.
 
-import { Context, Effect, Layer, Option, Queue } from "effect"
+import { Clock, Context, Effect, Layer, Option, Queue } from "effect"
 import { type Caller, FunctionError, Functions, Shortened, shownInput } from "./functions.ts"
 import { Limit } from "./limit.ts"
-import { type Answered, type Approval, type ApprovalAnswer, type ApprovalEnd, Store, type StoreError } from "./store.ts"
+import { type Answered, type Approval, type ApprovalAnswer, type ApprovalEnd, Store, type StoreError, WAIT } from "./store.ts"
 import { CUT_FUNCTION, type Offer, Source, Turns } from "./turn.ts"
 
 const diagnostic = Effect.annotateLogs("source", "approval")
@@ -76,14 +84,19 @@ const text = (value: unknown): string => (typeof value === "string" ? value : va
 const ENDED: ReadonlyArray<Approval["status"]> = ["done", "failed", "cut"]
 
 export class Approvals extends Context.Service<Approvals, {
-  // The approvals that wait for an answer, in the order of their ids.
+  // The approvals that wait for an answer, in the order of their ids: the
+  // `pending` rows whose 7 days are not over (the store's test, at the
+  // time of Effect's `Clock`). It reads only: a row past its 7 days stays
+  // `pending` in the store until the next answer or load expires it.
   readonly waiting: Effect.Effect<ReadonlyArray<Approval>, StoreError>
   // A person's answer to the approval `n`, as the store records it
   // (`answerApproval`). It returns when the answer is recorded, and a no's
   // note is in the log. A yes wakes the layer's worker, which runs it in
   // its turn. An answer that comes after the 7 days is `expired`, and is
-  // told as an expiry. A failure of a note is a diagnostic: the answer
-  // stands, the row stays untold, and the next load gives the note.
+  // told as an expiry. It fails only when the record fails: a failure of a
+  // step after it (a note, the expiry of the others) is a diagnostic, the
+  // answer stands and is given, and the next answer or load does the step
+  // again (an untold row's note, the 7 days).
   answer(n: number, answer: ApprovalAnswer): Effect.Effect<Answered, StoreError>
 }>()("everchat/approval/Approvals") {
   // The answers and the runs, over the turn loop. Its build is a load (the
@@ -191,12 +204,24 @@ export class Approvals extends Context.Service<Approvals, {
           } else if (got._tag === "expired") {
             yield* noted(got.approval, expiredNote(got.approval))
           }
-          // The 7 days of the others.
-          yield* expire
+          // The 7 days of the others; a failure is a diagnostic, for the
+          // answer is recorded (the next answer or load expires them).
+          yield* expire.pipe(
+            Effect.catchCause((cause) =>
+              diagnostic(Effect.logError("the approvals past their 7 days were not expired at this answer: the next answer or load tries again", cause))
+            )
+          )
           return got
         })
 
-      return Approvals.of({ waiting: store.approvals(["pending"]), answer })
+      // The pending rows whose 7 days are not over, by the store's test.
+      const waiting = Effect.gen(function*() {
+        const rows = yield* store.approvals(["pending"])
+        const at = yield* Clock.currentTimeMillis
+        return rows.filter((one) => !(at - one.created > WAIT))
+      })
+
+      return Approvals.of({ waiting, answer })
     })
   )
 

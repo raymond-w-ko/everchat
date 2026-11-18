@@ -617,7 +617,14 @@ export class Store extends Context.Service<Store, Reading & {
   // `endApproval`: a `running` row ends, and is given; none when the row is
   // not `running`.
   // `cutApprovals`: each `running` row becomes `cut` with `output`; it gives
-  // them. For a load: a run that an earlier launch left.
+  // them. For a load: a run that an earlier launch left. An approval has no
+  // launch column, so it cuts every `running` row of the chat, a live run
+  // of another launch too: a caller calls it only where no other live
+  // launch holds the chat. The take of a chat refuses a second launch only
+  // when the open one is of this host and its process runs (`LaunchLive`;
+  // the host's `409 chat_elsewhere`); an open launch of another host is
+  // closed as a crash, so on a database that two hosts share, two launches
+  // of one chat can be live, until a deployment's lease.
   // `tellApproval`: `msg` is the first page of the message that told the
   // chat of the row's end. It fails, and writes nothing, for a row that is
   // not there, not in a state of `TOLD`, or told already.

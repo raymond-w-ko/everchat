@@ -869,6 +869,26 @@ for (const member of Object.keys(WRITES) as Array<Write>) {
   })
 }
 
+// The expiry at an answer, which the sweep above does not reach: its calls
+// run before `WAIT`. A's approval 1 and B's approval 1 both wait (the fill
+// made them at the clock's start); past `WAIT`, an answer to A's expires
+// A's row only.
+test("writes: answerApproval past WAIT expires A's approval and leaves B's approval of the same number waiting, and every row that is not A's as it was", async () => {
+  const file = copy(both.file)
+  const status = (chat: string) => rows<{ status: string }>(file, `select status from everchat_approval where chat = ${chatId(file, chat)} and n = 1`)
+  expect([status(both.a), status(both.b)]).toEqual([[{ status: "pending" }], [{ status: "pending" }]])
+  const before = notA(file, both.a)
+  const answered = await run(file, Effect.gen(function*() {
+    const store = yield* (yield* Chats).store(TENANT_A, both.a, A.launch)
+    yield* TestClock.setTime(WAIT + 1)
+    return (yield* store.answerApproval(1, { yes: true, who: "A's person" }))._tag
+  }))
+  expect(answered).toBe("expired")
+  expect([status(both.a), status(both.b)]).toEqual([[{ status: "expired" }], [{ status: "pending" }]])
+  expect(notA(file, both.a)).toEqual(before)
+  expect(live(file)).toEqual(LIVE())
+})
+
 // Launches
 // --------
 
