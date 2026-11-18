@@ -58,7 +58,7 @@ test("the head's bytes are the ones that the prompt cache was written for", () =
   // chat (packages/core/AGENTS.md, "One system prompt for every kind of
   // request"). Change this hash only on purpose.
   const hash = createHash("sha256").update(JSON.stringify(head(DECLARATIONS))).digest("hex")
-  assert.equal(hash, "66f19cc5d500aa33a1f4c15c8403653d59fd8ea29858aba17207c2cbddd6346d")
+  assert.equal(hash, "eebd350dbe3dc76071fca1dc6db7997d1f496f58302b131a5a77ee46e317da79")
 })
 
 // The times that a text holds a word.

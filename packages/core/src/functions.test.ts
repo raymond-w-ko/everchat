@@ -10,12 +10,12 @@ import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, pending, refusals, RESERVED, RESERVED_WORDS, RESULT, Shortened, shownInput, TYPE_MAX, visible, waits, WAITS_INPUT, ZOOM } from "./functions.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, pending, refusals, RESERVED, RESERVED_WORDS, RESULT, Shortened, shownInput, TYPE_MAX, visible, waits, WAITS_INPUT, wakeNote, wallClock, ZOOM } from "./functions.ts"
 import { globalOf, head, spreads } from "./head.ts"
 import { given, MAX } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { type Approval, Store } from "./store.ts"
+import { type Approval, Store, type Wake } from "./store.ts"
 
 // One launch of a host's chat: the store, the memory, and the hosted set.
 const withHosted = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory>) => {
@@ -487,4 +487,63 @@ test("shownInput and waits of arguments with U+E0041, U+009B and U+202E give the
   // One rule: shownInput is visible over the cut text.
   assert.equal(shownInput("[\u2066\u00ad]"), visible("\u2066\u00ad"))
   assert.equal(shownInput("[\u2066\u00ad]"), "\\u{2066}\\xad")
+})
+
+// The wake-ups' notes (turn.ts, after a program): the wall clock's text,
+// and the two notes.
+
+const utc = (text: string) => Date.parse(text)
+
+test("wallClock gives a time on the zone's wall clock to the minute with the zone's name: east and west of UTC, a time that a zone repeats, the year's edge", () => {
+  assert.equal(wallClock(utc("2026-11-16T08:00:00Z"), "Europe/Berlin"), "2026-11-16 09:00 Europe/Berlin")
+  assert.equal(wallClock(utc("2026-11-16T08:00:59.999Z"), "Europe/Berlin"), "2026-11-16 09:00 Europe/Berlin")
+  assert.equal(wallClock(utc("2026-11-16T08:00:00Z"), "Asia/Kolkata"), "2026-11-16 13:30 Asia/Kolkata")
+  assert.equal(wallClock(utc("2026-11-16T08:00:00Z"), "America/New_York"), "2026-11-16 03:00 America/New_York")
+  assert.equal(wallClock(utc("2026-11-16T08:00:00Z"), "UTC"), "2026-11-16 08:00 UTC")
+  // Berlin's clock goes back at 03:00 on 2026-10-25: 02:30 comes two times.
+  assert.deepStrictEqual(
+    [wallClock(utc("2026-10-25T00:30:00Z"), "Europe/Berlin"), wallClock(utc("2026-10-25T01:30:00Z"), "Europe/Berlin")],
+    ["2026-10-25 02:30 Europe/Berlin", "2026-10-25 02:30 Europe/Berlin"]
+  )
+  // New York's on 2026-11-01 at 02:00: 01:30 comes two times.
+  assert.deepStrictEqual(
+    [wallClock(utc("2026-11-01T05:30:00Z"), "America/New_York"), wallClock(utc("2026-11-01T06:30:00Z"), "America/New_York")],
+    ["2026-11-01 01:30 America/New_York", "2026-11-01 01:30 America/New_York"]
+  )
+  // The year's edge, on each side of UTC.
+  assert.equal(wallClock(utc("2026-12-31T23:30:00Z"), "Europe/Berlin"), "2027-01-01 00:30 Europe/Berlin")
+  assert.equal(wallClock(utc("2027-01-01T00:30:00Z"), "America/New_York"), "2026-12-31 19:30 America/New_York")
+})
+
+test("wallClock of a zone's name that the engine does not know gives the time in UTC, named UTC, and does not throw", () => {
+  for (const zone of ["Mars/Olympus_Mons", "", "Europe/Berlin\u0000", "not a zone"]) {
+    let text = ""
+    assert.doesNotThrow(() => {
+      text = wallClock(utc("2026-11-16T08:00:00Z"), zone)
+    }, JSON.stringify(zone))
+    assert.equal(text, "2026-11-16 08:00 UTC", JSON.stringify(zone))
+  }
+})
+
+// A wake-up's row as the store gives it: a routine of Berlin made by call 7
+// of turn 2, whose next slot (`due`) has moved past its first.
+const wake = (over: Partial<Wake> = {}): Wake => ({
+  id: 3, text: "Read my mail.", cron: "0 9 * * *", at: null, zone: "Europe/Berlin", first: utc("2026-11-16T08:00:00Z"), turn: 2, call: 7,
+  due: utc("2026-11-17T08:00:00Z"), slot: utc("2026-11-16T08:00:00Z"), pending: null, missed: 0, fired: 1, lastTurn: 4, settled: true, failed: 0,
+  stopped: null, why: null, stopCall: null, created: 0, updated: 0, ...over
+})
+
+test("wakeNote: a make gives the row's first on its wall clock, never its due; a stop by the model gives the row's id", () => {
+  assert.equal(wakeNote({ wake: wake(), by: "made", call: 7 }), "Wake-up 3 set: next 2026-11-16 09:00 Europe/Berlin")
+  // A stopped row still gives its first: the stop cleared `due`.
+  assert.equal(wakeNote({ wake: wake({ due: null, stopped: 5, why: "unwake", stopCall: 9 }), by: "made", call: 7 }), "Wake-up 3 set: next 2026-11-16 09:00 Europe/Berlin")
+  assert.equal(wakeNote({ wake: wake({ id: 12, zone: "America/New_York", first: utc("2026-12-01T14:30:00Z") }), by: "made", call: 7 }), "Wake-up 12 set: next 2026-12-01 09:30 America/New_York")
+  assert.equal(wakeNote({ wake: wake({ due: null, stopped: 5, why: "unwake", stopCall: 9 }), by: "stopped", call: 9 }), "Wake-up 3 stopped.")
+  assert.equal(wakeNote({ wake: wake({ id: 40 }), by: "stopped", call: 9 }), "Wake-up 40 stopped.")
+  // A row's zone that the engine does not know: UTC, no throw.
+  let text = ""
+  assert.doesNotThrow(() => {
+    text = wakeNote({ wake: wake({ zone: "Mars/Olympus_Mons" }), by: "made", call: 7 })
+  })
+  assert.equal(text, "Wake-up 3 set: next 2026-11-16 08:00 UTC")
 })

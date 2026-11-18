@@ -102,39 +102,74 @@ not built, and the next launch's load asks for it again.
 The turn loop (`packages/core/src/turn.ts`) has one way in besides the
 person's message: a source (`Source`, a seam), whose message starts a turn
 of its own and never steers a turn that runs. Its first user is the result
-of a call that ran after a person's yes (the kind `late`); the wake-ups
-will be the second. The core knows only a kind, a text and a write: no
-timer, no table and no approval.
+of a call that ran after a person's yes (the kind `late`); the second is a
+wake-up that came due (the kind `wake`). The core knows only a kind, a text
+and a write: no timer, no table and no approval.
 
 - The shape: `Source { next }` gives an `Offer { kind, text, write }` or
-  null. The kind is a key of `HEADS` but `user` and `work` (today `late`
-  alone); another is a defect. A host with more than one source gives one
-  `Source` that asks them in its own order. The source decides before
-  `next` returns; its `write` only marks its own row.
+  null. The kind is a key of `HEADS` but `user` and `work` (`late` and
+  `wake`); another is a defect. The source decides before `next` returns;
+  its `write` only marks its own row.
+- More than one source: `Source.inOrder(...layers)` joins the layers of
+  several into one `Source`. It builds each in its own scope, in the order
+  given, with the one memo map of its build (as `Layer.mergeAll` does), so
+  a layer that two sources, or a source and the rest of the stack, share
+  is built one time, and the finalizers run one time, when that scope
+  closes; its `next` asks each `next` in that order and gives the first
+  offer that is not null (the sources after it are not asked); a `next`
+  that fails fails it, and the sources after it are not asked; with none
+  it gives null. Its type keeps the layers' errors and needs.
 - Who asks, and when: the loop, under its lock, at two places. At a
-  turn's end, done or failed, when no message of the person waits (a
-  message that waits starts its turn first, or waits for the person after
-  a failure); and in `Turns.ready`, which the source's owner calls when it
-  has something: with no turn running the offer starts its turn at once;
-  while one runs it does nothing, and that turn's end asks. Not after a
-  stop: the offer waits for the next end or the next `ready`. A person's
+  turn's end: after a done turn when no message of the person waits (a
+  message that waits starts its own turn first), and after a failed turn
+  always; and in `Turns.ready`, which the source's owner calls when it has
+  something: with no turn running the offer starts its turn at once; while
+  one runs it does nothing, and that turn's end asks. Not after a stop:
+  the offer waits for the next end or the next `ready`. A person's
   message (`say`), and `idle`, that come before a stopped turn's end is
   written wait for that end: the message's turn starts after it.
+- A source's turn takes the messages that wait. One rule for every source:
+  a message of the person that waits (after a failed turn) does not hold
+  an offer back, and the offer's turn takes it in, in its first item,
+  before the offer's message. With nothing offered the row rests: the
+  person must speak again.
 - One transaction holds the offer's message (its pages and their `message`
   events), the new turn and its `start`, and the source's `write` with the
   message's first page and that turn. A failed write fails it all, and
   stops the memory for the launch, as every failed write does.
 - The turn's first item takes the messages after `taken` of the kinds of
-  `HEADS` (`user`, `work`, `late`), in one block under the header of the
-  kind of the turn's first message (`HEAD`, `LATE`); a message of another
-  kind is given as `<kind>: <text>`. A turn that the person's message
-  starts is as before, byte for byte. Only `user` and `work` steer a turn.
+  `HEADS` (`user`, `work`, `late`, `wake`), in the order of the messages,
+  in one block under the header of the kind of the turn's first message
+  (`HEAD`, `LATE`, `WAKE`); a message of another kind is given as
+  `<kind>: <text>`. A turn that the person's message starts is as before,
+  byte for byte. Only `user` and `work` steer a turn, and only they start
+  one by themselves.
+- The ceiling of a wake turn: an offer may carry `ceiling: { steps,
+  tokens }`, both whole numbers over 0 (another is a defect of the source,
+  before anything is written); `startTurn` keeps it on the turn's row in
+  the offer's transaction, and the row keeps it through a restart. Before
+  each request `run` counts the turn's steps (its items of the kind
+  `turn`) and its tokens (`input + cacheRead + cacheWrite + output` over
+  its usage rows, read with `usage({ turn })` at each check, so a restart
+  counts the same way). At either one the turn ends `stopped` with the why
+  and note `CEILING`, which names no number; no interrupt, no new status.
+  The loop then goes on as after a done turn: a waiting message of the
+  person starts its turn, else the source is asked. A person's message
+  that the turn takes or that steers it runs under the same ceiling. A
+  turn at its ceiling takes no steer (`after`, by the same read-only test
+  as before a request, `atCeiling`): the message is not written into the
+  turn, `taken` stays, and after the stop (or the done end of a step with
+  no call) it starts the person's turn, whose first request holds it. The
+  first step always runs; a step whose results end the turn ends it done.
+  A turn with no ceiling (a person's, or an offer with none) reads nothing
+  more from the store; one with a ceiling reads its usage for a steer only
+  when a message waits and its steps are under theirs.
 - What a chat with no source pays: one `Effect.serviceOption` at the
   layer's build (`Turns.layer` needs nothing more), and one test at each
   turn's end; `ready` does nothing.
 
-Two notes that approval needs, both written by the turn loop, which alone
-writes a message with its event:
+Two notes that approval needs, and the wake-ups' notes, all written by the
+turn loop, which alone writes a message with its event:
 
 - After each program, in the transaction that logs its `tool` and `echo`
   and after them: one `note` for each call of it that waits for a person's
@@ -146,6 +181,16 @@ writes a message with its event:
   logs what it logged before, with one more read. The notes do not steer
   the turn: its next request is as for any program, and a later turn reads
   them in its view.
+- After those, in the same transaction: one `note` for each wake-up that a
+  call of the program made or stopped (`store.wakesOf(<the program's
+  call>)`, in the order of those calls; a row made and stopped by one
+  program gets both). The text is `wakeNote` (`functions.ts`, beside
+  `waits`): `Wake-up <id> set: next <the row's first on its wall clock>`,
+  from `first`, never `due` (`wallClock`: `2026-11-16 09:00
+  Europe/Berlin`; a zone that the engine does not know gives UTC), or
+  `Wake-up <id> stopped.` for a stop by the model; a stop by the person
+  gets none here. A cut program's restart gives them too. One more read at
+  each program's end, in every stack.
 - `Turns.note(text, write?)`: a note from outside a turn (a no, an
   expiry), logged with its `message` event under the loop's lock, whether a
   turn runs or not; it gives the note's first page. `write`, if given, runs

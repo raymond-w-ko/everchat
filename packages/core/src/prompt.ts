@@ -67,6 +67,7 @@ Each message has a kind:
 - work: an agent's report, starting "[Name]"
 - note: notes from the program itself
 - late: the result of a call that ran after the user approved it
+- wake: a wake-up that you set came due: "[id] due <time> <zone>", how late, then its text
 
 The summaries form a binary tree: each message is compressed into a line (a
 short message is its own line), then adjacent lines are merged in pairs, again

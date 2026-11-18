@@ -39,17 +39,24 @@
 //
 // A message from outside a turn (`Source`, the seam)
 //
-// A source (the result of a call that ran after a person's yes; later a
-// wake-up) has a message that must start a turn of its own. It never steers
-// a turn that runs: it waits until the chat is idle. The loop asks the
-// source (`next`) at two places, under its `lock`: at a turn's end, done or
-// failed, when no message of the person waits; and in `ready`, which the
-// source's owner calls when it has something, and which does nothing while
-// a turn runs (that turn's end asks). Not after a stop: the offer waits for
-// the next end or the next `ready`. An offer is logged with its turn in one
-// transaction (`offer`): its pages and their `message` events, the turn and
-// its `start`, then the source's own `write`. A chat with no source pays
-// one test at a turn's end.
+// A source (the result of a call that ran after a person's yes; a wake-up
+// that came due) has a message that must start a turn of its own. It never
+// steers a turn that runs: it waits until the chat is idle. The loop asks
+// the source (`next`) at two places, under its `lock`: at a turn's end,
+// after a failed turn always, and after a done one when no message of the
+// person waits (that message starts its own turn first); and in `ready`,
+// which the source's owner calls when it has something, and which does
+// nothing while a turn runs (that turn's end asks). A message of the person
+// that waits (after a failed turn) does not hold an offer back: the offer's
+// turn takes it in, in its first item, in the order of the messages. Not
+// after a stop: the offer waits for the next end or the next `ready`. An
+// offer is logged with its turn in one transaction (`offer`): its pages and
+// their `message` events, the turn and its `start`, then the source's own
+// `write`. Several sources are one (`Source.inOrder`), asked in the order
+// given. A chat with no source pays one test at a turn's end. An offer may
+// carry a ceiling of steps and tokens, kept on its turn's row: the turn
+// ends stopped (`CEILING`) when it reaches it, also after a restart, and
+// whoever steers it (`Offer`).
 //
 // A stop whose end could not be written (the read of the running turn, or
 // the end's write, failed) keeps a lost end: the stop's reason, with a
@@ -81,8 +88,10 @@
 //   a model step ends              turn_item (turn), msg asst, usage
 //   a program starts               call (running)
 //   a program ends                 call (done or failed), msg tool and echo,
-//                                  and a note for each call of it that
-//                                  waits for a person's answer
+//                                  a note for each call of it that waits
+//                                  for a person's answer, and a note for
+//                                  each wake-up that a call of it made or
+//                                  stopped
 //   all results of a step are in   turn_item (back)
 //   messages steer the turn        turn_item (user), chat.taken
 //   a turn ends                    turn (done, stopped or failed), and a
@@ -95,7 +104,12 @@
 // waiting for a person's yes or no (`store.approvalsOf`, in the order of
 // their numbers; `waits` in functions.ts says the text): the log keeps for
 // ever that a call waits, and the person sees it. A program with no such
-// call logs what it did before, with one more read. And `note`: a note
+// call logs what it did before, with one more read. Then, in the same
+// transaction, one note for each wake-up that a call of the program made or
+// stopped (`store.wakesOf`, in the order of those calls; `wakeNote` in
+// functions.ts says the text), so the person sees what the model did, and
+// a cut program's restart gives them too: one more read at each program's
+// end, in every stack. And `note`: a note
 // from outside a turn (a no, an expiry), logged with its `message` event
 // under the loop's lock, whether a turn runs or not, and with its caller's
 // `write` (which marks the approval's row as told) in the same transaction,
@@ -161,7 +175,7 @@
 
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
-import { waits } from "./functions.ts"
+import { waits, wakeNote } from "./functions.ts"
 import { TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
@@ -179,10 +193,13 @@ export const HEAD = "Turn: the user's new message:\n\n"
 // after a person's yes starts (the kind `late`).
 export const LATE = "Turn: a call that waited for approval has run:\n\n"
 
+// The start of the block of a turn that a wake-up starts (the kind `wake`).
+export const WAKE = "Turn: a wake-up fired:\n\n"
+
 // The kinds of message that a turn's first item takes in, each with the
 // header of a block that a message of that kind starts. A source may offer
 // each of them but `user` and `work` (`Offer`).
-export const HEADS = { user: HEAD, work: HEAD, late: LATE } as const satisfies Partial<Record<Kind, string>>
+export const HEADS = { user: HEAD, work: HEAD, late: LATE, wake: WAKE } as const satisfies Partial<Record<Kind, string>>
 
 // The kinds that `HEADS` has, in its order.
 const TAKEN: ReadonlyArray<Kind> = Object.keys(HEADS) as Array<keyof typeof HEADS>
@@ -277,6 +294,10 @@ export const whyOf = (given: string): string => {
   return why.slice(0, code >= 0xd800 && code <= 0xdbff ? WHY - 1 : WHY)
 }
 
+// The `why` of a turn that reached its ceiling (`Offer`), and its note. It
+// names no number: the numbers are the source's.
+export const CEILING = "Stopped: this wake-up's turn reached its ceiling of steps or tokens."
+
 // The largest capacity of the hub: a bounded hub allocates its whole capacity when it is made.
 const LARGEST = 65_536
 
@@ -299,21 +320,74 @@ export interface Options {
 // source's own write, which marks its row. `write` runs in the transaction
 // that logs the message and starts its turn, with the message's first page
 // and that turn. A failed `write` fails that transaction, and stops the
-// memory for the launch (memory.ts, `pushWith`).
+// memory for the launch (memory.ts, `pushWith`). The turn's first item
+// takes the message in with the person's messages that wait before it
+// (after a failed turn), in their order, under the header of its kind.
+// `ceiling`: the most steps and tokens that the turn may use, both whole
+// numbers over 0 (another is a defect), written on the turn's row with it;
+// none: the turn has none, as a person's turn. A turn with a ceiling counts,
+// before each request, its steps (its items of the kind `turn`) and its
+// tokens (`input + cacheRead + cacheWrite + output` of its usage rows, read
+// from the store each time, after a restart too); at either one it ends
+// `stopped` with the why `CEILING`, and the loop goes on as after a done
+// turn. A person's message that it takes or that steers it runs under it;
+// at its ceiling it takes no steer: a message that comes during its last
+// step waits, and starts the person's turn after the turn's end.
 export interface Offer {
   readonly kind: Kind
   readonly text: string
   readonly write: (first: Message, turn: Turn) => Effect.Effect<void, StoreError>
+  readonly ceiling?: { readonly steps: number; readonly tokens: number } | undefined
 }
 
 // The seam of a message from outside a turn. `next` gives what the source
 // has now, or null; it decides before it returns, and is asked only under
-// the loop's lock with no message of the person waiting. A host with more
-// than one source gives one `Source` that asks them in its own order. The
-// turn loop reads it at its build, if it is there (`Effect.serviceOption`).
+// the loop's lock with no turn running, also while a message of the person
+// waits after a failed turn (its turn takes that message in). The turn loop
+// reads it at its build, if it is there (`Effect.serviceOption`). A host with
+// more than one source gives one: `Source.inOrder`.
 export class Source extends Context.Service<Source, {
   readonly next: Effect.Effect<Offer | null, StoreError>
-}>()("everchat/turn/Source") {}
+}>()("everchat/turn/Source") {
+  // Several sources as one, asked in the order given. Each layer is built
+  // in the scope of the layer that this gives, in that order, and with the
+  // one memo map of that build, as the members of `Layer.mergeAll` are: a
+  // layer that two sources share, or that a source shares with the rest of
+  // the stack, is built one time, and its finalizers run one time, when
+  // that scope closes. Its `next` asks each
+  // source's `next` in turn and gives the first offer that is not null; the
+  // sources after it are not asked. A `next` that fails fails it, and the
+  // sources after that one are not asked. With no source it gives null. The
+  // layer keeps the errors and the needs of the layers given.
+  static readonly inOrder = <const Layers extends ReadonlyArray<Layer.Layer<Source, unknown, unknown>>>(
+    ...sources: Layers
+  ): Layer.Layer<Source, Layer.Error<Layers[number]>, Layer.Services<Layers[number]>> =>
+    Layer.fromBuildMemo((memoMap, scope) =>
+      Effect.gen(function*() {
+        // Each layer is one of these: the types of its own error and needs
+        // are parts of the unions that the layer given keeps.
+        const layers = sources as ReadonlyArray<Layer.Layer<Source, Layer.Error<Layers[number]>, Layer.Services<Layers[number]>>>
+        const each: Array<Source["Service"]> = []
+        for (const layer of layers) {
+          each.push(Context.get(yield* Layer.buildWithMemoMap(layer, memoMap, scope), Source))
+        }
+        return Context.make(
+          Source,
+          Source.of({
+            next: Effect.gen(function*() {
+              for (const one of each) {
+                const offered = yield* one.next
+                if (offered !== null) {
+                  return offered
+                }
+              }
+              return null
+            })
+          })
+        )
+      })
+    )
+}
 
 export class Turns extends Context.Service<Turns, {
   // The person says something. It returns when the message is in the log.
@@ -533,11 +607,35 @@ export class Turns extends Context.Service<Turns, {
           return kept
         })
 
-        // The messages that came while the turn ran: it takes them in.
-        const steer = Effect.fnUntraced(function*(turn: Turn) {
+        // A turn's ceiling, from its row: its steps (its items of the kind
+        // `turn`) and its tokens (the sum over its usage rows, read from the
+        // store each time, so the same after a restart). True: it reached
+        // either one. It only reads; the one test of the ceiling, for a
+        // request (`reached`) and for a steer (`steer`). A turn with none
+        // pays nothing: no read of the store; the tokens are read only when
+        // the steps are under theirs.
+        const atCeiling = Effect.fnUntraced(function*(turn: Turn, items: ReadonlyArray<Kept>) {
+          if (turn.steps === null || turn.tokens === null) {
+            return false
+          }
+          const steps = items.filter((one) => one.kind === "turn").length
+          if (steps >= turn.steps) {
+            return true
+          }
+          // Each of its steps adds at most one row: no limit cuts the sum.
+          const used = yield* store.usage({ turn: turn.id, limit: Number.MAX_SAFE_INTEGER })
+          const tokens = used.reduce((sum, row) => sum + row.input + row.cacheRead + row.cacheWrite + row.output, 0)
+          return tokens >= turn.tokens
+        })
+
+        // The messages that came while the turn ran: it takes them in. Not
+        // at its ceiling (`atCeiling`, tested only when a message waits):
+        // there it takes no steer, so the messages wait, `taken` stays, and
+        // after the turn's end they start the person's turn.
+        const steer = Effect.fnUntraced(function*(turn: Turn, items: ReadonlyArray<Kept>) {
           const messages = yield* waiting
           const last = messages[messages.length - 1]
-          if (last === undefined) {
+          if (last === undefined || (yield* atCeiling(turn, items))) {
             return null
           }
           const kept: Kept = { kind: "user", blocks: texts(messages, 0).map((text) => ({ text, mark: false })) }
@@ -567,16 +665,19 @@ export class Turns extends Context.Service<Turns, {
         const functionsOf = (turn: number, id: number) => Effect.map(store.calls(turn), (rows) => rows.filter((row) => row.parent === id))
 
         // A program's end: its `tool` and `echo`, then a note for each call
-        // of it that waits for a person's answer, each with its event, and
-        // `also`, in one transaction.
+        // of it that waits for a person's answer, then a note for each
+        // wake-up that a call of it made or stopped, in the order of those
+        // calls, each with its event, and `also`, in one transaction.
         const ended = (turn: number, id: number, input: string, echo: string, also: Effect.Effect<void, StoreError>) =>
           Effect.gen(function*() {
             const waiting = yield* store.approvalsOf(id)
+            const wakes = yield* store.wakesOf(id)
             yield* log(
               [
                 { kind: "tool", text: input, turn, call: id },
                 { kind: "echo", text: echo, turn, call: id },
-                ...waiting.map((approval) => ({ kind: "note" as const, text: waits(approval), turn, call: id }))
+                ...waiting.map((approval) => ({ kind: "note" as const, text: waits(approval), turn, call: id })),
+                ...wakes.map((of) => ({ kind: "note" as const, text: wakeNote(of), turn, call: id }))
               ],
               also
             )
@@ -637,7 +738,7 @@ export class Turns extends Context.Service<Turns, {
             yield* keep(turn.id, back)
             items.push(back)
           }
-          const steered = yield* steer(turn)
+          const steered = yield* steer(turn, items)
           if (steered !== null) {
             items.push(steered)
           }
@@ -680,8 +781,20 @@ export class Turns extends Context.Service<Turns, {
           return kept
         })
 
+        // Before each request: a turn at its ceiling (`atCeiling`) ends
+        // stopped with `CEILING`, and true is given.
+        const reached = Effect.fnUntraced(function*(turn: Turn, items: ReadonlyArray<Kept>) {
+          const over = yield* atCeiling(turn, items)
+          if (over) {
+            yield* end(turn, "stopped", CEILING)
+          }
+          return over
+        })
+
         // A turn, from where its items are, to its end. Its `start` is
-        // written and published by what starts it.
+        // written and published by what starts it. A turn that reaches its
+        // ceiling (`reached`) ends stopped, and gives "done": the loop goes
+        // on as after a done turn.
         const run = Effect.fnUntraced(function*(turn: Turn) {
           const head = yield* Effect.mapError(decodeHead(turn.head), broken("head"))
           const items: Array<Kept> = []
@@ -697,6 +810,9 @@ export class Turns extends Context.Service<Turns, {
             return "done" as const
           }
           for (;;) {
+            if (yield* reached(turn, items)) {
+              return "done" as const
+            }
             const kept = yield* step(turn, head, items)
             if (kept === null || kept.kind !== "turn") {
               return "failed" as const
@@ -708,25 +824,31 @@ export class Turns extends Context.Service<Turns, {
           }
         })
 
-        // A new turn's row and its `start` row, in the caller's transaction.
-        const begin = (firstMsg: number) =>
+        // A new turn's row and its `start` row, in the caller's transaction,
+        // with an offer's ceiling, if any.
+        const begin = (firstMsg: number, ceiling?: Offer["ceiling"]) =>
           Effect.gen(function*() {
             const chat = yield* store.chat
-            const turn = yield* store.startTurn({ pick: store.launch.pick ?? chat.pick, head: JSON.stringify(options.head), firstMsg })
+            const pick = store.launch.pick ?? chat.pick
+            const head = JSON.stringify(options.head)
+            const turn = yield* store.startTurn(
+              ceiling === undefined ? { pick, head, firstMsg } : { pick, head, firstMsg, steps: ceiling.steps, tokens: ceiling.tokens }
+            )
             return { turn, n: yield* store.addEvent({ type: "start", turn: turn.id }) }
           })
         const started = (begun: { readonly turn: Turn; readonly n: number }): TurnEvent => ({ type: "start", n: begun.n, turn: begun.turn.id })
 
         // The source's offer, under the loop's `lock`, with no turn running:
-        // nothing with no source, with a message of the person waiting, or
-        // with nothing offered (null). Else, in one transaction, the offer's
-        // message (its pages and their `message` events), the new turn and
-        // its `start`, and the source's `write`; then `next` with the turn,
-        // in the step that nothing interrupts after the commit and the
-        // publish.
+        // nothing with no source, or with nothing offered (null). Else, in
+        // one transaction, the offer's message (its pages and their `message`
+        // events), the new turn and its `start`, and the source's `write`;
+        // then `next` with the turn, in the step that nothing interrupts
+        // after the commit and the publish. A message of the person that
+        // waits (after a failed turn) does not hold it back: the new turn's
+        // first item takes that message in before the offer's (`first`).
         const offer = (next: (turn: Turn) => Effect.Effect<void> = () => Effect.void): Effect.Effect<Turn | null, StoreError> =>
           Effect.gen(function*() {
-            if (source === null || (yield* waiting).length > 0) {
+            if (source === null) {
               return null
             }
             const offered = yield* source.next
@@ -735,6 +857,13 @@ export class Turns extends Context.Service<Turns, {
             }
             if (!Object.hasOwn(HEADS, offered.kind) || offered.kind === "user" || offered.kind === "work") {
               return yield* Effect.die(new Error("a source offered a message of the kind " + offered.kind + ", which no source may offer"))
+            }
+            // A ceiling the store would refuse: the source's defect, before
+            // the push, so that it never fails the offer's transaction.
+            const ceiling = offered.ceiling
+            const whole = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0
+            if (ceiling !== undefined && !(typeof ceiling === "object" && ceiling !== null && whole(ceiling.steps) && whole(ceiling.tokens))) {
+              return yield* Effect.die(new Error("a source offered a ceiling that is not whole numbers of steps and tokens over 0"))
             }
             return yield* recordPush(
               [{ kind: offered.kind, text: offered.text }],
@@ -745,7 +874,7 @@ export class Turns extends Context.Service<Turns, {
                     return yield* Effect.die(new Error("a source's message logged no page"))
                   }
                   const numbers = yield* Effect.forEach(written, (message) => store.addEvent({ type: "message", msg: message.i, msgLast: message.i }))
-                  const begun = yield* begin(first.i)
+                  const begun = yield* begin(first.i, ceiling)
                   yield* offered.write(first, begun.turn)
                   return [numbers, begun] as const
                 }),
@@ -759,8 +888,11 @@ export class Turns extends Context.Service<Turns, {
             )
           })
 
-        // Turns, one after the other, while messages wait. A turn that
-        // failed ends the row: the person must speak again.
+        // Turns, one after the other, while messages wait. After a turn that
+        // failed, only the source's offer starts the next one (its turn takes
+        // in a message of the person that waits); with nothing offered the
+        // row ends: the person must speak again. A turn stopped at its
+        // ceiling (`reached`) is as a done one here.
         const drive = (turn: Turn): Effect.Effect<void> =>
           Effect.gen(function*() {
             let current: Turn | null = turn
@@ -768,11 +900,12 @@ export class Turns extends Context.Service<Turns, {
               running = { turn: current.id, fiber: running?.fiber ?? null, stop: null }
               const status: "done" | "failed" = yield* run(current)
               const following: Effect.Effect<Turn | null, StoreError> = Effect.gen(function*() {
-                // A message that came too late for the turn starts the next one.
+                // A message that came too late for a done turn starts the next one.
                 const next: Message | undefined = status === "done" ? (yield* waiting)[0] : undefined
                 if (next === undefined) {
-                  // With no message of the person waiting, done or failed,
-                  // the source's offer starts the next turn.
+                  // After a done turn with no message of the person waiting,
+                  // or after a failed turn, the source's offer starts the
+                  // next turn.
                   const offered = source === null ? null : yield* offer()
                   if (offered === null) {
                     rest()

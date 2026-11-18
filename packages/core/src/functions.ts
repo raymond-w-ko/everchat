@@ -64,13 +64,13 @@
 // Not here yet: the functions for agents (to start one, to tell one
 // something), and `zoom` of an agent's chat.
 
-import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { DEFAULT_INPUT_SCHEMA_MAX_CHARS, schemaToType } from "./codemode/declarations.ts"
 import { toCodemodeIdentifier } from "./codemode/identifier.ts"
 import type { Declaration, JsonSchema } from "./head.ts"
 import { part } from "./limit.ts"
 import { Memory } from "./memory.ts"
-import { type Approval, Store, type StoreError } from "./store.ts"
+import { type Approval, Store, type StoreError, type WakeOf } from "./store.ts"
 
 // Declarations
 // ------------
@@ -310,6 +310,26 @@ export const WAITS_INPUT = 500
 // then each hidden code point as its escape, `visible`).
 export const waits = (approval: Approval): string =>
   "Approval " + approval.id + " waits for a person's yes or no: " + approval.fn + "(" + shownInput(approval.input) + "). The call did not run."
+
+// A time on a zone's wall clock, to the minute, with the zone's name:
+// `2026-11-16 09:00 Europe/Berlin`. A time that the zone repeats has one
+// text for its two instants. A name that the engine does not know (a row
+// is data) gives the time in UTC, named `UTC`: it never throws. The
+// wake-ups' texts of a slot (packages/wakeups, `slotText`) are this one.
+export const wallClock = (at: number, zone: string): string => {
+  const named = Option.getOrElse(DateTime.zoneMakeNamed(zone), () => DateTime.zoneMakeNamedUnsafe("UTC"))
+  const parts = DateTime.toParts(DateTime.makeZonedUnsafe(at, { timeZone: named }))
+  const two = (n: number) => String(n).padStart(2, "0")
+  return `${String(parts.year).padStart(4, "0")}-${two(parts.month)}-${two(parts.day)} ${two(parts.hour)}:${two(parts.minute)} ${DateTime.zoneToString(named)}`
+}
+
+// The note that the log keeps of a wake-up that a call of a program made
+// or stopped (`store.wakesOf`), after its program and after the approvals'
+// notes (turn.ts): a make gives the row's first fire on its wall clock,
+// from `first`, never from `due`, which a fire or a stop moves; a stop by
+// the model gives the row's id.
+export const wakeNote = (of: WakeOf): string =>
+  of.by === "made" ? "Wake-up " + of.wake.id + " set: next " + wallClock(of.wake.first, of.wake.zone) : "Wake-up " + of.wake.id + " stopped."
 
 // A text of a model or a server as a person reads it (the terminal's
 // lines of an approval, and the notes of an approval through `shownInput`),

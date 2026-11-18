@@ -67,7 +67,7 @@
 // their arguments (but `machineZone`, which reads the machine's zone). A
 // caller gives now.
 
-import { visible } from "@everchat/core/functions"
+import { visible, wallClock } from "@everchat/core/functions"
 import { Cron, DateTime, Option, Result, Schema } from "effect"
 
 // Errors
@@ -365,11 +365,7 @@ export const missedOf = (routine: Routine, due: number, now: number): Option.Opt
 // A slot on the zone's wall clock, to the minute, with the zone's name:
 // `2026-11-16 09:00 Europe/Berlin`. A time that the zone repeats has one
 // text for its two instants.
-export const slotText = (at: number, zone: DateTime.TimeZone.Named): string => {
-  const parts = DateTime.toParts(DateTime.makeZonedUnsafe(at, { timeZone: zone }))
-  const two = (n: number) => String(n).padStart(2, "0")
-  return `${String(parts.year).padStart(4, "0")}-${two(parts.month)}-${two(parts.day)} ${two(parts.hour)}:${two(parts.minute)} ${DateTime.zoneToString(zone)}`
-}
+export const slotText = (at: number, zone: DateTime.TimeZone.Named): string => wallClock(at, DateTime.zoneToString(zone))
 
 // How late a fire at `now` is for its `slot`, in words, or undefined under
 // one minute: whole minutes under an hour, whole hours under two days, then
