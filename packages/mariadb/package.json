@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./check": "./src/check.ts",
     "./client": "./src/client.ts",
+    "./tables": "./src/tables.ts",
     "./testing": "./tests/server.ts"
   },
   "dependencies": {
     "@effect/sql-mysql2": "4.1.2",
+    "@everchat/core": "workspace:*",
+    "@everchat/sqlite": "workspace:*",
     "effect": "4.1.2"
   },
   "devDependencies": {

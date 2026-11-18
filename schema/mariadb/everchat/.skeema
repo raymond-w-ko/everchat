@@ -1,0 +1,8 @@
+schema=$EVERCHAT_DB_SCHEMA
+temp-schema=$EVERCHAT_SKEEMA_TMP
+default-character-set=utf8mb4
+default-collation=utf8mb4_nopad_bin
+ignore-table=^(?:[^e]|e[^v]|ev[^e]|eve[^r]|ever[^c]|everc[^h]|everch[^a]|evercha[^t]|everchat[^_])|^(?:e|ev|eve|ever|everc|everch|evercha|everchat)$
+allow-charset=utf8mb4,ascii
+allow-auto-inc=bigint
+lint-reserved-word=ignore

@@ -72,6 +72,8 @@
       "version": "0.1.0",
       "dependencies": {
         "@effect/sql-mysql2": "4.1.2",
+        "@everchat/core": "workspace:*",
+        "@everchat/sqlite": "workspace:*",
         "effect": "4.1.2",
       },
       "devDependencies": {

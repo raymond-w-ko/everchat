@@ -74,8 +74,9 @@ caller's own thread), but none in a separate Worker. So do the two new
 ones: `server` is the host with no lease and no provider, and `mcp` has
 only the version of the protocol, with no client yet. And `wakeups` has
 only its first module, `./time`: the check of a zone and the parse of a
-wake-up's time. `mariadb` has only the driver's client (`./client`), with
-no store yet.
+wake-up's time. `mariadb` has only the driver's client (`./client`), the
+list of the schema's tables (`./tables`) and the start's check of a schema
+against its files (`./check`), with no store yet.
 `cloudflare` does not exist yet.
 
 Run the full check (see "Checks") before you say that a change is done.
@@ -90,6 +91,11 @@ File names are lowercase. Multi-word names are written as one word
 The rest:
 
 - `docs/`: the design documents.
+- `schema/mariadb/`: the schema of the store on MariaDB as `.sql` files, one
+  for each table, in `skeema`'s layout, which an administrator applies; no
+  code. `schema/mariadb-admin/`: the administrator's statements of rows
+  beside it (the seed of `everchat_kind`). No `.sql` file is under
+  `packages/` (`packages/mariadb/AGENTS.md`, "The schema's files").
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
 - `tools/`: scripts outside the packages, which import them by their names
@@ -122,7 +128,8 @@ The rest:
   `48bcf8b`: 2,037 tests in 432.37 s, then 60 tests in 62.23 s, with the
   fleet at work; at a load over 40 the unit tier took 837 s at `2b6fb45`).
 - MariaDB check: `just test-mariadb`, every test of `packages/mariadb` (the
-  helper `packages/mariadb/tests/server.ts` and the driver's client) on two
+  helper `packages/mariadb/tests/server.ts`, the driver's client, and the
+  schema's files of `schema/mariadb/`, made on each server) on two
   private MariaDB servers, 10.11 and 11.8, each on a socket in the test's
   temporary directory, with no TCP port. It needs `nix` (on x86_64-linux),
   which fetches the two pinned servers from the binary cache; with no

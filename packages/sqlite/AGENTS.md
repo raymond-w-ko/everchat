@@ -160,4 +160,12 @@ database" in the root `AGENTS.md`). This gives two things:
   chats [Q47].
 
 The schema: `docs/schema.html`, and "All state in the chat's database" in
-the root `AGENTS.md`.
+the root `AGENTS.md`. A change of the schema (`src/schema.ts`, `docs/schema.html`)
+changes MariaDB's files of `schema/mariadb/` in the same batch. The
+comparisons of `packages/mariadb/src/tables.test.ts` fail until it does for
+a change of the tables; the columns with their MariaDB types (the page's),
+`not null` and defaults; the primary keys; the unique keys and the indexes;
+the references with their rules; the checks' expressions but the named
+ones; the generated column's expression as the page writes it. The
+differences that the test names, and the page's words, a person reads by
+eye (`packages/mariadb/AGENTS.md`, "The schema's files").

@@ -1,0 +1,23 @@
+CREATE TABLE `everchat_event` (
+  `chat` bigint(20) NOT NULL,
+  `n` bigint(20) NOT NULL,
+  `type` varchar(16) NOT NULL,
+  `turn` bigint(20) DEFAULT NULL,
+  `call` bigint(20) DEFAULT NULL,
+  `msg` bigint(20) DEFAULT NULL,
+  `msg_last` bigint(20) DEFAULT NULL,
+  `created` bigint(20) NOT NULL,
+  PRIMARY KEY (`chat`,`n`),
+  KEY `everchat_event_msg` (`chat`,`msg`),
+  KEY `everchat_event_turn_fk` (`chat`,`turn`),
+  KEY `everchat_event_call_fk` (`chat`,`call`),
+  KEY `everchat_event_msg_last_fk` (`chat`,`msg_last`),
+  CONSTRAINT `everchat_event_call_fk` FOREIGN KEY (`chat`, `call`) REFERENCES `everchat_call` (`chat`, `n`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_event_chat_fk` FOREIGN KEY (`chat`) REFERENCES `everchat_chat` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_event_msg_fk` FOREIGN KEY (`chat`, `msg`) REFERENCES `everchat_msg` (`chat`, `i`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_event_msg_last_fk` FOREIGN KEY (`chat`, `msg_last`) REFERENCES `everchat_msg` (`chat`, `i`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_event_turn_fk` FOREIGN KEY (`chat`, `turn`) REFERENCES `everchat_turn` (`chat`, `n`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_event_ck1` CHECK (`type` in ('accepted','start','call','message','end')),
+  CONSTRAINT `everchat_event_ck2` CHECK (`msg` is null = (`msg_last` is null)),
+  CONSTRAINT `everchat_event_ck3` CHECK (`msg_last` >= `msg`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin ROW_FORMAT=DYNAMIC;

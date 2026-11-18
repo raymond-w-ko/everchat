@@ -1,0 +1,20 @@
+CREATE TABLE `everchat_chat` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `tenant` binary(16) NOT NULL,
+  `uuid` binary(16) NOT NULL,
+  `pick` bigint(20) NOT NULL,
+  `goal` mediumtext DEFAULT NULL,
+  `draft` mediumtext DEFAULT NULL,
+  `taken` bigint(20) NOT NULL DEFAULT -1,
+  `seq` bigint(20) NOT NULL DEFAULT 0,
+  `wakeups` tinyint(4) NOT NULL DEFAULT 1,
+  `created` bigint(20) NOT NULL,
+  `updated` bigint(20) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `everchat_chat_uuid` (`uuid`),
+  KEY `everchat_chat_tenant` (`tenant`),
+  KEY `everchat_chat_pick_fk` (`pick`),
+  CONSTRAINT `everchat_chat_pick_fk` FOREIGN KEY (`pick`) REFERENCES `everchat_pick` (`id`),
+  CONSTRAINT `everchat_chat_tenant_fk` FOREIGN KEY (`tenant`) REFERENCES `everchat_tenant` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `everchat_chat_ck1` CHECK (`wakeups` in (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin ROW_FORMAT=DYNAMIC;
