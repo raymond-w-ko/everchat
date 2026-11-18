@@ -206,7 +206,8 @@ const rested = (w: Watch): Effect.Effect<number | "ended"> =>
   )
 
 // The end of the round that the listener's wake runs; "stray" when a
-// settle's read ran in a fiber that is not the firer's first.
+// settle's read ran in a fiber that is not the firer's first. A wake that
+// never comes has no end here: the case fails by the test's own timeout.
 const woke = (w: Watch): Effect.Effect<number | "ended" | "stray"> => Effect.raceFirst(rested(w), Effect.as(Deferred.await(w.stray), "stray" as const))
 
 // The clock moved by `ms` while the firer sleeps, then the end of the round
@@ -723,6 +724,68 @@ test("a failed round (M15): a row whose cron or zone does not parse is its diagn
   expect(texts(file, "wake")).toEqual(["[2] due 2026-11-16 09:00 Europe/Berlin, 10 min late: " + TEXT])
 })
 
+test("a failed round (M15): a row whose fault was told already is passed over, and a row after it that comes due in a later round of the launch is pended in that round", async () => {
+  const file = newFile()
+  // Row 1: a zone that does not parse, due. Row 2: a reminder at 09:10:30,
+  // after the first round at 09:10.
+  await make(file, T0 - HOUR, [{ ...HOURLY, zone: "Mars/Olympus" }, reminder(2, T0 + 10 * M + 30_000)])
+  const w = watch()
+  const got = await launch(file, w, Effect.gen(function*() {
+    const first = yield* rested(w)
+    const pends = [...w.pends]
+    const second = yield* after(w, first as number)
+    yield* (yield* Turns).idle
+    return { first, pends, second, at: yield* clock }
+  }), { at: T0 + 10 * M })
+  // The second round, at 09:10:30, has row 1 told, then row 2 due.
+  expect(got).toEqual({ first: 30_000, pends: [], second: SLEEP, at: 10 * M + 30_000 })
+  expect(w.pends).toEqual([[2, { pending: T0 + 10 * M + 30_000, missed: 0, due: null }]])
+  expect(diagnostics(w)).toEqual([`error wake-up 1 was not pended: "Mars/Olympus" is not a time zone: give an IANA name, such as Europe/Berlin.`])
+  expect(firedAt(file)).toEqual([10 * M + 30_000])
+  expect(texts(file, "wake")).toEqual(["[2] due 2026-11-16 09:10 Europe/Berlin: Reminder 2."])
+})
+
+test("a routine with no next slot (0 0 30 2 *, a row as data) is pended one time, with due null, and not again at the next round", async () => {
+  const file = newFile()
+  await make(file, T0 - HOUR, [{ ...HOURLY, cron: "0 0 30 2 *" }])
+  const w = watch()
+  const got = await launch(file, w, Effect.gen(function*() {
+    const first = yield* rested(w)
+    yield* (yield* Turns).idle
+    const pended = wakeRow(file, 1)
+    const second = yield* after(w, SLEEP)
+    yield* (yield* Turns).idle
+    return { first, pended, second }
+  }), { at: T0 + 10 * M })
+  expect(got).toEqual({
+    first: SLEEP,
+    pended: { due: null, slot: T0, pending: null, missed: 0, fired: 1, last_turn: 1, settled: 0, failed: 0, stopped: 0, why: null },
+    second: SLEEP
+  })
+  expect(w.pends).toEqual([[1, { pending: T0, missed: 0, due: null }]])
+  expect(w.readies).toBe(2)
+  expect(texts(file, "wake")).toEqual(["[1] due 2026-11-16 09:00 Europe/Berlin, 10 min late: " + TEXT])
+  expect(wakeRow(file, 1)).toMatchObject({ due: null, pending: null, fired: 1, settled: 1 })
+  expect(diagnostics(w)).toEqual([])
+})
+
+test("a routine's cron that parses as a reminder's time is the row's diagnostic, one time in a launch: no pendWake of it, and the round's other row is written and fires", async () => {
+  const file = newFile()
+  await make(file, T0 - HOUR, [{ ...HOURLY, cron: "2026-11-16T09:00" }, HOURLY])
+  expect(Result.getOrThrow(parse("2026-11-16T09:00", Result.getOrThrow(zone("Europe/Berlin"))))._tag).toBe("Reminder")
+  const w = watch()
+  await launch(file, w, Effect.gen(function*() {
+    yield* rested(w)
+    yield* (yield* Turns).idle
+    yield* after(w, SLEEP)
+  }), { at: T0 + 10 * M })
+  expect(diagnostics(w)).toEqual(["error wake-up 1 was not pended: its cron is a reminder's time, not a routine"])
+  expect(w.pends).toEqual([[2, { pending: T0, missed: 0, due: T0 + HOUR }]])
+  expect(wakeRow(file, 1)).toMatchObject({ due: T0, pending: null, fired: 0 })
+  expect(w.readies).toBe(2)
+  expect(texts(file, "wake")).toEqual(["[2] due 2026-11-16 09:00 Europe/Berlin, 10 min late: " + TEXT])
+})
+
 // The sleep
 // ---------
 
@@ -755,6 +818,24 @@ test("the sleep: with a slot in 10 s the next round is at that slot; with none, 
     const exit = await Effect.runPromise(Effect.flatMap(Deferred.await(one.fiber), Fiber.await))
     expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
   }
+})
+
+test("the sleep while off, with a row due at exactly now: 60 s, not 0 (the row is due, not in the future)", async () => {
+  const file = newFile()
+  await make(file, T0 - HOUR, [reminder(1, T0)], true)
+  const w = watch()
+  const got = await launch(file, w, Effect.gen(function*() {
+    const now = yield* clock
+    const first = yield* rested(w)
+    return { now, first, row: wakeRow(file, 1) }
+  }), { at: T0 })
+  // The firer's clock told the round's sleep: the row's due is now.
+  expect(got).toEqual({
+    now: 0,
+    first: SLEEP,
+    row: { due: T0, slot: null, pending: null, missed: 0, fired: 0, last_turn: null, settled: 1, failed: 0, stopped: 0, why: null }
+  })
+  expect({ pends: w.pends, readies: w.readies }).toEqual({ pends: [], readies: 1 })
 })
 
 // The stops
@@ -941,7 +1022,10 @@ for (const [where, faulty] of noteFaults) {
     expect(first).toBe(SLEEP)
     expect(messages(file)).toEqual(before)
     expect(wakeRow(file, 1)).toEqual({ due: T0 + 3 * HOUR, slot: T0 + HOUR, pending: T0 + 2 * HOUR, missed: 0, fired: 2, last_turn: 2, settled: 0, failed: 1, stopped: 0, why: null })
-    // No settle committed in the launch: the stop went with the note.
+    // The row and the log above are the claim: no settle committed, and the
+    // stop went with the note. `w.settles` records a settle when
+    // `settleWake` returns (not when its transaction commits): here none
+    // returned, as the fault came in it or before it ran.
     expect(w.settles).toEqual([])
     const lines = diagnostics(w)
     expect(lines.length).toBe(1)
@@ -995,6 +1079,39 @@ test("a row that the person stopped between its fire and its turn's second faile
   expect(v.settles).toEqual([[1, 1, "failed", 1]])
   expect(stops(once)).toEqual([])
   expect(wakeRow(once, 1)).toEqual({ due: null, slot: T0, pending: null, missed: 0, fired: 1, last_turn: 1, settled: 1, failed: 1, stopped: 1, why: "fired" })
+})
+
+test("a fault in a plain settle (no note) is the round's one diagnostic: the row is not settled, and the next round settles it", async () => {
+  const file = newFile()
+  await make(file, T0 - HOUR, [HOURLY])
+  // With no firer: the 09:00 fire, and its turn 1 is done, not settled.
+  await launch(file, watch(), Effect.gen(function*() {
+    yield* (yield* Store).pendWake(1, { pending: T0, missed: 0, due: T0 + HOUR })
+    yield* (yield* Turns).ready
+    yield* (yield* Turns).idle
+  }), { at: T0 + 10 * M, firer: false })
+  const fired = { due: T0 + HOUR, slot: T0, pending: null, missed: 0, fired: 1, last_turn: 1, settled: 0, failed: 0, stopped: 0, why: null }
+  expect(wakeRow(file, 1)).toEqual(fired)
+  let failures = 1
+  const failing = over((real) => ({
+    settleWake: (id, turn, end) =>
+      Effect.suspend(() => failures-- > 0 ? Effect.fail(new StoreError({ op: "settleWake", cause: new Error("the disk is gone") })) : real.settleWake(id, turn, end))
+  }))
+  const w = watch()
+  const got = await launch(file, w, Effect.gen(function*() {
+    const first = yield* rested(w)
+    const failed = { row: wakeRow(file, 1), diagnostics: diagnostics(w).length, settles: [...w.settles] }
+    const second = yield* after(w, first as number)
+    return { first, failed, second }
+  }), { at: T0 + 20 * M, store: failing })
+  expect(got).toEqual({ first: SLEEP, failed: { row: fired, diagnostics: 1, settles: [] }, second: SLEEP })
+  const lines = diagnostics(w)
+  expect(lines.length).toBe(1)
+  expect(lines[0]!.split("\n")[0]).toBe("error a round of the wake-ups failed: the next round tries again")
+  expect(lines[0]).toContain("the disk is gone")
+  expect(w.settles).toEqual([[1, 1, "done", 0]])
+  expect(wakeRow(file, 1)).toEqual({ ...fired, settled: 1 })
+  expect(stops(file)).toEqual([])
 })
 
 // The settle while off (M13)
