@@ -1,7 +1,8 @@
 // Shared parts of the tests of the store, and of the packages that need a
 // real store in their tests: a new home, a launch, a run of an effect with
 // the store or with the tag of a deployment, and reads and writes straight
-// to the file.
+// to the file. `harness` gives them to the contract's suites
+// (`./contract/`), as SQLite's harness.
 
 import { Database as Sqlite } from "bun:sqlite"
 import { afterAll } from "bun:test"
@@ -11,9 +12,11 @@ import * as os from "node:os"
 import * as path from "node:path"
 import * as Database from "../src/database.ts"
 import { chatsLayer, ProcessAlive, storeLayer } from "../src/sqlite.ts"
-import { type Chats, type LaunchInput, type Options, type Pick, Store } from "@everchat/core/store"
+import { type Chats, type Options, Store } from "@everchat/core/store"
+import { type Harness, options } from "./contract/harness.ts"
 
-export const PICK: Pick = { vendor: "openai", model: "gpt-test", effort: "medium", speed: "slow" }
+// Of no database: the harness's file has them, and they are given on here.
+export { options, PICK } from "./contract/harness.ts"
 
 // The temporary root, when no preload made one. A `bun test` started at
 // the repository's root loads `tools/tmproot.ts` (bunfig.toml), which sets
@@ -83,11 +86,6 @@ export const newFile = () => {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "everchat-test-")), Database.FILE)
 }
 
-export const options = (launch: Partial<LaunchInput> = {}): Options => ({
-  launch: { pid: process.pid, host: "test-host", cwd: "/work", version: "0.0.0-test", runTag: "tag", ...launch },
-  pick: PICK
-})
-
 // Runs `effect` with the store over `file`: one launch, from its start to
 // its end. `alive` replaces the check for a process that still runs.
 export const withStore = <A, E>(
@@ -132,4 +130,26 @@ export const write = (file: string, statement: string, params: Array<string | nu
   } finally {
     db.close()
   }
+}
+
+// A copy of a file that no connection has open, in a new home: the file
+// and its write-ahead log, if any.
+export const copy = (file: string) => {
+  const to = newFile()
+  for (const suffix of ["", "-wal", "-shm"]) {
+    if (fs.existsSync(file + suffix)) fs.copyFileSync(file + suffix, to + suffix)
+  }
+  return to
+}
+
+// SQLite's harness for the contract's suites: the functions above, `rows`,
+// `write` and `copy` as promises, and the store's `version`.
+export const harness: Harness = {
+  newFile,
+  withStore,
+  withChats,
+  rows: async (place, query) => rows(place, query),
+  write: async (place, statement, params) => write(place, statement, params),
+  copy: async (from) => copy(from),
+  has: { version: true }
 }

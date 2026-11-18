@@ -5,6 +5,10 @@
   "type": "module",
   "exports": {
     "./bun": "./src/sqlite.ts",
+    "./contract/harness": "./tests/contract/harness.ts",
+    "./contract/store1": "./tests/contract/store1.ts",
+    "./contract/store2": "./tests/contract/store2.ts",
+    "./contract/tenant": "./tests/contract/tenant.ts",
     "./database": "./src/database.ts",
     "./schema": "./src/schema.ts",
     "./sql": "./src/sql.ts",
