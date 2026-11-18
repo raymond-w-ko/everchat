@@ -138,10 +138,13 @@ How to test them:
   - `name`: the agent's name in the system prompt, in place of "EverChat"
     (the form: `nameFault` of `packages/core/src/prompt.ts`, and
     `packages/core/AGENTS.md`). It changes no other text of the program:
-    not the terminal, not an error's sentence, not `--help`.
+    not the terminal, not an error's sentence, not `--help`. A name is
+    given in composed form: "Zoë" with its one character `ë` is taken, and
+    "Zoe" followed by the combining mark U+0308 is refused.
   - `rules`: the path of a file of the person's own instructions, 1 to 4,096
     characters. A relative path is resolved against the work directory, not
-    the home. `rulesOf` of `config.ts` reads the file one time, right after
+    the home. `~` is not expanded: a `rules` of `~/x.md` is the path
+    `<work directory>/~/x.md`. `rulesOf` of `config.ts` reads the file one time, right after
     the config, at most 32,768 bytes (`RULES_MAX`) of UTF-8; a blank file
     gives no rules. Its text joins the system prompt of every request (the
     turns, the compactions and the subagents), under its own heading at the

@@ -657,6 +657,45 @@ test("a launch with a gated function (the example's tools, approval ask): a prog
   expect(server.bodies.filter((body) => JSON.stringify(body).includes("a call that waited for approval has run")).length).toBe(1)
 })
 
+test("a compaction's request has the same head as the turn's: the config's name and rules, and the functions", async () => {
+  const at = place()
+  configure(at, { name: "Ada", rules: "RULES.md" })
+  fs.writeFileSync(path.join(at.work, "RULES.md"), "Answer in haiku.\n")
+  // A message of more than NODE (512) bytes needs a compaction of its own,
+  // for sure. The turn's reply waits until that compaction was asked, so
+  // its request is in `bodies` once the reply is on the screen.
+  let compacted!: () => void
+  const compaction = new Promise<void>((resolve) => {
+    compacted = resolve
+  })
+  const server = fake(async (_, body) => {
+    if (isCompaction(body)) {
+      compacted()
+      return text("a line")
+    }
+    await compaction
+    return text("Hello.")
+  })
+  const pty = start(at, server.address)
+  await pty.sees(IDLE)
+  pty.type("hello " + "word ".repeat(120) + "\r")
+  await pty.sees("Hello.", IDLE)
+  pty.type("/quit\r")
+  await pty.ends()
+  expect(pty.code).toBe(0)
+  const compactions = server.bodies.filter(isCompaction)
+  const [turn, ...others] = server.bodies.filter((body) => !isCompaction(body))
+  expect(others).toEqual([])
+  expect(compactions.length).toBeGreaterThan(0)
+  const system: string = turn.input[0].content[0].text
+  expect(system.startsWith("You are Ada, an AI agent")).toBe(true)
+  expect(system.endsWith("\n# The user's instructions\n\nAnswer in haiku.\n")).toBe(true)
+  for (const body of compactions) {
+    expect(body.input[0]).toEqual(turn.input[0])
+    expect(body.tools).toEqual(turn.tools)
+  }
+})
+
 test("when only one of the standard input and the standard output is a terminal, the program works in pipe mode", async () => {
   const at = place()
   const server = fake(() => text("Hello."))

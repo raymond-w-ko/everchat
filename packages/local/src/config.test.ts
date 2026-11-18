@@ -647,6 +647,26 @@ test("rulesOf: a file of 32,768 bytes is taken, one of 32,769 is refused", async
   expect(await rulesFaults("huge.md", at.work, at.config, "hhh")).toEqual(["rules: Expected a file of at most 32768 bytes"])
 })
 
+test("rulesOf: the reads of a file of 1 MB ask for at most RULES_MAX + 1 bytes in all, and the fault is the cap's", async () => {
+  const at = rooms()
+  fs.writeFileSync(path.join(at.work, "huge.md"), "h".repeat(1_000_000))
+  // The operations of `RULES_IO`, with the sum of the lengths that the reads ask for.
+  let asked = 0
+  let reads = 0
+  const io: RulesIo = {
+    ...RULES_IO,
+    read: (fd, bytes, offset, length, position) => {
+      asked += length
+      reads += 1
+      return RULES_IO.read(fd, bytes, offset, length, position)
+    }
+  }
+  const exit = await rulesWith("huge.md", at.work, at.config, io)
+  expect(faultsOf(exit)).toEqual(["rules: Expected a file of at most 32768 bytes"])
+  expect(reads).toBeGreaterThan(0)
+  expect(asked).toBeLessThanOrEqual(RULES_MAX + 1)
+})
+
 test("rulesOf: bytes that are not UTF-8 are refused, without the content", async () => {
   const at = rooms()
   fs.writeFileSync(path.join(at.work, "latin1.md"), Buffer.concat([Buffer.from("marker-rules-7c2e "), Buffer.from([0xe9, 0x74, 0xe9])]))
