@@ -56,8 +56,13 @@ machine's zone, and nothing more).
 - **A routine** (`parse(when, zone)`) is the 5 fields of cron, read by
   `effect`'s `Cron` in the zone. It fires at most one time in an hour: its
   minute field is exactly one value (`0 * * * *`, `15 9 * * 1-5`; not
-  `*/30 * * * *`, `0,30 9 * * *` or `* 9 * * *`). A seconds field (6
-  fields) is refused, though `Cron` takes it.
+  `*/30 * * * *`, `0,30 9 * * *` or `* 9 * * *`). That floor is by the
+  minute field of the zone's wall clock, not 60 minutes of real time: in
+  `Australia/Lord_Howe`, whose clock moves 30 minutes, `0 * * * *` has two
+  slots 30 minutes apart on 2026-10-04 (02:00, moved by the gap to 02:30,
+  then 03:00: 15:30 and 16:00 UTC), one time in a year, which the budget
+  of fires bounds. A seconds field (6 fields) is refused, though `Cron`
+  takes it.
 - **A reminder** is a local date and time with no offset and no zone, to
   the minute or the second (`2026-11-18T09:00`, `2026-11-18 09:00:30`),
   read on the zone's wall clock: a real date (no 29 February of a year
@@ -84,12 +89,17 @@ machine's zone, and nothing more).
   that the zone skips moves forward by the gap (02:30 on 2026-03-29 in
   `Europe/Berlin` is 03:30, `effect`'s `compatible`), and a repeated one is
   the earlier; the caller refuses one that `isPast` (before now). A
-  routine's next slot (`nextSlot`, `Cron.next` in its zone) must come in
-  the `HORIZON_YEARS` (5) after the time asked, or the routine is refused
-  with a `WhenError` (`0 0 30 2 *`, a date that never comes): the 5 years
-  are the make's test only. Its slots
-  follow `Cron`'s rule at a change: a skipped 02:30 fires at 03:30, a
-  repeated one fires once.
+  routine's next slot (`nextSlot`) is the first after the time asked of
+  the slots that a walk of `Cron.next` in its zone gives from a slot: the
+  newest slot at or before that time (`Cron.prev`), then steps of
+  `Cron.next`, 3 at most (with none before, `Cron.next` from the time
+  itself). It must come in the `HORIZON_YEARS` (5) after the time asked,
+  or the routine is refused with a `WhenError` (`0 0 30 2 *`, a date that
+  never comes): the 5 years are the make's test only. Its slots follow
+  `Cron`'s rule at a change: a skipped 02:30 fires at 03:30, from every
+  time asked, a time inside the gap too (`Cron.next` from 03:10 on that
+  day's clock alone gives the next day's 02:30), and a repeated one fires
+  once.
 - **Missed slots** (`missedOf(routine, due, now)`): for a `due` slot at or
   before now, the newest slot at or before now (the one fire), the count
   of the slots from `due` before it, and the next slot after now; nothing

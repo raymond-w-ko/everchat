@@ -95,6 +95,26 @@ test("a routine of 5 fields whose minute is one value is taken, with its Cron in
   expect(weekdays._tag === "Routine" ? Cron.next(weekdays.cron, new Date("2026-11-16T07:30:00Z")).toISOString() : "").toBe("2026-11-16T08:15:00.000Z")
 })
 
+test("a routine's fields may be parted by a tab or by two spaces: 0\\t9 * * 1-5 and 0  9 * * 1-5 are taken, with the fields and the slots of 0 9 * * 1-5", () => {
+  // Three slots from Friday 2026-11-13 12:00 UTC: Monday, Tuesday and Wednesday at 09:00 in Berlin.
+  const slots = (when: string) => {
+    const parsed = parse(when, BERLIN)
+    if (Result.isFailure(parsed)) return parsed.failure.message
+    const got = parsed.success
+    if (got._tag !== "Routine") return got._tag
+    const out: Array<string> = []
+    let at = new Date("2026-11-13T12:00:00Z").getTime()
+    for (let k = 0; k < 3; k++) {
+      at = Result.getOrThrow(nextSlot(got, at))
+      out.push(new Date(at).toISOString())
+    }
+    return { minutes: [...got.cron.minutes], hours: [...got.cron.hours], weekdays: [...got.cron.weekdays], slots: out }
+  }
+  const one = slots("0 9 * * 1-5")
+  expect(one).toEqual({ minutes: [0], hours: [9], weekdays: [1, 2, 3, 4, 5], slots: ["2026-11-16T08:00:00.000Z", "2026-11-17T08:00:00.000Z", "2026-11-18T08:00:00.000Z"] })
+  for (const when of ["0\t9 * * 1-5", "0  9 * * 1-5", "0 9\t\t* *\t1-5"]) expect([when, slots(when)]).toEqual([when, one])
+})
+
 test("a routine that can fire more than one time in an hour is refused, with the minute field in the message: */30 * * * *, 0,30 9 * * *, * 9 * * * (every minute), 0-1 9 * * *", () => {
   for (const when of ["*/30 * * * *", "0,30 9 * * *", "* 9 * * *", "0-1 9 * * *"]) {
     const field = when.split(" ")[0]
@@ -440,6 +460,44 @@ test("a routine's next slot at 02:30 and at 09:00 in both zones on the four days
   }
 })
 
+// The windows of the gap of 2026 in both zones: from the clock's jump to the
+// slot that it moved, 02:30 at 03:30 on the zone's clock.
+const GAPS = [
+  { at: "Europe/Berlin", jump: "2026-03-29T01:00:00Z", moved: "2026-03-29T01:30:00Z", local: "2026-03-29T03:30:00.000+02:00[Europe/Berlin]" },
+  { at: "America/New_York", jump: "2026-03-08T07:00:00Z", moved: "2026-03-08T07:30:00Z", local: "2026-03-08T03:30:00.000-04:00[America/New_York]" }
+] as const
+
+test("the next slot from inside the gap of a change of time: 30 2 * * * asked at each minute from the jump to the moved slot (01:00 to 01:29 UTC in Berlin, 07:00 to 07:29 in New York) and 1 ms before it gives that day's slot at 03:30, as from before the jump; asked at the slot, the next day's 02:30", () => {
+  for (const { at, jump, moved, local } of GAPS) {
+    const named = Result.getOrThrow(zone(at))
+    const routine = routineIn("30 2 * * *", named)
+    const asked = [utc(jump) - 1, ...Array.from({ length: 30 }, (_, k) => utc(jump) + k * 60_000), utc(moved) - 1]
+    for (const after of asked) {
+      expect([at, new Date(after).toISOString(), iso(Result.getOrThrow(nextSlot(routine, after)), named)]).toEqual([at, new Date(after).toISOString(), local])
+    }
+    // At the slot itself, the slot after it: the next day's 02:30.
+    const next = Result.getOrThrow(nextSlot(routine, utc(moved)))
+    expect([at, iso(next, named)]).toEqual([at, local.replace(/^(\d{4}-\d{2})-(\d{2})T03:30/, (_, month, day) => `${month}-${String(Number(day) + 1).padStart(2, "0")}T02:30`)])
+  }
+})
+
+test("a change of time of 30 minutes: 0 * * * * in Australia/Lord_Howe has two slots 30 minutes apart on 2026-10-04 (02:00, moved by the gap to 02:30, then 03:00: 15:30 and 16:00 UTC); the floor of one fire in an hour is by the minute field of the wall clock", () => {
+  const lordHowe = Result.getOrThrow(zone("Australia/Lord_Howe"))
+  const routine = routineIn("0 * * * *", lordHowe)
+  const slots: Array<string> = []
+  let at = utc("2026-10-03T14:10:00Z")
+  for (let k = 0; k < 4; k++) {
+    at = Result.getOrThrow(nextSlot(routine, at))
+    slots.push(`${new Date(at).toISOString()} ${iso(at, lordHowe)}`)
+  }
+  expect(slots).toEqual([
+    "2026-10-03T14:30:00.000Z 2026-10-04T01:00:00.000+10:30[Australia/Lord_Howe]",
+    "2026-10-03T15:30:00.000Z 2026-10-04T02:30:00.000+11:00[Australia/Lord_Howe]",
+    "2026-10-03T16:00:00.000Z 2026-10-04T03:00:00.000+11:00[Australia/Lord_Howe]",
+    "2026-10-03T17:00:00.000Z 2026-10-04T04:00:00.000+11:00[Australia/Lord_Howe]"
+  ])
+})
+
 test("a routine with no slot in the 5 years after the time asked is refused with a WhenError: 0 0 30 2 * (a date that never comes); 0 0 29 2 * has one from 2026, none from 2097 (the next is in 2104)", () => {
   expect(HORIZON_YEARS).toBe(5)
   for (const [when, after] of [["0 0 30 2 *", "2026-11-17T12:00:00Z"], ["0 0 29 2 *", "2097-01-01T00:00:00Z"]] as const) {
@@ -450,6 +508,22 @@ test("a routine with no slot in the 5 years after the time asked is refused with
     }))
   }
   expect(iso(Result.getOrThrow(nextSlot(routineIn("0 0 29 2 *", BERLIN), utc("2026-11-17T12:00:00Z"))), BERLIN)).toBe("2028-02-29T00:00:00.000+01:00[Europe/Berlin]")
+})
+
+test("the horizon is 5 years from the time asked, its end taken: 0 0 29 2 * in Berlin asked from 2099-07-01 has its next slot in 2104, between 4 and 5 years away; its slot 2104-02-29 00:00 (2104-02-28 23:00 UTC) asked from 5 years before it is taken, from 1 ms more is refused", () => {
+  const leap = routineIn("0 0 29 2 *", BERLIN)
+  const slot = "2104-02-29T00:00:00.000+01:00[Europe/Berlin]"
+  const got = (after: number) => {
+    const one = nextSlot(leap, after)
+    return Result.isSuccess(one) ? iso(one.success, BERLIN) : one.failure
+  }
+  expect(got(utc("2099-07-01T00:00:00Z"))).toBe(slot)
+  expect(got(utc("2099-02-28T23:00:00Z"))).toBe(slot)
+  const before = utc("2099-02-28T23:00:00Z") - 1
+  expect(got(before)).toEqual(new WhenError({
+    when: "0 0 29 2 *",
+    message: `${shown("0 0 29 2 *")} is a routine with no time in the 5 years after ${slotText(before, BERLIN)}: it names a date that never comes, such as 30 February. ${ROUTINE_HELP}`
+  }))
 })
 
 // What `missedOf` gave, as texts on the zone's clock.
@@ -664,4 +738,78 @@ test("the comparison: missedOf against a plain walk of Cron.next from due, on se
     outcomes.includes("nothing due"),
     steps <= STEPS_MAX
   ]).toEqual([inputs.length, true, true, true, true])
+})
+
+test("the comparison: nextSlot against the slow way (Cron.next from 10 days before the time asked, then a walk of Cron.next slot by slot to the first slot after it), on seeded inputs in Berlin, New York and Lord Howe: times within 3 days of each change of time of 2026, each minute of the two gaps' windows, a time on a slot and 1 ms beside it", () => {
+  let state = SEED
+  // xorshift32: a number in 0 .. n - 1.
+  const rand = (n: number): number => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    return (state >>> 0) % n
+  }
+  const pick = <A,>(list: ReadonlyArray<A>): A => list[rand(list.length)]!
+  const day = 24 * 3_600_000
+  let steps = 0
+  // The slow way: the routine's slots walked from 10 days before `after`,
+  // the first after it.
+  const slow = (routine: Routine, after: number): number => {
+    let slot = Cron.next(routine.cron, new Date(after - 10 * day)).getTime()
+    while (slot <= after) {
+      steps++
+      if (steps > STEPS_MAX) throw new Error(`the walk took more than ${STEPS_MAX} steps (seed ${SEED})`)
+      slot = Cron.next(routine.cron, new Date(slot)).getTime()
+    }
+    return slot
+  }
+
+  const LORD_HOWE = Result.getOrThrow(zone("Australia/Lord_Howe"))
+  // The changes of time of 2026 of each zone.
+  const changes = [
+    [BERLIN, ["2026-03-29T01:00:00Z", "2026-10-25T01:00:00Z"]],
+    [NEW_YORK, ["2026-03-08T07:00:00Z", "2026-11-01T06:00:00Z"]],
+    [LORD_HOWE, ["2026-04-04T15:00:00Z", "2026-10-03T15:30:00Z"]]
+  ] as const
+  // Routines by the hour and by the day, as the comparison of missedOf has them.
+  const minutes = ["0", "15", "30", "59"] as const
+  const hours = ["*", "1", "2", "9", "*/2", "1,9,23", "2-3"] as const
+  const days = ["* * *", "* * 1-5", "* * 0", "1,15 * *"] as const
+
+  type Input = { readonly routine: Routine; readonly after: number }
+  const inputs: Array<Input> = []
+  // Fixed: each minute of the two windows of the gap, and 1 ms before the
+  // moved slot; the moved slot itself and 1 ms beside it.
+  for (const { at, jump, moved } of GAPS) {
+    const routine = routineIn("30 2 * * *", Result.getOrThrow(zone(at)))
+    for (let k = 0; k < 30; k++) inputs.push({ routine, after: utc(jump) + k * 60_000 })
+    for (const delta of [-1, 0, 1]) inputs.push({ routine, after: utc(moved) + delta })
+  }
+  // Random: a time within 3 days of each change of its zone, and a slot of
+  // the routine near it with 1 ms beside it.
+  for (const [at, times] of changes) {
+    for (const change of times.map(utc)) {
+      for (let i = 0; i < 25; i++) {
+        const routine = routineIn(`${pick(minutes)} ${pick(hours)} ${pick(days)}`, at)
+        const after = change - 3 * day + rand(6 * day)
+        inputs.push({ routine, after })
+        const slot = slow(routine, after)
+        inputs.push({ routine, after: slot + pick([-1, 0, 1]) })
+      }
+    }
+  }
+
+  let compared = 0
+  let moved = 0
+  for (const [i, { routine, after }] of inputs.entries()) {
+    const input = { seed: `0x${SEED.toString(16)}`, i, when: routine.text, zone: DateTime.zoneToString(routine.zone), after: new Date(after).toISOString() }
+    const want = slow(routine, after)
+    const got = nextSlot(routine, after)
+    expect([input, Result.isSuccess(got) ? new Date(got.success).toISOString() : "refused"]).toEqual([input, new Date(want).toISOString()])
+    if (Cron.next(routine.cron, new Date(after)).getTime() !== want) moved++
+    compared++
+  }
+  // Each input was compared; some are times where Cron.next alone skips the
+  // slot (inside a gap); the walks stayed in their bound.
+  expect([compared, moved >= 30, steps <= STEPS_MAX]).toEqual([inputs.length, true, true])
 })

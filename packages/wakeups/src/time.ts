@@ -263,8 +263,12 @@ const horizon = (at: number): number => {
   return date.getTime()
 }
 
-// The routine's first slot after `after`, however far, or undefined when
-// `Cron.next` finds none at all (it throws).
+// `Cron.next` from `after`: a slot after it, however far, or undefined when
+// `Cron.next` finds none at all (it throws). From a slot, it is the slot
+// after it: a walk of these steps gives the routine's slots (`missedOf`).
+// From a time inside the gap of a change of time (after the clock's jump,
+// before the slot that the jump moved), it skips that moved slot:
+// `nextWithin` finds the next slot by a walk from the slot before.
 const nextOf = (routine: Routine, after: number): number | undefined => {
   try {
     return Cron.next(routine.cron, new Date(after)).getTime()
@@ -284,14 +288,32 @@ const prevOf = (routine: Routine, before: number): number | undefined => {
 }
 
 // The routine's first slot after `after`, or undefined with none in the
-// `HORIZON_YEARS` after it: the make's test (`nextSlot`), and no other.
+// `HORIZON_YEARS` after it: the make's test (`nextSlot`), and no other. The
+// slot is the walk's (`nextOf`): from the newest slot at or before `after`
+// (`prevOf(after + 1)`), steps of `nextOf`, 3 at most, to the first slot
+// after `after`. So a skipped 02:30 fires at 03:30 from every time asked, a
+// time inside the gap too, where `Cron.next` from that time alone gives
+// the next day's slot. With no slot at all (`Cron.next` throws) nothing
+// more is read; with no slot before, or none after `after` in the 3 steps,
+// the slot is `Cron.next`'s from `after`.
 const nextWithin = (routine: Routine, after: number): number | undefined => {
-  const next = nextOf(routine, after)
-  return next !== undefined && next <= horizon(after) ? next : undefined
+  const first = nextOf(routine, after)
+  if (first === undefined) return undefined
+  let next = first
+  let slot = prevOf(routine, after + 1)
+  for (let step = 0; slot !== undefined && step < 3; step++) {
+    slot = nextOf(routine, slot)
+    if (slot !== undefined && slot > after) {
+      next = slot
+      break
+    }
+  }
+  return next <= horizon(after) ? next : undefined
 }
 
 // The routine's first slot after `after`, or a `WhenError` when it has none
-// in the `HORIZON_YEARS` after it.
+// in the `HORIZON_YEARS` after it. The slot is the walk's from the slot
+// before (`nextWithin`).
 export const nextSlot = (routine: Routine, after: number): Result.Result<number, WhenError> => {
   const next = nextWithin(routine, after)
   return next !== undefined
