@@ -3,15 +3,15 @@
 
 import { expect, test } from "bun:test"
 import { Database as Sqlite } from "bun:sqlite"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Scheduler, Schema } from "effect"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { newFile, options, PICK, rows, withChats, withStore, write } from "../tests/help.ts"
-import { SqlClient } from "effect/sql"
+import { SqlClient, Statement } from "effect/sql"
 import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
-import { chatsLayer, chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
+import { chatsLayer, chatsLayerNoDatabase, Dialect, ProcessAlive, readsLayer, SQLITE, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
 import { TestClock } from "effect/testing"
 import {
   ANSWER_MAX,
@@ -1076,6 +1076,48 @@ test("the run: startApproval gives a yes row one time, and none for each other s
   ])
 })
 
+test("each approval change writes only the rows that its own tests take: expireApprovals, startApproval, endApproval, tellApproval and cutApprovals beside rows of other states, each with its answer, and every other row as it was after each", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 6)
+    yield* store.append([{ kind: "note", text: "one" }])
+    yield* TestClock.setTime(1000)
+    yield* store.pendCall(ids[0]!, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT)
+    for (const id of ids.slice(1)) yield* store.pendCall(id, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT + 1)
+    // 1 pending past WAIT, 2 to 4 yes, 5 no, 6 pending.
+    for (const n of [2, 3, 4]) yield* store.answerApproval(n, { yes: true, who: "Ada" })
+    yield* store.answerApproval(5, { yes: false, who: "Ada" })
+    const id = (row: Option.Option<{ readonly id: number }>) => Option.getOrNull(Option.map(row, (one) => one.id))
+    const idsOf = (rows: ReadonlyArray<{ readonly id: number }>) => rows.map((row) => row.id)
+    const steps: Array<[string, Effect.Effect<unknown, StoreError>]> = [
+      ["expireApprovals", Effect.map(store.expireApprovals(), idsOf)],
+      ["startApproval 2", Effect.map(store.startApproval(2), id)],
+      ["startApproval 3", Effect.map(store.startApproval(3), id)],
+      ["endApproval 2", Effect.map(store.endApproval(2, { status: "done", output: "ok" }), id)],
+      ["tellApproval 2", store.tellApproval(2, 0)],
+      ["cutApprovals", Effect.map(store.cutApprovals("cut"), idsOf)]
+    ]
+    const seen = []
+    for (const [name, step] of steps) {
+      const result = yield* Effect.result(step)
+      const rows = (yield* store.approvals()).map((row) => [row.id, row.status, row.msg])
+      seen.push([name, result._tag === "Success" ? result.success : "failed: " + String(result.failure.cause), rows])
+    }
+    return seen
+  }))
+  expect(got).toEqual([
+    ["expireApprovals", [1], [[1, "expired", null], [2, "yes", null], [3, "yes", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]],
+    ["startApproval 2", 2, [[1, "expired", null], [2, "running", null], [3, "yes", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]],
+    ["startApproval 3", 3, [[1, "expired", null], [2, "running", null], [3, "running", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]],
+    ["endApproval 2", 2, [[1, "expired", null], [2, "done", null], [3, "running", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]],
+    ["tellApproval 2", undefined, [[1, "expired", null], [2, "done", 0], [3, "running", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]],
+    ["cutApprovals", [3], [[1, "expired", null], [2, "done", 0], [3, "cut", null], [4, "yes", null], [5, "no", null], [6, "pending", null]]]
+  ])
+})
+
 test("tellApproval sets msg one time and refuses a pending, yes or running row; untoldApprovals lists by id and loses a row when it is told", async () => {
   const file = newFile()
   const got = await withClock(file, Effect.gen(function*() {
@@ -1597,6 +1639,39 @@ test("fireWake with a newer slot written between the read and the fire: slot the
     // 998 + 1 + 5 is past the bound: it stays at 1,000.
     { ...capped!, ...fired, missed: 1000, lastTurn: got.turns[2]! }
   ])
+})
+
+test("the least and the greatest of the wake-ups' writes are null when a side is null, as SQLite's min and max give: a missed of null in pendWake (no fire waiting, and a fire waiting) and in fireWake's read (a newer slot waits) makes missed null, which the table refuses: StoreError, and nothing is written", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const idle = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const waits = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const newer = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    yield* store.pendWake(waits.id, { pending: T0, missed: 2, due: T0 + H })
+    yield* store.pendWake(newer.id, { pending: T0, missed: 4, due: T0 + H })
+    yield* store.pendWake(newer.id, { pending: T0 + 2 * H, missed: 5, due: T0 + 3 * H })
+    const before = { wakes: yield* store.wakes(), turns: (yield* store.turns(null, 10)).length }
+    yield* TestClock.setTime(T0 + 2 * H + 1)
+    const none = null as unknown as number
+    const tries: Array<Effect.Effect<unknown, StoreError>> = [
+      store.pendWake(idle.id, { pending: T0, missed: none, due: T0 + H }),
+      store.pendWake(waits.id, { pending: T0 + H, missed: none, due: T0 + 2 * H }),
+      fire(store, newer.id, { pending: T0, missed: none })
+    ]
+    const results = []
+    for (const one of tries) results.push(yield* Effect.result(one))
+    return { before, results, after: { wakes: yield* store.wakes(), turns: (yield* store.turns(null, 10)).length } }
+  }))
+  // SQLite's own text: the driver's error (`reason`) holds it.
+  const sqlite = (error: StoreError) => String((error.cause as { readonly reason?: { readonly cause?: unknown } }).reason?.cause)
+  const refused = expect.stringContaining("NOT NULL constraint failed: everchat_wake.missed")
+  expect(got.results.map((result) => (result._tag === "Failure" ? [result.failure.op, sqlite(result.failure)] : ["no error", result.success]))).toEqual([
+    ["pendWake", refused],
+    ["pendWake", refused],
+    ["fireWake", refused]
+  ])
+  expect(got.after).toEqual(got.before)
 })
 
 test("fireWake of a reminder stops it, why fired, with nothing left to fire; also a reminder whose pendWake gave a due, and one with a newer pending written between the read and the fire (ruling 4a): no StoreError", async () => {
@@ -4117,4 +4192,940 @@ test("the limit store: a call waits for the connection while a transaction of th
   expect(got.write).toBeGreaterThan(LIMIT)
   expect(got.write).toBeLessThan(1500)
   expect(got.goal).toBe("after the holder")
+})
+
+// The dialect and the writes
+// --------------------------
+
+// A store over `file` with `dialect` (`Dialect`, read at the build), with
+// the file's `SqlClient` beside it, on the real clock.
+// With no dialect given, the layer reads the one by default.
+const withDialect = <A, E>(file: string, dialect: Dialect | null, effect: Effect.Effect<A, E, Store | SqlClient.SqlClient>) => {
+  const run = effect.pipe(Effect.provide(storeLayerNoDatabase(options()).pipe(Layer.provideMerge(Database.layer(file)))))
+  return Effect.runPromise(dialect === null ? run : Effect.provideService(run, Dialect, dialect))
+}
+
+// A statement as the client ran it: its text, and whether it ran inside a
+// transaction of that client.
+interface Said {
+  readonly text: string
+  readonly inTransaction: boolean
+}
+
+// Runs `effect` with each statement that `sql` runs kept in `said`, in
+// order (effect's `CurrentTransformer`, which sees each statement before
+// it runs; BEGIN, SAVEPOINT and COMMIT are no statements of it).
+const listened = <A, E, R>(sql: SqlClient.SqlClient, said: Array<Said>, effect: Effect.Effect<A, E, R>) =>
+  Effect.provideService(effect, Statement.CurrentTransformer, (statement, _make, fiber) =>
+    Effect.sync(() => {
+      said.push({ text: statement.compile()[0], inTransaction: Option.isSome(Context.getOption(fiber.context, sql.transactionService)) })
+      return statement
+    }))
+
+// The statement that the counting dialect's `beforeWrite` runs: its mark.
+const BEFORE = "select 'before write' as mark"
+
+// A row that the counting dialect's `beforeWrite` writes, when asked to
+// (`counting(true)`): a pick of its own vendor in the shared list, so that
+// a rollback shows whether it was in the member's transaction.
+const BEFORE_ROW =
+  "insert into everchat_pick (vendor, model, effort, speed, created) select 'before write', 'mark ' || count(*), '', '', 0 from everchat_pick where vendor = 'before write'"
+
+// SQLite's dialect with a `beforeWrite` that keeps the tenant and the chat
+// that it was given (null for both with no chat: the launch, the make),
+// runs `BEFORE` (and `BEFORE_ROW` with `row`), then fails with `refusal`
+// while `state.fail`.
+const refusal = new StoreError({ op: "lease", cause: new Error("the lease is lost") })
+const counting = (row = false) => {
+  const state = { seen: [] as Array<{ tenant: string | null; chat: number | null }>, fail: false }
+  const dialect: Dialect = {
+    ...SQLITE,
+    beforeWrite: (sql, bound) =>
+      Effect.gen(function*() {
+        state.seen.push(bound === null ? { tenant: null, chat: null } : { tenant: Buffer.from(bound.tenant).toString("hex"), chat: bound.chat })
+        yield* sql.unsafe(BEFORE)
+        if (row) yield* sql.unsafe(BEFORE_ROW)
+        if (state.fail) return yield* refusal
+      })
+  }
+  return { state, dialect }
+}
+
+// Each row of each table of the file, by the client: what a write that
+// failed must leave as it was.
+const everything = (sql: SqlClient.SqlClient) =>
+  Effect.gen(function*() {
+    const tables = yield* sql<{ name: string }>`select name from sqlite_master where type = 'table' order by name`
+    const all: Record<string, Array<string>> = {}
+    for (const { name } of tables) all[name] = (yield* sql.unsafe(`select * from ${name}`)).map((row) => JSON.stringify(row)).sort()
+    return all
+  })
+
+type StoreService = typeof Store.Service
+type Writes = Exclude<keyof StoreService, keyof Reading | "launch" | "transaction">
+
+const SLOT = 1_800_000_000_000
+const OTHER_PICK = { ...PICK, model: "gpt-other" }
+
+// One call of each member that writes, in this order on one chat: each
+// call's rows are there for the calls after it, and each call writes (or
+// is a write that finds nothing to change). The type lists every member
+// that is not a read, so a new member needs its call here.
+const WRITE_CALLS: { readonly [K in Writes]: (s: StoreService) => Effect.Effect<unknown, unknown> } = {
+  setPick: (s) => s.setPick(OTHER_PICK),
+  setGoal: (s) => s.setGoal("a goal"),
+  setDraft: (s) => s.setDraft("a draft"),
+  append: (s) => s.append([{ kind: "user", text: "hello" }], "key-1"),
+  setTaken: (s) => s.setTaken(0),
+  putNodes: (s) => s.putNodes([{ l: 0, i: 0, text: "a node" }]),
+  putView: (s) => s.putView({ name: "chat", parts: [[0, 0]], batch: false }),
+  putImage: (s) => s.putImage({ name: "an image", type: "image/png", width: 1, height: 1, source: "person", bytes: new Uint8Array([1]) }),
+  putHead: (s) => s.putHead("{\"a\":1}"),
+  startTurn: (s) => s.startTurn({ pick: PICK, head: "{\"a\":2}", firstMsg: 0 }),
+  addUsage: (s) => s.addUsage({ served: "turn", turn: 1, pick: PICK, input: 1, cacheRead: 0, cacheWrite: 0, output: 1 }),
+  addTurnItem: (s) => s.addTurnItem(1, "user", "an item"),
+  startCall: (s) => Effect.andThen(s.startCall({ turn: 1, vendorId: "v1", fn: "run", input: "a program" }), s.startCall({ turn: 1, parent: 1, fn: "send", input: "[]" })),
+  setCallPgid: (s) => s.setCallPgid(2, 4242),
+  pendCall: (s) => s.pendCall(2, (n) => `waits as approval ${n}`),
+  answerApproval: (s) => s.answerApproval(1, { yes: true, who: "the person" }),
+  startApproval: (s) => s.startApproval(1),
+  endApproval: (s) => s.endApproval(1, { status: "done", output: "sent" }),
+  tellApproval: (s) => s.tellApproval(1, 0),
+  expireApprovals: (s) => s.expireApprovals(),
+  cutApprovals: (s) => s.cutApprovals("cut"),
+  endCall: (s) => s.endCall(1, { status: "done", output: "ran" }),
+  makeWake: (s) => s.makeWake({ text: "wake", cron: "0 9 * * *", zone: "Europe/Berlin", first: SLOT }, 20),
+  pendWake: (s) => s.pendWake(1, { pending: SLOT, missed: 0, due: SLOT + 1 }),
+  fireWake: (s) => s.fireWake(1, 1, { pending: SLOT, missed: 0 }),
+  settleWake: (s) => s.settleWake(1, 1, "done"),
+  stopWake: (s) => s.stopWake(1, "person"),
+  setWakeups: (s) => s.setWakeups(false),
+  addEvent: (s) => s.addEvent({ type: "accepted", msg: 0, msgLast: 0 }),
+  addDiagnostics: (s) => s.addDiagnostics([{ level: "info", source: "test", text: "a line", created: 1 }]),
+  dropDiagnostics: (s) => s.dropDiagnostics(2),
+  endTurn: (s) => s.endTurn(1, "done")
+}
+
+// One call of each read.
+const READ_CALLS: { readonly [K in keyof Reading]: (r: Reading) => Effect.Effect<unknown, unknown> } = {
+  snapshot: (r) => r.snapshot(r.chat),
+  version: (r) => r.version,
+  chat: (r) => r.chat,
+  eventsAfter: (r) => r.eventsAfter(0, 10),
+  count: (r) => r.count,
+  messages: (r) => r.messages(0, 1),
+  messagesAfter: (r) => r.messagesAfter(-1, ["user"]),
+  imagesOf: (r) => r.imagesOf(0),
+  keyed: (r) => r.keyed("key-1"),
+  node: (r) => r.node(0, 0),
+  nodes: (r) => r.nodes([[0, 0]]),
+  nodesIn: (r) => r.nodesIn(0, 0, 1),
+  levels: (r) => r.levels,
+  view: (r) => r.view("chat"),
+  image: (r) => r.image(1),
+  head: (r) => r.head(1),
+  turn: (r) => r.turn(1),
+  turns: (r) => r.turns(null, 10),
+  runningTurns: (r) => r.runningTurns(null),
+  turnItems: (r) => r.turnItems(1),
+  calls: (r) => r.calls(1),
+  call: (r) => r.call(1),
+  approval: (r) => r.approval(1),
+  approvalOf: (r) => r.approvalOf(2),
+  approvals: (r) => r.approvals(),
+  approvalsOf: (r) => r.approvalsOf(1),
+  untoldApprovals: (r) => r.untoldApprovals(),
+  wakes: (r) => r.wakes(),
+  dueWakes: (r) => r.dueWakes(SLOT),
+  pendingWake: (r) => r.pendingWake(),
+  fires: (r) => r.fires(0),
+  unsettledWakes: (r) => r.unsettledWakes(),
+  wakesOf: (r) => r.wakesOf(1),
+  usage: (r) => r.usage(),
+  usageTotals: (r) => r.usageTotals,
+  launches: (r) => r.launches(10),
+  endedRunTags: (r) => r.endedRunTags,
+  diagnostics: (r) => r.diagnostics(),
+  lastDiagnostics: (r) => r.lastDiagnostics(10)
+}
+
+const tenantOf = (sql: SqlClient.SqlClient) =>
+  Effect.map(sql<{ id: Uint8Array }>`select id from everchat_tenant`, (rows) => Buffer.from(rows[0]!.id).toString("hex"))
+
+test("the writes, swept: each member that writes runs beforeWrite once for each call, as the first statement of its transaction, with the store's tenant and chat, and each of its statements in that transaction; a beforeWrite that fails leaves every row as it was, and the member fails with its error; every member of the store is a read, a write of the sweep, launch or transaction", async () => {
+  const file = newFile()
+  const { state, dialect } = counting()
+  const got = await withDialect(file, dialect, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    const tenant = yield* tenantOf(sql)
+    const rows: Array<unknown> = []
+    for (const [member, call] of Object.entries(WRITE_CALLS) as Array<[Writes, (s: StoreService) => Effect.Effect<unknown, unknown>]>) {
+      // Refused first: nothing written, the member's error with the refusal as its cause.
+      const before = yield* everything(sql)
+      state.fail = true
+      state.seen.length = 0
+      const refused = yield* Effect.exit(call(store))
+      state.fail = false
+      const error = Exit.isFailure(refused) ? Cause.squash(refused.cause) : undefined
+      const kept = yield* everything(sql)
+      // Then written.
+      state.seen.length = 0
+      const said: Array<Said> = []
+      const exit = yield* Effect.exit(listened(sql, said, call(store)))
+      rows.push({
+        member,
+        refused: error instanceof StoreError ? [error.op, error.cause === refusal] : String(error),
+        kept: JSON.stringify(kept) === JSON.stringify(before),
+        ok: Exit.isSuccess(exit) ? true : String(Cause.squash(exit.cause)),
+        seen: state.seen.map((one) => [one.tenant === tenant, one.chat]),
+        first: said[0]?.text,
+        marks: said.filter((one) => one.text === BEFORE).length,
+        after: said.length > 1,
+        inTransaction: said.every((one) => one.inTransaction)
+      })
+    }
+    return { rows, members: Object.keys(store).sort() }
+  }))
+  const want = (member: string) => {
+    // startCall's call makes two calls, so two writes.
+    const twice = member === "startCall"
+    return {
+      member,
+      refused: [member, true],
+      kept: true,
+      ok: true,
+      seen: twice ? [[true, 1], [true, 1]] : [[true, 1]],
+      first: BEFORE,
+      marks: twice ? 2 : 1,
+      after: true,
+      inTransaction: true
+    }
+  }
+  for (const row of got.rows as Array<Record<string, unknown>>) expect(row).toEqual(want(String(row.member)))
+  expect(got.rows.length).toBe(Object.keys(WRITE_CALLS).length)
+  const cased = new Set([...Object.keys(WRITE_CALLS), ...Object.keys(READ_CALLS), "launch", "transaction"])
+  expect(got.members.filter((member) => !cased.has(member))).toEqual([])
+})
+
+test("the store's transaction with three writes, one of which calls another (startTurn, putHead): beforeWrite runs once, as its first statement; a failed beforeWrite leaves none of the three, and the transaction fails with its error", async () => {
+  const file = newFile()
+  const { state, dialect } = counting()
+  const got = await withDialect(file, dialect, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    const three = store.transaction(Effect.all([
+      store.setGoal("in a transaction"),
+      store.append([{ kind: "user", text: "in a transaction" }]),
+      store.startTurn({ pick: PICK, head: "{\"t\":1}", firstMsg: 0 })
+    ]))
+    const before = yield* everything(sql)
+    state.fail = true
+    const refused = yield* Effect.exit(three)
+    state.fail = false
+    const kept = JSON.stringify(yield* everything(sql)) === JSON.stringify(before)
+    state.seen.length = 0
+    const said: Array<Said> = []
+    yield* listened(sql, said, three)
+    return {
+      // The store's transaction keeps a StoreError as it is.
+      refused: Exit.isFailure(refused) ? Cause.squash(refused.cause) === refusal : "it did not fail",
+      kept,
+      seen: state.seen.length,
+      first: said[0]?.text,
+      marks: said.filter((one) => one.text === BEFORE).length,
+      statements: said.length,
+      inTransaction: said.every((one) => one.inTransaction),
+      goal: (yield* store.chat).goal,
+      turns: (yield* store.turns(null, 10)).length
+    }
+  }))
+  expect(got).toMatchObject({ refused: true, kept: true, seen: 1, first: BEFORE, marks: 1, inTransaction: true, goal: "in a transaction", turns: 1 })
+  expect(got.statements).toBeGreaterThan(4)
+})
+
+test("no read runs beforeWrite: each member of the reads, swept, on a chat with a row of each kind, and the same reads inside a snapshot", async () => {
+  const file = newFile()
+  const { state, dialect } = counting()
+  const got = await withDialect(file, dialect, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    for (const call of Object.values(WRITE_CALLS)) yield* call(store)
+    state.seen.length = 0
+    const rows: Array<unknown> = []
+    for (const [member, call] of Object.entries(READ_CALLS) as Array<[string, (r: Reading) => Effect.Effect<unknown, unknown>]>) {
+      const said: Array<Said> = []
+      const exit = yield* Effect.exit(listened(sql, said, call(store)))
+      rows.push({ member, ok: Exit.isSuccess(exit), seen: state.seen.length, marks: said.filter((one) => one.text === BEFORE).length })
+    }
+    yield* store.snapshot(Effect.forEach(Object.values(READ_CALLS), (call) => Effect.exit(call(store))))
+    return { rows, seen: state.seen.length }
+  }))
+  for (const row of got.rows as Array<Record<string, unknown>>) expect(row).toEqual({ member: row.member, ok: true, seen: 0, marks: 0 })
+  expect(got.rows.length).toBe(Object.keys(READ_CALLS).length)
+  expect(got.seen).toBe(0)
+})
+
+test("SQLite's dialect: no beforeWrite; setDraft and putView are each the one statement of before this bead, in no transaction (no begin); the store's layers read it by default", async () => {
+  expect(SQLITE.beforeWrite).toBeUndefined()
+  expect(SQLITE.forUpdate).toBe("")
+  const file = newFile()
+  const got = await withDialect(file, null, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    const draft: Array<Said> = []
+    yield* listened(sql, draft, store.setDraft("a draft"))
+    const view: Array<Said> = []
+    yield* listened(sql, view, store.putView({ name: "chat", parts: [[0, 0]], batch: false }))
+    yield* listened(sql, view, store.putView({ name: "chat", parts: [[0, 1]], batch: true }))
+    return { draft, view, dialect: yield* Dialect }
+  }))
+  expect(got.dialect).toBe(SQLITE)
+  expect(got.draft).toEqual([{ text: "update everchat_chat set draft = ?, updated = ? where tenant = ? and id = ?", inTransaction: false }])
+  const upsert = "\n      insert into everchat_view (\"chat\",\"name\",\"parts\",\"batch\",\"created\",\"updated\") VALUES (?,?,?,?,?,?)\n      on conflict (chat, name) do update\n      set parts = excluded.parts, batch = excluded.batch, updated = excluded.updated"
+  expect(got.view).toEqual([{ text: upsert, inTransaction: false }, { text: upsert, inTransaction: false }])
+})
+
+// One transaction, and the writes with no chat (lead, ec-9qt2rc, W5, W6)
+// ---------------------------------------------------------------------
+
+// What `BEFORE_ROW` wrote and kept: its picks in the shared list.
+const beforeRows = (sql: SqlClient.SqlClient) =>
+  Effect.map(sql<{ n: number }>`select count(*) as n from everchat_pick where vendor = 'before write'`, (rows) => rows[0]!.n)
+const beforeRowsIn = (file: string) => rows<{ n: number }>(file, "select count(*) as n from everchat_pick where vendor = 'before write'")[0]!.n
+
+// A statement that the database refuses (no such table).
+const BROKEN = "insert into no_such_table values (1)"
+
+// A transformer that keeps each statement of the run, with whether it ran
+// inside a transaction of its client, in `said`; and runs `BROKEN` in place
+// of the statement for which `breaks(text, said)` is true. Given to a whole
+// run, it sees the layer's build and the scope's finalizers too.
+const hearing = (said: Array<Said>, breaks?: (text: string, said: ReadonlyArray<Said>) => boolean): Statement.Transformer => (statement, make, fiber) =>
+  Effect.sync(() => {
+    const text = statement.compile()[0]
+    const client = Context.getOption(fiber.context, SqlClient.SqlClient)
+    const inTransaction = Option.isSome(client) && Option.isSome(Context.getOption(fiber.context, client.value.transactionService))
+    if (breaks !== undefined && breaks(text, said)) {
+      said.push({ text: BROKEN, inTransaction })
+      return make.unsafe(BROKEN)
+    }
+    said.push({ text, inTransaction })
+    return statement
+  })
+
+// The texts of `said`, but the pragmas of the file's open (database.ts).
+const unpragma = (said: ReadonlyArray<Said>) => said.filter((one) => !one.text.startsWith("pragma"))
+
+// A layer's launch, with nothing more.
+const taken = Effect.gen(function*() {
+  yield* Store
+})
+
+const INSERT_HEAD = "insert into everchat_head "
+const countIn = (sql: SqlClient.SqlClient, table: string) => Effect.map(sql.unsafe<{ n: number }>(`select count(*) as n from ${table}`), (rows) => rows[0]!.n)
+const END = "update everchat_launch set ended = ?, why = ? where chat = ? and n = ? and ended is null"
+const B = { text: BEFORE, inTransaction: true }
+const BR = { text: BEFORE_ROW, inTransaction: true }
+
+// The store's layer over `file`, its launch and its end, with `dialect`
+// (SQLite's by default) and `transformer` over the whole run.
+const launched = <A, E>(file: string, dialect: Dialect | null, transformer: Statement.Transformer, effect: Effect.Effect<A, E, Store | SqlClient.SqlClient>) => {
+  const run = effect.pipe(
+    Effect.provide(storeLayerNoDatabase(options()).pipe(Layer.provideMerge(Database.layer(file)))),
+    Effect.provideService(Statement.CurrentTransformer, transformer)
+  )
+  return Effect.runPromise(Effect.exit(dialect === null ? run : Effect.provideService(run, Dialect, dialect)))
+}
+
+test("one transaction (W5): a statement member (setGoal) and a transaction member (startTurn, after its head's insert) that fail after beforeWrite wrote its row leave neither beforeWrite's row nor a row of the member; written whole, each keeps its row", async () => {
+  const file = newFile()
+  const { dialect } = counting(true)
+  const got = await withDialect(file, dialect, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    // The launch's own row (W6).
+    const start = yield* beforeRows(sql)
+    // setGoal, a statement member: its one statement fails.
+    const goal: Array<Said> = []
+    const goalExit = yield* Effect.exit(Effect.provideService(store.setGoal("a goal"), Statement.CurrentTransformer, hearing(goal, (text) => text === GOAL)))
+    const afterGoal = { rows: yield* beforeRows(sql), goal: (yield* store.chat).goal }
+    // startTurn, a transaction member: the statement after its head's insert fails.
+    const turn: Array<Said> = []
+    const turnExit = yield* Effect.exit(Effect.provideService(
+      store.startTurn({ pick: PICK, head: "{\"w\":5}", firstMsg: 0 }),
+      Statement.CurrentTransformer,
+      hearing(turn, (_text, said) => said.some((one) => one.text.startsWith(INSERT_HEAD)))
+    ))
+    const afterTurn = { rows: yield* beforeRows(sql), heads: yield* countIn(sql, "everchat_head"), turns: yield* countIn(sql, "everchat_turn") }
+    // Whole: each write keeps beforeWrite's row and its own.
+    yield* store.setGoal("a goal")
+    yield* store.startTurn({ pick: PICK, head: "{\"w\":5}", firstMsg: 0 })
+    return {
+      start,
+      goal: goal.map((one) => one.text),
+      goalInTransaction: goal.every((one) => one.inTransaction),
+      goalFailed: Exit.isFailure(goalExit) ? String((Cause.squash(goalExit.cause) as StoreError).op) : "it did not fail",
+      afterGoal,
+      turn: turn.slice(0, 2).map((one) => one.text),
+      turnHead: turn.filter((one) => one.text.startsWith(INSERT_HEAD)).length,
+      turnLast: turn[turn.length - 1]?.text,
+      turnInTransaction: turn.every((one) => one.inTransaction),
+      turnFailed: Exit.isFailure(turnExit) ? String((Cause.squash(turnExit.cause) as StoreError).op) : "it did not fail",
+      afterTurn,
+      whole: { rows: yield* beforeRows(sql), goal: (yield* store.chat).goal, heads: yield* countIn(sql, "everchat_head"), turns: yield* countIn(sql, "everchat_turn") }
+    }
+  }))
+  expect(got).toEqual({
+    start: 1,
+    goal: [BEFORE, BEFORE_ROW, BROKEN],
+    goalInTransaction: true,
+    goalFailed: "setGoal",
+    afterGoal: { rows: 1, goal: null },
+    turn: [BEFORE, BEFORE_ROW],
+    turnHead: 1,
+    turnLast: BROKEN,
+    turnInTransaction: true,
+    turnFailed: "startTurn",
+    afterTurn: { rows: 1, heads: 0, turns: 0 },
+    whole: { rows: 3, goal: "a goal", heads: 1, turns: 1 }
+  })
+})
+
+test("the launch's end (W5): beforeWrite with the store's tenant and chat runs first, in one transaction with the end; refused, the launch stays not ended; the end broken, neither the end nor beforeWrite's row is written", async () => {
+  const run = async (how: "whole" | "refused" | "broken") => {
+    const file = newFile()
+    const { state, dialect } = counting(true)
+    const said: Array<Said> = []
+    let at = -1
+    let tenant = ""
+    const exit = await launched(file, dialect, hearing(said, how === "broken" ? (text) => text === END : undefined), Effect.gen(function*() {
+      yield* Store
+      tenant = yield* tenantOf(yield* SqlClient.SqlClient)
+      state.seen.length = 0
+      at = said.length
+      if (how === "refused") state.fail = true
+    }))
+    return {
+      exit: Exit.isSuccess(exit),
+      end: said.slice(at),
+      seen: state.seen.map((one) => [one.tenant === tenant, one.chat]),
+      ended: rows<{ ended: number | null }>(file, "select ended from everchat_launch").map((one) => one.ended !== null),
+      rows: beforeRowsIn(file)
+    }
+  }
+  expect(await run("whole")).toEqual({ exit: true, end: [B, BR, { text: END, inTransaction: true }], seen: [[true, 1]], ended: [true], rows: 2 })
+  expect(await run("refused")).toEqual({ exit: true, end: [B, BR], seen: [[true, 1]], ended: [false], rows: 1 })
+  expect(await run("broken")).toEqual({ exit: true, end: [B, BR, { text: BROKEN, inTransaction: true }], seen: [[true, 1]], ended: [false], rows: 1 })
+})
+
+// The launch's transaction as SQLite runs it on a file with a chat (the
+// statements of before ec-9qt2rc), and the end, in no transaction.
+const SQLITE_LAUNCH: ReadonlyArray<Said> = [
+  { text: "select id from everchat_tenant", inTransaction: true },
+  { text: "select uuid from everchat_chat where tenant = ?", inTransaction: true },
+  { text: "select id from everchat_chat where tenant = ? and uuid = ?", inTransaction: true },
+  { text: "\n      select n, pid, host, created from everchat_launch where chat = ? and ended is null", inTransaction: true },
+  { text: "select coalesce(max(n), 0) + 1 as next from everchat_launch where chat = ?", inTransaction: true },
+  { text: "insert into everchat_launch (\"chat\",\"n\",\"pid\",\"host\",\"cwd\",\"version\",\"run_tag\",\"pick\",\"created\") VALUES (?,?,?,?,?,?,?,?,?)", inTransaction: true }
+]
+
+test("the launch (W6): beforeWrite with no chat is the first statement of the launch's transaction, before the chat is found; armed, the launch fails with its StoreError and writes nothing, and a launch of before that is not ended stays not ended", async () => {
+  // A file whose first launch's end is undone: a crash.
+  const file = newFile()
+  await withStore(file, Effect.void)
+  write(file, "update everchat_launch set ended = null, why = null")
+  const picks = rows(file, "select * from everchat_pick")
+  const armed = counting(true)
+  armed.state.fail = true
+  const refusedSaid: Array<Said> = []
+  const refused = await launched(file, armed.dialect, hearing(refusedSaid), taken)
+  expect({
+    refused: Exit.isFailure(refused) ? refusedBy(Cause.squash(refused.cause), "launch") : "it did not fail",
+    said: unpragma(refusedSaid),
+    seen: armed.state.seen,
+    launches: rows(file, "select n, ended, why from everchat_launch"),
+    picks: rows(file, "select * from everchat_pick")
+  }).toEqual({
+    refused: true,
+    said: [B, BR],
+    seen: [{ tenant: null, chat: null }],
+    launches: [{ n: 1, ended: null, why: null }],
+    picks
+  })
+  // A new file, armed: no tenant, chat, pick or launch.
+  const empty = newFile()
+  const none = counting(true)
+  none.state.fail = true
+  const fresh = await launched(empty, none.dialect, hearing([]), taken)
+  expect({
+    refused: Exit.isFailure(fresh) ? refusedBy(Cause.squash(fresh.cause), "launch") : "it did not fail",
+    rows: ["tenant", "chat", "pick", "launch"].map((table) => rows<{ n: number }>(empty, `select count(*) as n from everchat_${table}`)[0]!.n)
+  }).toEqual({ refused: true, rows: [0, 0, 0, 0] })
+  // Not armed: beforeWrite, then the launch's statements, in its one
+  // transaction; the launch of before closed as a crash.
+  const open = counting(true)
+  const said: Array<Said> = []
+  let launch: Array<Said> = []
+  const done = await launched(file, open.dialect, hearing(said), Effect.andThen(taken, Effect.sync(() => launch = unpragma(said))))
+  expect({ done: Exit.isSuccess(done), launch, seen: open.state.seen[0] }).toEqual({
+    done: true,
+    launch: [B, BR, ...SQLITE_LAUNCH.slice(0, 4), { text: "update everchat_launch set ended = ?, why = 'crash' where chat = ? and n = ?", inTransaction: true }, ...SQLITE_LAUNCH.slice(4)],
+    seen: { tenant: null, chat: null }
+  })
+  expect(rows(file, "select n, ended is not null as ended, why from everchat_launch order by n")).toEqual([{ n: 1, ended: 1, why: "crash" }, { n: 2, ended: 1, why: "exit" }])
+})
+
+// Chats.make and Chats.store as SQLite runs them (before ec-9qt2rc).
+const SQLITE_MAKE: ReadonlyArray<Said> = [
+  { text: "select id from everchat_tenant where id = ?", inTransaction: true },
+  { text: "insert into everchat_tenant (\"id\",\"created\") VALUES (?,?)", inTransaction: true },
+  { text: "insert into everchat_pick (\"vendor\",\"model\",\"effort\",\"speed\",\"created\") VALUES (?,?,?,?,?) on conflict do nothing", inTransaction: true },
+  { text: "\n        select id from everchat_pick\n        where vendor = ? and model = ? and effort = ? and speed = ?", inTransaction: true },
+  { text: "insert into everchat_chat (\"tenant\",\"uuid\",\"pick\",\"created\",\"updated\") VALUES (?,?,?,?,?)", inTransaction: true },
+  { text: "select id from everchat_chat where tenant = ? and uuid = ?", inTransaction: true }
+]
+const SQLITE_STORE: ReadonlyArray<Said> = [
+  { text: "select id from everchat_chat where tenant = ? and uuid = ?", inTransaction: true },
+  ...SQLITE_LAUNCH.slice(3)
+]
+
+// `Chats.make` of TENANT_A, then its store, then a make of TENANT_B
+// armed, with `dialect` (SQLite's by default): their statements, and the
+// make's exit.
+const madeWith = (file: string, counted: ReturnType<typeof counting> | null) => {
+  const said: Array<Said> = []
+  const run = Effect.scoped(Effect.gen(function*() {
+    const chats = yield* Chats
+    // The file's open (database.ts) is not the make's.
+    said.length = 0
+    const uuid = yield* chats.make(TENANT_A, PICK)
+    const make = said.slice()
+    said.length = 0
+    yield* chats.store(TENANT_A, uuid, LAUNCH)
+    const store = said.slice()
+    if (counted !== null) counted.state.fail = true
+    const armed = yield* Effect.exit(chats.make(TENANT_B, PICK))
+    if (counted !== null) counted.state.fail = false
+    return { make, store, armed: Exit.isFailure(armed) ? refusedBy(Cause.squash(armed.cause), "make") : "done" }
+  })).pipe(
+    Effect.provide(chatsLayerNoDatabase.pipe(Layer.provideMerge(Database.layer(file)))),
+    Effect.provideService(Statement.CurrentTransformer, hearing(said))
+  )
+  return Effect.runPromise(counted === null ? run : Effect.provideService(run, Dialect, counted.dialect))
+}
+
+test("the make (W6): Chats.make runs beforeWrite with no chat as the first statement of its transaction; armed, it fails with the make's StoreError and writes no tenant, pick or chat; Chats.store's launch runs it first too", async () => {
+  const file = newFile()
+  const counted = counting(true)
+  const got = await madeWith(file, counted)
+  expect(got).toEqual({ make: [B, BR, ...SQLITE_MAKE], store: [B, BR, ...SQLITE_STORE], armed: true })
+  expect(counted.state.seen.slice(0, 2)).toEqual([{ tenant: null, chat: null }, { tenant: null, chat: null }])
+  expect(rows(file, "select count(*) as n from everchat_tenant")).toEqual([{ n: 1 }])
+  expect(rows(file, "select count(*) as n from everchat_chat")).toEqual([{ n: 1 }])
+  // PICK, and the rows of the beforeWrite of the make, of the store's
+  // launch and of its end; none of the refused make.
+  expect(rows(file, "select vendor, model from everchat_pick order by id")).toEqual([
+    { vendor: "before write", model: "mark 0" },
+    { vendor: PICK.vendor, model: PICK.model },
+    { vendor: "before write", model: "mark 1" },
+    { vendor: "before write", model: "mark 2" }
+  ])
+})
+
+// One transaction (lead, ec-95bdxx, W8)
+// --------------------------------------
+
+// Breaks the first statement after `BEFORE_ROW`, once, and only after
+// `on()` is true: in the launch's transaction or the make's.
+const afterRow = (on: () => boolean = () => true) => (_text: string, said: ReadonlyArray<Said>) =>
+  on() && said[said.length - 1]?.text === BEFORE_ROW && !said.some((one) => one.text === BROKEN)
+
+// The error of a launch or a make that a broken statement failed: its own
+// StoreError, the database's error as its cause (not the refusal).
+const brokenBy = (error: unknown, op: string) =>
+  error instanceof StoreError && error.op === op && error.cause !== refusal && (error.cause as { _tag?: string } | undefined)?._tag === "SqlError"
+
+test("the launch (W8): not armed, the statement after beforeWrite's row breaks; the launch fails with its StoreError, beforeWrite's row is rolled back with it, no launch is written and a launch of before that is not ended stays not ended", async () => {
+  // A file whose first launch's end is undone: a crash.
+  const file = newFile()
+  await withStore(file, Effect.void)
+  write(file, "update everchat_launch set ended = null, why = null")
+  const picks = rows(file, "select * from everchat_pick")
+  const counted = counting(true)
+  const said: Array<Said> = []
+  const exit = await launched(file, counted.dialect, hearing(said, afterRow()), taken)
+  expect({
+    broken: Exit.isFailure(exit) ? brokenBy(Cause.squash(exit.cause), "launch") : "it did not fail",
+    said: unpragma(said),
+    seen: counted.state.seen,
+    rows: beforeRowsIn(file),
+    launches: rows(file, "select n, ended, why from everchat_launch"),
+    picks: rows(file, "select * from everchat_pick")
+  }).toEqual({
+    broken: true,
+    said: [B, BR, { text: BROKEN, inTransaction: true }],
+    seen: [{ tenant: null, chat: null }],
+    rows: 0,
+    launches: [{ n: 1, ended: null, why: null }],
+    picks
+  })
+  // A new file: no tenant, chat, pick or launch, and no row of beforeWrite.
+  const empty = newFile()
+  const fresh = await launched(empty, counting(true).dialect, hearing([], afterRow()), taken)
+  expect({
+    broken: Exit.isFailure(fresh) ? brokenBy(Cause.squash(fresh.cause), "launch") : "it did not fail",
+    rows: ["tenant", "chat", "pick", "launch"].map((table) => rows<{ n: number }>(empty, `select count(*) as n from everchat_${table}`)[0]!.n)
+  }).toEqual({ broken: true, rows: [0, 0, 0, 0] })
+})
+
+test("the make (W8): not armed, the statement after beforeWrite's row breaks; the make fails with its StoreError, beforeWrite's row is rolled back with it, and no tenant, pick or chat is written", async () => {
+  const file = newFile()
+  const counted = counting(true)
+  const said: Array<Said> = []
+  let on = false
+  let at = -1
+  const exit = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const chats = yield* Chats
+    // The file's open (database.ts) is not the make's.
+    at = said.length
+    on = true
+    return yield* Effect.exit(chats.make(TENANT_A, PICK))
+  })).pipe(
+    Effect.provide(chatsLayerNoDatabase.pipe(Layer.provideMerge(Database.layer(file)))),
+    Effect.provideService(Statement.CurrentTransformer, hearing(said, afterRow(() => on))),
+    Effect.provideService(Dialect, counted.dialect)
+  ))
+  expect({
+    broken: Exit.isFailure(exit) ? brokenBy(Cause.squash(exit.cause), "make") : "it did not fail",
+    said: said.slice(at),
+    seen: counted.state.seen,
+    rows: ["tenant", "chat", "pick"].map((table) => rows<{ n: number }>(file, `select count(*) as n from everchat_${table}`)[0]!.n)
+  }).toEqual({
+    broken: true,
+    said: [B, BR, { text: BROKEN, inTransaction: true }],
+    seen: [{ tenant: null, chat: null }],
+    rows: [0, 0, 0]
+  })
+})
+
+// One transaction, proved at the last write (lead, ec-d2eh7h, W9)
+// ---------------------------------------------------------------
+// When the transaction's last write breaks and beforeWrite's row goes with
+// it, each statement between them ran in that one transaction, wherever a
+// split would be. Each case finds that write itself, from a run with
+// nothing broken, and says which statement it is today: a write that a
+// later change puts after it fails the case, and is seen.
+
+// A write of SQL: an insert, an update or a delete.
+const WRITES = /^\s*(insert|update|delete)\b/i
+
+// The last write that ran inside a transaction after the first
+// `BEFORE_ROW`: of the statements after it, up to the first one outside a
+// transaction or the next `BEFORE`, which opens the next guarded write's
+// transaction (the launch's end, after its commit).
+const lastWrite = (said: ReadonlyArray<Said>): string | undefined => {
+  const at = said.findIndex((one) => one.text === BEFORE_ROW)
+  if (at < 0) return undefined
+  let last: string | undefined
+  for (const one of said.slice(at + 1)) {
+    if (!one.inTransaction || one.text === BEFORE) break
+    if (WRITES.test(one.text)) last = one.text
+  }
+  return last
+}
+
+// Breaks the statement `text`, once, after `BEFORE_ROW` ran.
+const atWrite = (text: string | undefined) => (seen: string, said: ReadonlyArray<Said>) =>
+  seen === text && said.some((one) => one.text === BEFORE_ROW) && !said.some((one) => one.text === BROKEN)
+
+// The rows that a launch or a make writes, but the launches: a count of
+// each table.
+const written = (file: string) => Object.fromEntries(["tenant", "chat", "pick"].map((table) => [table, rows<{ n: number }>(file, `select count(*) as n from everchat_${table}`)[0]!.n]))
+
+test("the launch (W9): not armed, the last write of the launch's transaction breaks (the insert of its launch, found from a run with nothing broken); the launch fails with its StoreError and beforeWrite's row goes with it, on a new file (no tenant, chat, pick or launch) and on one whose launch of before is not ended (it stays not ended, the picks as they were)", async () => {
+  // A new file, or one whose first launch's end is undone: a crash, whose
+  // close is a write of the transaction too.
+  const files = {
+    new: async () => newFile(),
+    crashed: async () => {
+      const file = newFile()
+      await withStore(file, Effect.void)
+      write(file, "update everchat_launch set ended = null, why = null")
+      return file
+    }
+  }
+  const got: Array<unknown> = []
+  for (const [kind, made] of Object.entries(files)) {
+    // Whole: the transaction's last write.
+    const heard: Array<Said> = []
+    const whole = await launched(await made(), counting(true).dialect, hearing(heard), taken)
+    const last = lastWrite(heard)
+    // Broken at it, on a file of the same kind.
+    const file = await made()
+    // A new file is not there before its launch.
+    const before = kind === "new" ? null : { launches: rows(file, "select n, ended, why from everchat_launch"), picks: rows(file, "select * from everchat_pick"), counts: written(file) }
+    const counted = counting(true)
+    const said: Array<Said> = []
+    const exit = await launched(file, counted.dialect, hearing(said, atWrite(last)), taken)
+    got.push({
+      kind,
+      whole: Exit.isSuccess(whole),
+      last,
+      broken: Exit.isFailure(exit) ? brokenBy(Cause.squash(exit.cause), "launch") : "it did not fail",
+      at: said.findIndex((one) => one.text === BROKEN) > said.findIndex((one) => one.text === BEFORE_ROW) && said.find((one) => one.text === BROKEN)?.inTransaction,
+      seen: counted.state.seen,
+      rows: beforeRowsIn(file),
+      after: { launches: rows(file, "select n, ended, why from everchat_launch"), picks: rows(file, "select * from everchat_pick"), counts: written(file) },
+      before
+    })
+  }
+  const insert = SQLITE_LAUNCH[SQLITE_LAUNCH.length - 1]!.text
+  expect(insert.startsWith("insert into everchat_launch ")).toBe(true)
+  const crashed = { launches: [{ n: 1, ended: null, why: null }], picks: (got[1] as { before: { picks: unknown } }).before.picks, counts: { tenant: 1, chat: 1, pick: 1 } }
+  expect(got).toEqual([
+    {
+      kind: "new",
+      whole: true,
+      last: insert,
+      broken: true,
+      at: true,
+      seen: [{ tenant: null, chat: null }],
+      rows: 0,
+      after: { launches: [], picks: [], counts: { tenant: 0, chat: 0, pick: 0 } },
+      before: null
+    },
+    { kind: "crashed", whole: true, last: insert, broken: true, at: true, seen: [{ tenant: null, chat: null }], rows: 0, after: crashed, before: crashed }
+  ])
+})
+
+test("the make (W9): not armed, the last write of the make's transaction breaks (the insert of its chat, found from a run with nothing broken); the make fails with its StoreError, beforeWrite's row goes with it, and no tenant, pick or chat is written", async () => {
+  // `Chats.make` of TENANT_A on `file`: its exit and its statements (the
+  // file's open is not the make's), `breaks` asked only for the make's.
+  const making = async (file: string, breaks?: (text: string, said: ReadonlyArray<Said>) => boolean) => {
+    const counted = counting(true)
+    const said: Array<Said> = []
+    let on = false
+    let at = -1
+    const exit = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+      const chats = yield* Chats
+      at = said.length
+      on = true
+      return yield* Effect.exit(chats.make(TENANT_A, PICK))
+    })).pipe(
+      Effect.provide(chatsLayerNoDatabase.pipe(Layer.provideMerge(Database.layer(file)))),
+      Effect.provideService(Statement.CurrentTransformer, hearing(said, breaks === undefined ? undefined : (text, heard) => on && breaks(text, heard))),
+      Effect.provideService(Dialect, counted.dialect)
+    ))
+    return { exit, said: said.slice(at), seen: counted.state.seen }
+  }
+  const whole = await making(newFile())
+  const last = lastWrite(whole.said)
+  const file = newFile()
+  const broken = await making(file, atWrite(last))
+  const insert = SQLITE_MAKE.find((one) => one.text.startsWith("insert into everchat_chat "))!.text
+  expect({
+    whole: Exit.isSuccess(whole.exit),
+    last,
+    broken: Exit.isFailure(broken.exit) ? brokenBy(Cause.squash(broken.exit.cause), "make") : "it did not fail",
+    at: broken.said.findIndex((one) => one.text === BROKEN) > broken.said.findIndex((one) => one.text === BEFORE_ROW) && broken.said.find((one) => one.text === BROKEN)?.inTransaction,
+    seen: broken.seen,
+    rows: beforeRowsIn(file),
+    counts: written(file)
+  }).toEqual({
+    whole: true,
+    last: insert,
+    broken: true,
+    at: true,
+    seen: [{ tenant: null, chat: null }],
+    rows: 0,
+    counts: { tenant: 0, chat: 0, pick: 0 }
+  })
+})
+
+test("SQLite's dialect (W6): the launch's transaction, Chats.make and Chats.store run the statements of before ec-9qt2rc, with no beforeWrite", async () => {
+  const file = newFile()
+  await withStore(file, Effect.void)
+  const said: Array<Said> = []
+  const exit = await launched(file, null, hearing(said), taken)
+  expect(Exit.isSuccess(exit)).toBe(true)
+  expect(unpragma(said)).toEqual([...SQLITE_LAUNCH, { text: END, inTransaction: false }])
+  const other = newFile()
+  expect(await madeWith(other, null)).toEqual({ make: [...SQLITE_MAKE], store: [...SQLITE_STORE], armed: "done" })
+})
+
+// Writes after a guarded write's COMMIT (lead, ec-9e7436, W1)
+// -----------------------------------------------------------
+
+// The store's transaction with `first` and a callback of `sql.afterCommit`
+// that runs `then` (armed first when `arm`): what each part ran, the
+// statements, and the beforeWrite calls. The callback's exit is kept.
+const committed = <A>(
+  dialect: ReturnType<typeof counting> | null,
+  arm: boolean,
+  first: (s: StoreService) => Effect.Effect<unknown, unknown>,
+  then: (s: StoreService, sql: SqlClient.SqlClient) => Effect.Effect<A, unknown>,
+  read: (s: StoreService) => Effect.Effect<unknown, unknown>
+) => {
+  const file = newFile()
+  return withDialect(file, dialect === null ? null : dialect.dialect, Effect.gen(function*() {
+    const store = yield* Store
+    const sql = yield* SqlClient.SqlClient
+    // The launch's beforeWrite, with no chat (ec-9qt2rc, W6), is not this
+    // helper's.
+    if (dialect !== null) dialect.state.seen.length = 0
+    const said: Array<Said> = []
+    // Where the callback's statements start in `said`.
+    let at = -1
+    let callback: Exit.Exit<A, unknown> | undefined
+    const before = yield* read(store)
+    const outer = yield* Effect.exit(listened(sql, said, store.transaction(Effect.andThen(
+      first(store),
+      sql.afterCommit(Effect.gen(function*() {
+        at = said.length
+        if (dialect !== null && arm) dialect.state.fail = true
+        callback = yield* Effect.exit(then(store, sql))
+      }))
+    ))))
+    if (dialect !== null) dialect.state.fail = false
+    return {
+      outer: Exit.isSuccess(outer),
+      callback: callback === undefined ? "never ran" : Exit.isSuccess(callback) ? "done" : Cause.squash(callback.cause),
+      first: said.slice(0, at),
+      after: said.slice(at),
+      seen: dialect === null ? 0 : dialect.state.seen.length,
+      before,
+      read: yield* read(store)
+    }
+  }))
+}
+
+// The error of a member whose beforeWrite refused: the member's own
+// StoreError, the refusal as its cause.
+const refusedBy = (error: unknown, op: string) => error instanceof StoreError && error.op === op && error.cause === refusal
+
+const goalOf = (s: StoreService) => Effect.map(s.chat, (chat) => chat.goal)
+const countOf = (s: StoreService) => s.count
+const GOAL = "update everchat_chat set goal = ?, updated = ? where tenant = ? and id = ?"
+
+test("a statement member after the COMMIT: a write in a callback of sql.afterCommit runs beforeWrite again, as the first statement of a transaction of its own; armed, it fails with the refusal, the goal is as before, and what the first transaction wrote stays", async () => {
+  const first = (s: StoreService) => s.append([{ kind: "user", text: "in the first" }])
+  const plain = await committed(counting(), false, first, (s) => s.setGoal("after the commit"), goalOf)
+  expect(plain.outer).toBe(true)
+  expect(plain.callback).toBe("done")
+  expect(plain.seen).toBe(2)
+  expect(plain.first[0]).toEqual({ text: BEFORE, inTransaction: true })
+  expect(plain.after).toEqual([{ text: BEFORE, inTransaction: true }, { text: GOAL, inTransaction: true }])
+  expect(plain.read).toBe("after the commit")
+  const armed = await committed(counting(), true, first, (s) => s.setGoal("after the commit"), (s) => Effect.all([goalOf(s), countOf(s)]))
+  expect(armed.outer).toBe(true)
+  expect(refusedBy(armed.callback, "setGoal")).toBe(true)
+  expect(armed.seen).toBe(2)
+  expect(armed.after).toEqual([{ text: BEFORE, inTransaction: true }])
+  // The goal as before; the first transaction's message stays.
+  expect(armed.before).toEqual([null, 0])
+  expect(armed.read).toEqual([null, 1])
+})
+
+test("a transaction member after the COMMIT: append in a callback of sql.afterCommit runs beforeWrite again, first in its own transaction; armed, it fails with the refusal and writes nothing, and the first transaction's message stays", async () => {
+  const first = (s: StoreService) => s.append([{ kind: "user", text: "in the first" }])
+  const then = (s: StoreService) => s.append([{ kind: "user", text: "after the commit" }])
+  const plain = await committed(counting(), false, first, then, countOf)
+  expect([plain.outer, plain.callback, plain.seen]).toEqual([true, "done", 2])
+  expect(plain.after[0]).toEqual({ text: BEFORE, inTransaction: true })
+  expect(plain.after.length).toBeGreaterThan(1)
+  expect(plain.after.every((one) => one.inTransaction)).toBe(true)
+  expect([plain.before, plain.read]).toEqual([0, 2])
+  const armed = await committed(counting(), true, first, then, countOf)
+  expect(armed.outer).toBe(true)
+  expect(refusedBy(armed.callback, "append")).toBe(true)
+  expect(armed.after).toEqual([{ text: BEFORE, inTransaction: true }])
+  expect([armed.before, armed.read]).toEqual([0, 1])
+})
+
+test("a callback that registers afterCommit again: three guarded writes, beforeWrite three times, each the first statement of its own transaction", async () => {
+  const counted = counting()
+  const got = await committed(
+    counted,
+    false,
+    (s) => s.setGoal("first"),
+    (s, sql) =>
+      s.transaction(Effect.andThen(
+        s.setDraft("second"),
+        sql.afterCommit(Effect.asVoid(Effect.exit(s.setTaken(0))))
+      )),
+    (s) => Effect.map(s.chat, (chat) => [chat.goal, chat.draft, chat.taken])
+  )
+  expect([got.outer, got.callback, got.seen]).toEqual([true, "done", 3])
+  const all = [...got.first, ...got.after]
+  expect(all).toEqual([
+    { text: BEFORE, inTransaction: true },
+    { text: GOAL, inTransaction: true },
+    { text: BEFORE, inTransaction: true },
+    { text: "update everchat_chat set draft = ?, updated = ? where tenant = ? and id = ?", inTransaction: true },
+    { text: BEFORE, inTransaction: true },
+    { text: "update everchat_chat set taken = ?, updated = ? where tenant = ? and id = ?", inTransaction: true }
+  ])
+  expect(got.read).toEqual(["first", "second", 0])
+})
+
+test("a callback that opens the client's transaction itself and writes in it: beforeWrite runs in it before each member's first statement; armed, nothing of it is written", async () => {
+  const then = (s: StoreService, sql: SqlClient.SqlClient) => sql.withTransaction(Effect.andThen(s.setGoal("in the callback's own"), s.append([{ kind: "user", text: "in the callback's own" }])))
+  const read = (s: StoreService) => Effect.all([goalOf(s), countOf(s)])
+  const plain = await committed(counting(), false, (s) => s.setDraft("first"), then, read)
+  // Each of its two writes is an outermost write of the store: each runs
+  // beforeWrite, in its savepoint, before its first statement.
+  expect([plain.outer, plain.callback, plain.seen]).toEqual([true, "done", 3])
+  expect(plain.after.slice(0, 3)).toEqual([{ text: BEFORE, inTransaction: true }, { text: GOAL, inTransaction: true }, { text: BEFORE, inTransaction: true }])
+  expect(plain.after.filter((one) => one.text === BEFORE).length).toBe(2)
+  expect(plain.after.every((one) => one.inTransaction)).toBe(true)
+  expect(plain.read).toEqual(["in the callback's own", 1])
+  const armed = await committed(counting(), true, (s) => s.setDraft("first"), then, read)
+  expect(armed.outer).toBe(true)
+  expect(refusedBy(armed.callback, "setGoal")).toBe(true)
+  expect(armed.after).toEqual([{ text: BEFORE, inTransaction: true }])
+  expect(armed.read).toEqual([null, 0])
+})
+
+test("SQLite's dialect: a setGoal in a callback of sql.afterCommit is the one update, in no transaction, as for a plain call", async () => {
+  const got = await committed(null, false, (s) => s.setDraft("first"), (s) => s.setGoal("after the commit"), goalOf)
+  expect([got.outer, got.callback]).toEqual([true, "done"])
+  expect(got.after).toEqual([{ text: GOAL, inTransaction: false }])
+  expect(got.read).toBe("after the commit")
+})
+
+test("two stores on one client: a write of chat B inside chat A's guarded transaction runs B's beforeWrite, with B's tenant and chat; A's runs once", async () => {
+  const file = newFile()
+  const counted = counting()
+  const got = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const chats = yield* Chats
+    const sql = yield* SqlClient.SqlClient
+    const a = yield* chats.store(TENANT_A, yield* chats.make(TENANT_A, PICK), LAUNCH)
+    const b = yield* chats.store(TENANT_B, yield* chats.make(TENANT_B, PICK), LAUNCH)
+    counted.state.seen.length = 0
+    const said: Array<Said> = []
+    yield* listened(sql, said, a.transaction(Effect.all([a.setGoal("A's"), b.setGoal("B's"), a.setDraft("A's")])))
+    const armed = yield* Effect.exit(a.transaction(Effect.andThen(a.setGoal("A's again"), Effect.suspend(() => {
+      counted.state.fail = true
+      return b.setGoal("B's again")
+    }))))
+    counted.state.fail = false
+    return {
+      seen: counted.state.seen.map((one) => one.chat),
+      tenants: counted.state.seen.slice(0, 2).map((one) => one.tenant),
+      marks: said.filter((one) => one.text === BEFORE).length,
+      armed: Exit.isFailure(armed) && refusedBy(Cause.squash(armed.cause), "setGoal"),
+      goals: [(yield* a.chat).goal, (yield* b.chat).goal]
+    }
+  })).pipe(
+    Effect.provide(chatsLayerNoDatabase.pipe(Layer.provideMerge(Database.layer(file)))),
+    Effect.provideService(Dialect, counted.dialect)
+  ))
+  // A's transaction, then B's write inside it; then A's again, B's again.
+  expect(got.seen).toEqual([1, 2, 1, 2])
+  expect(got.tenants).toEqual([TENANT_A.replaceAll("-", ""), TENANT_B.replaceAll("-", "")])
+  expect(got.marks).toBe(2)
+  // B's refusal fails A's transaction whole.
+  expect(got.armed).toBe(true)
+  expect(got.goals).toEqual(["A's", "B's"])
 })
