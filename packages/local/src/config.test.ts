@@ -9,6 +9,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { ConfigFault, FILE, NONE, picks, read, RULES_IO, RULES_MAX, rulesOf, type RulesIo, type Settings, type StdioServer } from "./config.ts"
+import { KEY_VARIABLE } from "./gateway.ts"
 
 const home = () => fs.mkdtempSync(path.join(os.tmpdir(), "everchat-config-"))
 
@@ -100,6 +101,17 @@ test("a fault: a file that cannot be read", async () => {
   expect(await faults(at)).toEqual(["cannot be read (BadResource)"])
 })
 
+test("a fault: a link to no file; a link to a file is read, and no file is the defaults", async () => {
+  const at = home()
+  fs.symlinkSync(path.join(at, "gone.json"), path.join(at, FILE))
+  expect(await faults(at)).toEqual(["a link to no file"])
+  // The same link, once its target exists, is followed.
+  fs.writeFileSync(path.join(at, "gone.json"), JSON.stringify({ model: "gpt-linked" }))
+  expect((await settings(at)).model).toBe("gpt-linked")
+  // A home that does not exist has no file.
+  expect(await settings(path.join(home(), "none"))).toEqual(NONE)
+})
+
 test("a fault: an unknown field at the top, and inside a server", async () => {
   expect(await faults(write({ model: "gpt", nick: "me" }))).toEqual(["nick: Unknown field"])
   expect(await faults(write({ servers: { git: { command: "git-server", timeout: 5 } } }))).toEqual(["servers.git.timeout: Unknown field"])
@@ -180,6 +192,72 @@ test("a fault: an unset variable, with the field and the variable's name; a vari
   ])
   const got = await settings(at, { TOKEN: "", OTHER: "o", HOST: "h.example" })
   expect(got.servers).toEqual([stdio("git", { command: "c", args: ["--token=", "o"] }), { kind: "http", name: "web", approval: "auto", tools: {}, url: "https://h.example/mcp", headers: {} }])
+})
+
+test("a fault: a variable that the environment only inherits, such as ${toString}, is not set", async () => {
+  const at = write({ servers: { git: { command: "c", args: ["${toString}", "${INHERITED}"] } } })
+  // A plain object inherits `toString`; this one inherits `INHERITED` too.
+  const env: Record<string, string | undefined> = Object.create({ INHERITED: "from-the-prototype" })
+  expect("toString" in env && "INHERITED" in env).toBe(true)
+  expect(await faults(at, env)).toEqual([
+    "servers.git.args[0]: the variable toString is not set",
+    "servers.git.args[1]: the variable INHERITED is not set"
+  ])
+  expect(await faults(at, {})).toEqual([
+    "servers.git.args[0]: the variable toString is not set",
+    "servers.git.args[1]: the variable INHERITED is not set"
+  ])
+})
+
+test("a fault: the gateway's key as a variable, set and unset, in each of the four places; never replaced", async () => {
+  const KEY = "${" + KEY_VARIABLE + "}"
+  const WHY = `the variable ${KEY_VARIABLE} is the key of the author's inference gateway, which is not given to a server`
+  const MARKER = "marker-gateway-key-4c2e"
+  const at = write({
+    servers: {
+      git: { command: "c", args: ["--token=" + KEY, KEY + KEY], env: { TOKEN: KEY, OTHER: "${A}" } },
+      web: { url: "https://h.example/" + KEY, headers: { Authorization: "Bearer " + KEY } }
+    }
+  })
+  const expected = [
+    "servers.git.args[0]: " + WHY,
+    "servers.git.args[1]: " + WHY,
+    "servers.git.env.TOKEN: " + WHY,
+    "servers.web.url: " + WHY,
+    "servers.web.headers.Authorization: " + WHY
+  ]
+  for (const env of [{ A: "1" }, { A: "1", [KEY_VARIABLE]: MARKER }, { A: "1", [KEY_VARIABLE]: "" }]) {
+    expect(await faults(at, env)).toEqual(expected)
+    const exit = await settle(at, env)
+    const said = Exit.isFailure(exit) ? JSON.stringify(exit.cause.reasons.map((reason) => (reason._tag === "Fail" ? { ...reason.error, message: (reason.error as Error).message } : reason))) : ""
+    expect(said).toContain(KEY_VARIABLE)
+    expect(said).not.toContain(MARKER)
+  }
+  // Each place alone, with the key set: a fault at that place only.
+  const one = [
+    [{ git: { command: "c", args: [KEY] } }, "servers.git.args[0]"],
+    [{ git: { command: "c", env: { K: KEY } } }, "servers.git.env.K"],
+    [{ web: { url: KEY } }, "servers.web.url"],
+    [{ web: { url: "https://h.example", headers: { K: KEY } } }, "servers.web.headers.K"]
+  ] as const
+  for (const [servers, at] of one) {
+    expect(await faults(write({ servers }), { [KEY_VARIABLE]: MARKER })).toEqual([at + ": " + WHY])
+  }
+  // Beside an unset variable in one text: both faults, the key's not as unset.
+  expect(await faults(write({ servers: { git: { command: "c", args: ["${UNSET}" + KEY] } } }), { [KEY_VARIABLE]: MARKER })).toEqual([
+    "servers.git.args[0]: the variable UNSET is not set",
+    "servers.git.args[0]: " + WHY
+  ])
+  // Another gateway variable is an ordinary one.
+  expect((await settings(write({ servers: { git: { command: "c", args: ["${EVERCHAT_GATEWAY_URL}"] } } }), { EVERCHAT_GATEWAY_URL: "u" })).servers[0]).toMatchObject({ args: ["u"] })
+})
+
+test("a fault: an empty command, at its path", async () => {
+  expect(await faults(write({ servers: { git: { command: "" } } }))).toEqual(["servers.git.command: Expected a command that is not empty"])
+  expect(await faults(write({ servers: { git: { command: "", args: [1] }, ok: { command: "c" } } }))).toEqual([
+    "servers.git.command: Expected a command that is not empty",
+    "servers.git.args[0]: Expected string"
+  ])
 })
 
 test("${VAR} is replaced in each of the four places, one time, and no other form is", async () => {

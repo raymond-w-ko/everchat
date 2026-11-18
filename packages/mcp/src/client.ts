@@ -68,7 +68,9 @@
 //   Its reason is a sentence of this file, with the server's and the tool's
 //   names: never a text of the transport (an address, a header, a variable).
 //
-// The connections live in the caller's scope, and close with it. A server
+// The connections live in the caller's scope, and close with it, all at
+// one time: the scope's end runs every close side by side and waits for
+// each, so it takes as long as the slowest close, not their sum. A server
 // that failed starts its close at once, and the load does not wait for it:
 // the scope's end does, under the same bound.
 //
@@ -99,15 +101,19 @@
 //   one refuses the call, and the program gets that refusal.
 // - An error is a `FunctionError` with the server's or the SDK's text: a
 //   result with `isError`, a refusal of the protocol (an unknown tool), the
-//   time limit, a connection that is gone (it names the server). After a
-//   time limit the connection serves the next call. Nothing connects again:
-//   the next load does. The text from outside in an error (the server's
-//   text, the SDK's, the faults of a check) is bounded too, by `quoted`
-//   (see "The cap").
+//   time limit, a connection that is gone (it names the server), a cause
+//   that has no text (a value with a null prototype: the ordinary sentence
+//   of a failed call). After a time limit the connection serves the next
+//   call. Nothing connects again: the next load does. The text from
+//   outside in an error (the server's text, the SDK's, the faults of a
+//   check) is bounded too, by `quoted` (see "The cap").
 // - The result. With an `outputSchema`, its `structuredContent` must be
 //   there (the SDK says so first) and pass EverChat's check against the
 //   form of that schema, and the program gets that object. A check whose
-//   work would pass `work` is not run: the call fails.
+//   work would pass `work` is not run: the call fails. An object nested so
+//   deep that the check or its JSON text overflows the stack (a
+//   `RangeError`) is the server's failure: a `FunctionError` that names the
+//   server and says that its result is nested too deep.
 //   With none, the text parts of `content`, joined by a line end; a part of
 //   another kind (an image, a sound, a resource) is one line that names its
 //   kind and its type, without its data.
@@ -389,8 +395,11 @@ const fault = (definition: unknown): string | Forms => {
 //   that holds for them (`format` is no check of `pi-schema` here either).
 //   Left out below `not`, `if` or `oneOf`, or in a `contains` that has a
 //   `maxContains`, they could make the form refuse a value that the schema
-//   takes: there they refuse the tool. `patternProperties` refuses the
-//   tool, since a pattern decides there which schema a property takes. A
+//   takes: there they refuse the tool. So do the other left-out keywords
+//   that assert there (`GUARDED`): a draft-7 list of `items`,
+//   `additionalItems`, `dependencies`, and a `required` with an entry that
+//   is no text. `patternProperties` refuses the tool, since a pattern
+//   decides there which schema a property takes. A
 //   kept keyword whose value has not its kind is left out; a schema's place
 //   that holds no object or boolean refuses the tool, as the library would.
 //
@@ -480,6 +489,11 @@ const KEPT: ReadonlyArray<readonly [string, Kind]> = [
 // The keywords that are left out though a schema asserts them, and the
 // places where leaving one out could refuse a value that the schema takes.
 const UNCHECKED = ["pattern", "uniqueItems"] as const
+// The keywords that the form leaves out and that refuse the tool below a
+// guard when they assert: the two above, and two of draft 7 (S5, ec-egsmp).
+// A list of `items` and a `required` with an entry that is no text are
+// refused below a guard where the form leaves them out.
+const GUARDED = [...UNCHECKED, "additionalItems", "dependencies"] as const
 const REFUSED = ["$dynamicRef", "$recursiveRef"] as const
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
@@ -599,8 +613,17 @@ const dataOf = (walk: Walk, value: unknown): Json => {
   throw new Refusal("compile")
 }
 
-// Whether a keyword that the form leaves out asserts anything.
-const asserts = (keyword: string, value: unknown) => (keyword === "pattern" ? typeof value === "string" : value === true)
+// Whether a keyword that the form leaves out asserts anything. Of an
+// `additionalItems`, anything but `true`; of `dependencies`, an object (its
+// keys are not read: no count of them is due here, H10).
+const asserts = (keyword: string, value: unknown) =>
+  keyword === "pattern"
+    ? typeof value === "string"
+    : keyword === "additionalItems"
+    ? value !== true
+    : keyword === "dependencies"
+    ? isObject(value)
+    : value === true
 
 // The pairs of one schema of the form (G4): the library's compile looks a
 // name up in a list by a scan at three places, so their products, summed
@@ -680,7 +703,7 @@ const schemaOf = (walk: Walk, node: unknown, place: Place, source?: Record<strin
   }
   if (Object.hasOwn(node, "patternProperties")) throw new Refusal("patternProperties")
   if (place.guard !== undefined) {
-    for (const keyword of UNCHECKED) {
+    for (const keyword of GUARDED) {
       if (Object.hasOwn(node, keyword) && asserts(keyword, node[keyword])) throw new Refusal("below", keyword, place.guard)
     }
   }
@@ -721,8 +744,13 @@ const schemaOf = (walk: Walk, node: unknown, place: Place, source?: Record<strin
         both(keyword, dataOf(walk, value))
         break
       case "texts":
-        // Each entry counted as it is read (H13).
-        if (!Array.isArray(value) || !texts(walk, value)) continue
+        // Each entry counted as it is read (H13). Below a guard, a list with
+        // an entry that is no text is not left out: it refuses the tool.
+        if (!Array.isArray(value)) continue
+        if (!texts(walk, value)) {
+          if (place.guard !== undefined) throw new Refusal("below", keyword, place.guard)
+          continue
+        }
         count(walk)
         both(keyword, [...value])
         break
@@ -754,8 +782,12 @@ const schemaOf = (walk: Walk, node: unknown, place: Place, source?: Record<strin
         both(keyword, value)
         break
       case "schema": {
-        // A list of `items` is the old form of `prefixItems`: left out.
-        if (keyword === "items" && Array.isArray(value)) continue
+        // A list of `items` is the old form of `prefixItems`: left out, and
+        // below a guard it refuses the tool.
+        if (keyword === "items" && Array.isArray(value)) {
+          if (place.guard !== undefined) throw new Refusal("below", keyword, place.guard)
+          continue
+        }
         const guard = keyword === "not" || keyword === "if" ? keyword : keyword === "contains" && Object.hasOwn(node, "maxContains") ? "contains" : undefined
         const one = schemaOf(walk, value, below(guard))
         put(form, keyword, one.form)
@@ -948,10 +980,7 @@ type Verdict =
 const verdict = (checked: Checked, value: unknown, limits: Pick<Limits, "max" | "hard" | "work">): Verdict => {
   const weight = weigh(checked, value, limits.work)
   if (weight.over) {
-    return {
-      kind: "unchecked",
-      why: `its work (${checked.parts} parts of the form × ${weight.parts} of the value + ${checked.texts} text checks × ${weight.units} units of text) is ${weight.work} at least, past the bound of ${limits.work}`
-    }
+    return { kind: "unchecked", why: pastBound(checked, weight, limits.work) }
   }
   if (checked.validator.check(value)) return { kind: "fits" }
   // The library's list copies the form's data and walks the value's texts
@@ -970,10 +999,14 @@ const verdict = (checked: Checked, value: unknown, limits: Pick<Limits, "max" | 
 // --------
 
 // A tool's name as a refusal and a log show it: a name from outside may be
-// long.
+// long, and may hold control characters. It is cut to its first 128 units,
+// and then each control character (C0, DEL, C1, U+2028 and U+2029) is
+// written as `\u` and four hex digits, so it is one line of printable text.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g
 const shown = (name: unknown): string | undefined => {
   if (typeof name !== "string") return undefined
-  return name.length > 128 ? name.slice(0, 128) + "…" : name
+  const cut = name.length > 128 ? name.slice(0, 128) + "…" : name
+  return cut.replace(CONTROL, (one) => "\\u" + one.charCodeAt(0).toString(16).padStart(4, "0"))
 }
 
 // A tool's setting: its own, else its server's, else `auto`. A value that is
@@ -1049,12 +1082,13 @@ const TAKES_ALL: jsonSchemaValidator = {
 
 // One server's load: its connection, every page of its list, and the
 // checks of its definitions, under one limit (G5). Its client closes when
-// the caller's scope does. When its load fails, its close starts at once
-// and the load does not wait for it: the refusal is given as soon as the
-// failure is known (a program on stdio may take the SDK's steps, up to 4 s,
-// to end). The scope's end waits for that same close, under the same bound;
-// it never begins a second one.
-const listed = (server: Server, limit: number, most: number, limits: Limits): Effect.Effect<Listed, never, Scope.Scope> =>
+// the caller's scope does: `register` hands its close to the load's one
+// end, which runs the closes of all the servers at one time. When its load
+// fails, its close starts at once and the load does not wait for it: the
+// refusal is given as soon as the failure is known (a program on stdio may
+// take the SDK's steps, up to 4 s, to end). The scope's end waits for that
+// same close, under the same bound; it never begins a second one.
+const listed = (server: Server, limit: number, most: number, limits: Limits, register: (close: Effect.Effect<void>) => void): Effect.Effect<Listed> =>
   Effect.gen(function*() {
     let transport: Transport
     try {
@@ -1086,7 +1120,7 @@ const listed = (server: Server, limit: number, most: number, limits: Limits): Ef
       Effect.timeoutOption(limit),
       Effect.asVoid
     )
-    yield* Effect.addFinalizer(() => close)
+    yield* Effect.sync(() => register(close))
     const got = yield* Effect.tryPromise({
       try: (signal) => listOf(client, transport, limit, signal),
       catch: (cause) => (cause instanceof Failed ? cause : new Failed("It failed."))
@@ -1161,11 +1195,22 @@ const line = (part: unknown): string => {
 const textOf = (result: CallToolResult): string =>
   (Array.isArray(result.content) ? result.content : []).map(line).join("\n")
 
+// The text of a cause. One that has none (a value with a null prototype, or
+// whose conversion throws) is said so, and the call fails with the ordinary
+// sentence: never a defect.
+const said = (cause: unknown): string => {
+  try {
+    return cause instanceof Error ? String(cause.message) : String(cause)
+  } catch {
+    return "an error with no text"
+  }
+}
+
 // Why a call failed, as a sentence with the SDK's or the server's text.
 // `gone`: the client has no transport now (the SDK's own error for a call
 // on a closed connection is a plain `Error`).
 const failure = (name: string, server: string, limits: Limits, cause: unknown, gone: boolean): FunctionError => {
-  const text = quoted(cause instanceof Error ? String(cause.message) : String(cause), limits)
+  const text = quoted(said(cause), limits)
   if (gone) return new FunctionError({ message: `${name}: the server "${server}" is not connected (${text}).` })
   if (cause instanceof SdkError) {
     if (cause.code === SdkErrorCode.RequestTimeout) return new FunctionError({ message: `${name}: no answer in ${limits.call} ms (${text}).` })
@@ -1182,9 +1227,11 @@ const failure = (name: string, server: string, limits: Limits, cause: unknown, g
 }
 
 // What a program gets of a result: the checked object or the text; past
-// `max` characters, a `Shortened` (the head comment, "The cap").
+// `max` characters, a `Shortened` (the head comment, "The cap"). `server`:
+// the server's name, which the failure of a result nested too deep names.
 export const resultOf = (
   name: string,
+  server: string,
   output: Checked | undefined,
   result: CallToolResult,
   call: number,
@@ -1200,14 +1247,29 @@ export const resultOf = (
       if (result.structuredContent === undefined) {
         return yield* new FunctionError({ message: `${name}: its result has no structured content, and its definition has an output schema.` })
       }
-      const got = verdict(output, result.structuredContent, limits)
+      // A `RangeError` of the check or of the JSON text is the stack's end: an
+      // object nested too deep, the server's failure. No other throw is
+      // caught here.
+      const deep = new FunctionError({ message: `${name}: the server "${server}" gave a result nested too deep for EverChat's check.` })
+      let got: Verdict
+      try {
+        got = verdict(output, result.structuredContent, limits)
+      } catch (cause) {
+        if (cause instanceof RangeError) return yield* deep
+        throw cause
+      }
       if (got.kind === "unchecked") return yield* new FunctionError({ message: `${name}: its result is not checked: ${got.why}.` })
       if (got.kind === "unlisted") {
         return yield* new FunctionError({ message: `${name}: its result does not fit its output schema; the list of its faults was not made, since ${got.why}.` })
       }
       if (got.kind === "faults") return yield* new FunctionError({ message: `${name}: its result does not fit its output schema: ${got.faults}.` })
       value = result.structuredContent
-      text = JSON.stringify(value)
+      try {
+        text = JSON.stringify(value)
+      } catch (cause) {
+        if (cause instanceof RangeError) return yield* deep
+        throw cause
+      }
     } else {
       text = textOf(result)
       value = text
@@ -1255,7 +1317,7 @@ const runOf = (
           }),
         catch: (cause) => failure(name, server, limits, cause, client.transport === undefined)
       })
-      return yield* resultOf(name, forms.output, result, caller.call, limits)
+      return yield* resultOf(name, server, forms.output, result, caller.call, limits)
     })
 }
 
@@ -1426,7 +1488,12 @@ export const load = (servers: ReadonlyArray<Server>, options: Options): Effect.E
       hard: options.hard ?? DEFAULTS.hard,
       work: options.work ?? DEFAULTS.work
     }
-    const lists = yield* Effect.forEach(servers, (server) => listed(server, limit, most, limits), { concurrency: "unbounded" })
+    // One end for every connection, put before the first can open: the
+    // closes run at one time, so the scope's end takes as long as the
+    // slowest close, not their sum; each still ends before the scope does.
+    const closes: Array<Effect.Effect<void>> = []
+    yield* Effect.addFinalizer(() => Effect.forEach(closes, (close) => close, { concurrency: "unbounded", discard: true }))
+    const lists = yield* Effect.forEach(servers, (server) => listed(server, limit, most, limits, (close) => void closes.push(close)), { concurrency: "unbounded" })
     const refused: Array<Refused> = []
     const candidates: Array<Candidate> = []
     servers.forEach((server, i) => {

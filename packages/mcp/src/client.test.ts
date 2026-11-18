@@ -11,11 +11,12 @@ import { type Declaration, FunctionError, HOSTED, type JsonSchema, refusals, Sho
 import { given } from "@everchat/core/limit"
 import { renderDeclarations } from "@everchat/core/declarations"
 import { globalOf } from "@everchat/core/head"
-import { InMemoryTransport, type Transport } from "@modelcontextprotocol/client"
+import { InMemoryTransport, SdkError, SdkErrorCode, type Transport } from "@modelcontextprotocol/client"
 import { McpServer, ProtocolError, ProtocolErrorCode, Server as Low } from "@modelcontextprotocol/server"
 import { serveStdio } from "@modelcontextprotocol/server/stdio"
 import { Effect, Exit, Fiber, Logger, Scope } from "effect"
-import { type Checked, checkOf, DEFAULTS, DEPTH, FORM, FORM_SIZE, formOf, HEAD_RENDER, load, type Loaded, MARK, type Options, type Outside, PAGES, PAIRS, RENDER, resultOf, type Server, sizeOf, TAG, VERSION, WORK } from "./client.ts"
+import { TestClock } from "effect/testing"
+import { type Checked, checkOf, DEFAULTS, DEPTH, FORM, FORM_SIZE, type Form, formOf, HEAD_RENDER, load, type Loaded, MARK, type Options, type Outside, PAGES, PAIRS, RENDER, resultOf, type Server, sizeOf, TAG, VERSION, WORK } from "./client.ts"
 
 // Fakes
 // -----
@@ -306,13 +307,14 @@ test("the scope's end closes each connection, and a failed one closes at once", 
   expect(closed()).toEqual([true, true, true])
 })
 
-// A server whose load fails (its list does not fit the protocol), and
-// whose client's side holds its first close open until the test ends it
-// (`end`) or fails it (`fail`). `closes` counts the calls of that side's
-// close: the client's step of the one close calls it first; after that
-// step ends, the transport's own step calls it again.
-const held = (name: string) => {
-  const fake = served([[tool("z", { inputSchema: { type: "string" } })]])
+// A server whose load fails (its list does not fit the protocol), or with
+// `definitions` one that loads them, and whose client's side holds its
+// first close open until the test ends it (`end`) or fails it (`fail`).
+// `closes` counts the calls of that side's close: the client's step of the
+// one close calls it first; after that step ends, the transport's own step
+// calls it again.
+const held = (name: string, definitions: ReadonlyArray<Definition> = [tool("z", { inputSchema: { type: "string" } })]) => {
+  const fake = served([definitions])
   const gate = Promise.withResolvers<void>()
   let closes = 0
   let first = true
@@ -431,6 +433,30 @@ test("a close that rejects after the load returned: the load's result is the sam
   }
 })
 
+test("ec-egsmp 3: the scope's end runs the closes of two loaded servers at one time: the second starts before the first has ended, and the end returns when both have", async () => {
+  const one = held("one", [tool("x")])
+  const two = held("two", [tool("y")])
+  try {
+    const { got, end, returned } = await opened([one.server, two.server])
+    expect(names(got)).toEqual(["one.x", "two.y"])
+    // No close before the scope's end.
+    expect([one.closes(), two.closes()]).toEqual([0, 0])
+    const ending = end()
+    await turns()
+    // Both closes have started, and neither has ended.
+    expect([one.closes(), two.closes(), one.ended(), two.ended(), returned()]).toEqual([1, 1, false, false, false])
+    one.end()
+    await turns()
+    expect([one.ended(), two.ended(), returned()]).toEqual([true, false, false])
+    two.end()
+    expect(Exit.isSuccess(await ending)).toBe(true)
+    expect([returned(), one.ended(), two.ended()]).toEqual([true, true, true])
+  } finally {
+    one.end()
+    two.end()
+  }
+})
+
 // The settings
 // ------------
 
@@ -537,6 +563,24 @@ test("each refusal is a warning of the log with the source mcp, and no text of t
     "A function from outside is refused: server \"s\", tool \"long\": Its description is not a text of at most 1024 characters."
   ])
   expect(JSON.stringify(got.lines)).not.toContain("/secret/path")
+})
+
+test("ec-egsmp 2: a refused tool's name shows its control characters (C0, DEL, C1, U+2028, U+2029) as \\u and four hex digits, in the refusal and the log; a long name is cut first", async () => {
+  const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
+  const odd = "a\u001b[31m\r\n\u0000\t\u007f\u0080\u0085\u009f\u2028\u2029\\b"
+  const long = "x".repeat(127) + "\n" + "y".repeat(10)
+  const got = await loaded([server("s", served([[tool(odd), tool(long), GOOD]]))])
+  expect(names(got)).toEqual(["s.good"])
+  const WHY = "Its name does not fit ^[A-Za-z0-9_.-]{1,128}$."
+  const shownOdd = "a\\u001b[31m\\u000d\\u000a\\u0000\\u0009\\u007f\\u0080\\u0085\\u009f\\u2028\\u2029\\b"
+  const shownLong = "x".repeat(127) + "\\u000a…"
+  expect(got.refused).toEqual([{ server: "s", tool: shownOdd, reason: WHY }, { server: "s", tool: shownLong, reason: WHY }])
+  const warnings = got.lines.filter((line) => line.level === "WARN").map((line) => String(line.message))
+  expect(warnings).toEqual([
+    `A function from outside is refused: server "s", tool "${shownOdd}": ${WHY}`,
+    `A function from outside is refused: server "s", tool "${shownLong}": ${WHY}`
+  ])
+  for (const one of [...got.refused.map((refusal) => refusal.tool!), ...warnings]) expect(CONTROL.test(one)).toBe(false)
 })
 
 // The call
@@ -665,7 +709,7 @@ test("a structured result that does not fit its schema is an error: through the 
 test("a structured result that does not fit its schema is an error: on EverChat's check alone", async () => {
   const output = checked(SUM, "output")
   const check = (structuredContent: unknown) =>
-    Effect.runPromise(Effect.result(resultOf("s.add", output, { content: [], structuredContent } as never, 7, { max: 1000, hard: 4000, work: WORK })))
+    Effect.runPromise(Effect.result(resultOf("s.add", "s", output, { content: [], structuredContent } as never, 7, { max: 1000, hard: 4000, work: WORK })))
   const wrong = await check({ sum: "five" })
   expect(wrong._tag === "Failure" && wrong.failure.message).toBe("s.add: its result does not fit its output schema: /sum: expected number, got string.")
   const missing = await check(undefined)
@@ -723,6 +767,70 @@ test("a connection that is gone: the error names the server", async () => {
     await drop()
     const got = await run(entries.echo!, [{ a: 1 }])
     expect(got.error).toStartWith('s.echo: the server "s" is not connected (')
+  })
+})
+
+// A value nested `n` deep, `{ a: { a: ... {} } }`, made with no recursion.
+const nested = (n: number): Record<string, unknown> => {
+  let value: Record<string, unknown> = {}
+  for (let i = 0; i < n; i++) value = { a: value }
+  return value
+}
+
+test("ec-egsmp 1: a structured result nested too deep is a FunctionError that names the server, through the client and on resultOf alone; a throw that is no RangeError stays a defect", async () => {
+  const DEEP = 's.deep: the server "s" gave a result nested too deep for EverChat\'s check.'
+  const deep = nested(1_000_000)
+  const { fake } = answering([tool("deep", { outputSchema: { type: "object" } }), tool("fine", { outputSchema: { type: "object" } })], async (name) =>
+    ({ content: [], structuredContent: name === "deep" ? deep : nested(3) }))
+  await withEntries(fake, {}, async (entries) => {
+    expect(await run(entries.deep!, [{ a: 1 }])).toEqual({ error: DEEP })
+    expect(await run(entries.fine!, [{ a: 1 }])).toEqual({ value: nested(3) })
+  })
+  const limits = { max: 1000, hard: 4000, work: WORK }
+  const output = checked({ type: "object" }, "output")
+  const result = (structuredContent: unknown, form: Checked = output) =>
+    Effect.runPromiseExit(resultOf("s.deep", "s", form, { content: [], structuredContent } as never, 7, limits))
+  // The JSON text overflows.
+  const text = await result(deep)
+  expect(Exit.isFailure(text) && text.cause.reasons.map((reason) => (reason._tag === "Fail" ? (reason.error as FunctionError).message : reason._tag))).toEqual([DEEP])
+  // The check overflows.
+  // The form's check, with its `check` throwing `error`.
+  const thrown = (error: Error): Checked => {
+    const check = (_value: unknown): _value is unknown => {
+      throw error
+    }
+    return { ...output, validator: Object.assign(Object.create(output.validator) as Checked["validator"], { check }) }
+  }
+  const check = await result({ a: 1 }, thrown(new RangeError("Maximum call stack size exceeded.")))
+  expect(Exit.isFailure(check) && check.cause.reasons.map((reason) => (reason._tag === "Fail" ? (reason.error as FunctionError).message : reason._tag))).toEqual([DEEP])
+  // Another throw of the check is not caught: a defect, as before.
+  const other = await result({ a: 1 }, thrown(new TypeError("not a stack's end")))
+  expect(Exit.isFailure(other) && other.cause.reasons.map((reason) => reason._tag)).toEqual(["Die"])
+})
+
+test("ec-egsmp 4: a call whose cause has a null prototype gives the ordinary sentence of a failed call, not a defect, and the next call answers", async () => {
+  const { fake } = answering([tool("echo")], async () => text("here"))
+  let poison = false
+  const wrapped: Fake = {
+    transport: () => {
+      const side = fake.transport()
+      const send = side.send.bind(side)
+      side.send = async (message, options) => {
+        if (poison && (message as { method?: unknown }).method === "tools/call") {
+          poison = false
+          throw Object.create(null)
+        }
+        return send(message, options)
+      }
+      return side
+    },
+    closes: () => 0
+  }
+  await withEntries(wrapped, {}, async (entries) => {
+    expect(await run(entries.echo!, [{ a: 1 }])).toEqual({ value: "here" })
+    poison = true
+    expect(await run(entries.echo!, [{ a: 1 }])).toEqual({ error: "s.echo: the call failed (an error with no text)." })
+    expect(await run(entries.echo!, [{ a: 1 }])).toEqual({ value: "here" })
   })
 })
 
@@ -864,7 +972,7 @@ const itemFaults = (path: string, n: number) =>
 test("a result with more wrong items than fit: the message is bounded, and gives the count of the faults", async () => {
   const output = checked({ type: "object", properties: { items: { type: "array", items: { type: "number" } } } }, "output")
   const check = (structuredContent: unknown, limits: { max: number; hard: number }) =>
-    Effect.runPromise(Effect.result(resultOf("s.add", output, { content: [], structuredContent } as never, 7, { ...limits, work: WORK })))
+    Effect.runPromise(Effect.result(resultOf("s.add", "s", output, { content: [], structuredContent } as never, 7, { ...limits, work: WORK })))
   const many = { items: Array.from({ length: 100_000 }, () => "x") }
   const cut = await check(many, { max: 200, hard: 4000 })
   expect(cut._tag === "Failure" && cut.failure.message).toBe(
@@ -1077,6 +1185,38 @@ test("pattern or uniqueItems below not, if, oneOf or a contains with maxContains
   expect(reasons(got, "contains")).toEqual([BELOW("input", "pattern", "contains")])
   expect(reasons(got, "deep")).toEqual([BELOW("input", "pattern", "not")])
   expect(reasons(got, "patterned")).toEqual([PATTERN_PROPERTIES("input")])
+})
+
+test("ec-egsmp 5: below not, if or oneOf, a list of items, additionalItems, dependencies and a required with an entry that is no text refuse the tool; elsewhere, or when they assert nothing, they are left out and the tool loads", async () => {
+  const got = await loaded([server("s", served([[
+    tool("items", { inputSchema: { type: "object", properties: { a: { not: { type: "array", items: [{ type: "number" }] } } } } }),
+    tool("additional", { inputSchema: { type: "object", if: { properties: { a: { additionalItems: false } } }, then: { required: ["b"] } } }),
+    tool("dependencies", { inputSchema: { type: "object", properties: { a: { oneOf: [{ type: "number" }, { type: "object", dependencies: { x: ["y"] } }] } } } }),
+    tool("required", { inputSchema: { type: "object", properties: { a: { not: { required: ["x", 5] } } } } }),
+    tool("deep", { inputSchema: { type: "object", properties: { a: { not: { properties: { b: { allOf: [{ $ref: "#/$defs/d" }] } } } } }, $defs: { d: { dependencies: {} } } } }),
+    tool("fine", {
+      inputSchema: {
+        type: "object",
+        properties: {
+          a: { type: "array", items: [{ type: "number" }], additionalItems: false },
+          b: { dependencies: { x: ["y"] }, required: ["x", 5] },
+          c: { not: { type: "string", additionalItems: true, dependencies: 5, required: "x" } }
+        }
+      }
+    }),
+    GOOD
+  ]]))])
+  expect(names(got)).toEqual(["s.fine", "s.good"])
+  expect(reasons(got, "items")).toEqual([BELOW("input", "items", "not")])
+  expect(reasons(got, "additional")).toEqual([BELOW("input", "additionalItems", "if")])
+  expect(reasons(got, "dependencies")).toEqual([BELOW("input", "dependencies", "oneOf")])
+  expect(reasons(got, "required")).toEqual([BELOW("input", "required", "not")])
+  expect(reasons(got, "deep")).toEqual([BELOW("input", "dependencies", "not")])
+  // Out of a guard each is left out, as before.
+  expect(got.entries.find((one) => one.tool === "fine")!.form.input).toEqual({
+    type: "object",
+    properties: { a: { type: "array" }, b: {}, c: { not: { type: "string" } } }
+  })
 })
 
 test("a place of a schema that holds no schema does not compile; a kept keyword whose value has not its kind is left out", async () => {
@@ -1358,7 +1498,8 @@ test("finding 4: on a transport that is not stdio, a tool named with an escape a
   const { said } = await consoleDuring(() =>
     withEntries(fake, {}, async (entries, got) => {
       expect(names(got)).toEqual(["s.evil2", "s.good"])
-      expect(got.refused.map((one) => one.tool)).toEqual([evil])
+      // The refusal shows the name's escapes as text (ec-egsmp, point 2).
+      expect(got.refused.map((one) => one.tool)).toEqual(["evil\\u001b[31mRED\\u001b[0m"])
       expect(await run(entries.evil2!, [{}])).toEqual({ value: "ok" })
     })
   )
@@ -1622,14 +1763,41 @@ test("H9: functions whose weights sum to HEAD_RENDER are all kept; one more afte
   }
 })
 
-test("H11: a default that is a list of 1,000,000 zeros under $defs, behind 1,000 properties that refer to it: the tool loads with no @default tag, and the server's other tool loads, under a load of 2,000 ms", async () => {
-  const T = { anyOf: [{ type: "number", default: Array.from({ length: 1_000_000 }, () => 0) }] }
+// A list that counts the reads of its entries (each index read), and
+// throws at a read past `most`: a walk that would read the whole list ends
+// at once (the throw refuses its tool), so a case fails by its assertions,
+// not by a long step. The in-memory transport gives a server's values to the
+// client by reference below a definition's own fields, so a case can see
+// what the walk reads, with no clock (ec-kyl76, the lead's ruling on
+// ec-6n1co).
+const counting = <T>(entries: Array<T>, most: number) => {
+  let reads = 0
+  const list = new Proxy(entries, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)) {
+        reads++
+        if (reads > most) throw new Error("a read past the bound of the case")
+      }
+      return Reflect.get(target, key, receiver)
+    }
+  })
+  return { list, reads: () => reads }
+}
+
+test("H11: a default that is a list of 1,000,000 zeros under $defs, behind 1,000 properties that refer to it: the tool loads with no @default tag, and the server's other tool loads, under a load of 2,000 ms; the walk reads none of its entries", async () => {
+  const zeros = counting(Array.from({ length: 1_000_000 }, () => 0), 0)
+  const T = { anyOf: [{ type: "number", default: zeros.list }] }
   const wide = { type: "object", $defs: { T }, properties: Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => ["p" + i, { $ref: "#/$defs/T" }])) }
   const got = await loaded([server("s", served([[tool("wide", { inputSchema: wide }), GOOD]]))], { load: 2_000 })
   expect(got.refused).toEqual([])
   expect(names(got)).toEqual(["s.good", "s.wide"])
   expect(keysOf(got.declarations[1]!.inputSchema)).not.toContain("default")
   expect(declared(got.declarations[1]!)).not.toContain("@default")
+  // The guard of the cost, by a count and not by the clock: `wide` sorts
+  // last, so no time limit could see a long step of it (ec-6n1co). H11:
+  // a list is left out with no read of what is in it, at each of the 1,000
+  // expansions.
+  expect(zeros.reads()).toBe(0)
 })
 
 test("H5b: a default that is a list or an object gives no tag; a text, a number, true and false give their tags as before", async () => {
@@ -1688,11 +1856,15 @@ test("H12: a type list of FORM + 1 times \"object\" is refused (large), and the 
 
 test("H10 and H13: a required, a type or a dependentRequired list of 1,000,000 texts and then a number, behind 1,000 references, is refused (large) under a load of 2,000 ms, and the server's other tool loads; a short list not of its kind is left out as before, and the tool loads", async () => {
   const names1m = [...Array.from({ length: 1_000_000 }, (_, i) => "n" + i), 5]
+  // Each list counts the reads of its entries (`counting`).
+  const required = counting([...names1m], FORM)
+  const dependent = counting([...names1m], FORM)
+  const typed = counting(names1m.map((one) => (typeof one === "string" ? "object" : one)), FORM)
   const behind = (T: Definition) => ({ type: "object", $defs: { T }, properties: Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => ["p" + i, { $ref: "#/$defs/T" }])) })
   const got = await loaded([server("s", served([[
-    tool("required", { inputSchema: behind({ type: "object", required: names1m }) }),
-    tool("dependent", { inputSchema: behind({ type: "object", dependentRequired: { a: ["b"], c: names1m } }) }),
-    tool("typed", { inputSchema: behind({ type: names1m.map((one) => (typeof one === "string" ? "object" : one)) }) }),
+    tool("required", { inputSchema: behind({ type: "object", required: required.list }) }),
+    tool("dependent", { inputSchema: behind({ type: "object", dependentRequired: { a: ["b"], c: dependent.list } }) }),
+    tool("typed", { inputSchema: behind({ type: typed.list }) }),
     tool("short", { inputSchema: { type: "object", required: ["a", 5], dependentRequired: { a: ["b", 5] }, properties: { a: { type: ["string", 5] } } } }),
     GOOD
   ]]))], { load: 2_000 })
@@ -1701,6 +1873,11 @@ test("H10 and H13: a required, a type or a dependentRequired list of 1,000,000 t
   expect(reasons(got, "typed")).toEqual([LARGE("input")])
   expect(names(got)).toEqual(["s.good", "s.short"])
   expect(got.entries.find((one) => one.tool === "short")!.form.input).toEqual({ type: "object", properties: { a: {} } })
+  // The guard of the cost, by a count and not by the clock: `typed` sorts
+  // last (ec-6n1co). Each entry is counted toward FORM as it is read (H10,
+  // H13), so the walk reads at most FORM entries of a list in all, of the
+  // 1,000,001 behind each of 1,000 references.
+  for (const list of [required, dependent, typed]) expect(list.reads()).toBeLessThanOrEqual(FORM)
 })
 
 test("H14: a dependentRequired whose first value is 5 counts all its keys at once: of FORM + 1 keys it is refused (large), and of 100,000 keys under $defs behind 1,000 references too, and the server's other tool loads; a short one not of its kind is left out, and one of its kind is in the form and the shown schema", async () => {
@@ -1905,3 +2082,272 @@ test("H7: the render of the shown schema is the render of the schema as it came,
   expect(disagree.slice(0, 3)).toEqual([])
   expect(compared).toBe(SEEDS.length * EACH)
 }, 60_000)
+
+// The follow-on's cases (ec-kyl76)
+// --------------------------------
+//
+// The mutants that the reviews of this file found surviving: each case
+// names the review's mutant that it guards.
+
+test("O9: an error's text is bounded in bytes, not in characters: an isError text of 30 characters and 60 bytes is not shown under hard 50; one of 50 bytes is shown whole", async () => {
+  const { fake } = answering([tool("over"), tool("at")], async (name) =>
+    ({ isError: true, content: [{ type: "text", text: name === "over" ? "\u00e9".repeat(30) : "\u00e9".repeat(25) }] }))
+  await withEntries(fake, { hard: 50, max: 1000 }, async (entries) => {
+    expect(await run(entries.over!, [{ a: 1 }])).toEqual({ error: "s.over: the server gave an error: [a text of 60 bytes, over the bound of 50 bytes, not shown]" })
+    expect(await run(entries.at!, [{ a: 1 }])).toEqual({ error: "s.at: the server gave an error: " + "\u00e9".repeat(25) })
+  })
+})
+
+test("O10, O11: the SDK's text of a time limit and of a connection that is gone is bounded by max too, also of a send that fails while the client is connected", async () => {
+  const { fake, drop } = answering([tool("slow"), tool("echo")], (name, _, signal) =>
+    name === "slow"
+      ? new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(text("late")), 5_000)
+        signal.addEventListener("abort", () => clearTimeout(timer))
+      })
+      : Promise.resolve(text("here")))
+  const CUT = /^[\s\S]{10}\u2026 \[the text was cut: its first 10 characters are shown, of \d+ characters\]$/
+  await withEntries(fake, { call: 200, max: 10 }, async (entries) => {
+    const slow = (await run(entries.slow!, [{ a: 1 }])).error ?? ""
+    const late = /^s\.slow: no answer in 200 ms \(([\s\S]*)\)\.$/.exec(slow)
+    expect(late?.[1]).toMatch(CUT)
+    await drop()
+    const gone = (await run(entries.echo!, [{ a: 1 }])).error ?? ""
+    const closed = /^s\.echo: the server "s" is not connected \(([\s\S]*)\)\.$/.exec(gone)
+    expect(closed?.[1]).toMatch(CUT)
+  })
+  // A transport whose send fails with the SDK's own error while the client
+  // is connected (as the in-memory side does when its other side is gone).
+  const echo = answering([tool("echo")], async () => text("here"))
+  let failing = false
+  const sending: Fake = {
+    transport: () => {
+      const side = echo.fake.transport()
+      const send = side.send.bind(side)
+      side.send = async (message, options) => {
+        if (failing && (message as { method?: unknown }).method === "tools/call") throw new SdkError(SdkErrorCode.SendFailed, "the pipe is broken: " + "w".repeat(40))
+        return send(message, options)
+      }
+      return side
+    },
+    closes: () => 0
+  }
+  await withEntries(sending, { max: 10 }, async (entries) => {
+    expect(await run(entries.echo!, [{ a: 1 }])).toEqual({ value: "here" })
+    failing = true
+    const failed = (await run(entries.echo!, [{ a: 1 }])).error ?? ""
+    const unsent = /^s\.echo: the server "s" is not connected \(([\s\S]*)\)\.$/.exec(failed)
+    expect(unsent?.[1]).toMatch(CUT)
+  })
+})
+
+test("LE: the scope's end waits for a close that never ends up to the load's limit and no longer, on the test's clock", async () => {
+  const stuck = held("stuck", [tool("x")])
+  try {
+    const exit = await Effect.runPromise(Effect.gen(function*() {
+      const scope = yield* Scope.make()
+      const got = yield* load([stuck.server], { beside: HOSTED, load: 1_000 }).pipe(Scope.provide(scope))
+      const marks: Array<unknown> = [names(got)]
+      let returned = false
+      // Detached: the program returns its marks whether or not the end
+      // has returned (a child would hold it to the end's close).
+      const ending = yield* Effect.forkDetach(Scope.close(scope, Exit.void).pipe(Effect.ensuring(Effect.sync(() => {
+        returned = true
+      }))))
+      yield* Effect.promise(() => turns())
+      // The close has begun, and holds the end.
+      marks.push([stuck.closes(), returned])
+      yield* TestClock.adjust(999)
+      yield* Effect.promise(() => turns())
+      marks.push(returned)
+      yield* TestClock.adjust(1)
+      yield* Effect.promise(() => turns())
+      // At the limit the end returns, though the close has not ended.
+      marks.push([returned, stuck.ended()])
+      return { marks, exit: returned ? yield* Effect.exit(Fiber.join(ending)) : undefined }
+    }).pipe(Effect.provide(TestClock.layer()), Effect.provide(Logger.layer([]))))
+    expect(exit.marks).toEqual([["stuck.x"], [1, false], false, [true, false]])
+    expect(exit.exit !== undefined && Exit.isSuccess(exit.exit)).toBe(true)
+  } finally {
+    stuck.end()
+  }
+})
+
+test("LG: a transport's own close that rejects at the scope's end changes nothing: the end succeeds, and no rejection is left unhandled", async () => {
+  const fake = served([[tool("x")]])
+  let calls = 0
+  // The client holds a view of its side whose close counts only the
+  // client's calls (the other side closes the side itself, not the view):
+  // the client's step calls it first, the transport's own step second, and
+  // that second call rejects.
+  const transport = () => {
+    const side = fake.transport()
+    const close = async () => {
+      calls++
+      await side.close()
+      if (calls === 2) throw new Error("the transport's close failed")
+    }
+    return new Proxy(side, { get: (target, key, receiver) => (key === "close" ? close : Reflect.get(target, key, receiver)) })
+  }
+  const unhandled: Array<unknown> = []
+  const note = (reason: unknown) => {
+    unhandled.push(reason)
+  }
+  process.on("unhandledRejection", note)
+  try {
+    const { got, end } = await opened([server("s", { transport, closes: () => calls })])
+    expect(names(got)).toEqual(["s.x"])
+    const exit = await end()
+    expect(Exit.isSuccess(exit)).toBe(true)
+    expect(calls).toBe(2)
+    await turns()
+    expect(unhandled).toEqual([])
+  } finally {
+    process.off("unhandledRejection", note)
+  }
+})
+
+// The form of a schema, or the refusal.
+const made = (schema: unknown): Form => {
+  const got = formOf(schema)
+  if (!("form" in got)) throw new Error("refused: " + got.fault)
+  return got
+}
+
+test("P3-2: a pointer under a schema with an $id starts there, also when the pointer's way passes it; $recursiveRef is refused; a lone $ref is a level of the depth; minLength is a text check; ~01 is the name ~1", () => {
+  const based = made({
+    type: "object",
+    $defs: {
+      x: { type: "string" },
+      sub: { $id: "sub", $defs: { x: { type: "number" } }, properties: { p: { $ref: "#/$defs/x" } } }
+    },
+    properties: {
+      a: { $ref: "#/$defs/sub" },
+      b: { $ref: "#/$defs/sub/properties/p" },
+      // Reached with no pointer: the walk itself enters the schema of its own.
+      c: { $id: "own", $defs: { x: { type: "boolean" } }, properties: { q: { $ref: "#/$defs/x" } } }
+    }
+  })
+  expect(based.form).toEqual({
+    type: "object",
+    properties: { a: { properties: { p: { type: "number" } } }, b: { type: "number" }, c: { properties: { q: { type: "boolean" } } } }
+  })
+  expect(checkOf({ type: "object", $recursiveRef: "#" }, "input")).toBe(REFERENCE("input"))
+  expect(made({ type: "string" }).depth).toBe(1)
+  expect(made({ $defs: { a: { type: "string" } }, $ref: "#/$defs/a" }).depth).toBe(2)
+  expect([made({ type: "string", minLength: 1 }).texts, made({ type: "string", maxLength: 5 }).texts, made({ type: "string", minLength: 1, maxLength: 5 }).texts]).toEqual([1, 1, 2])
+  const escaped = made({ type: "object", properties: { "~1": { type: "number" }, "/": { type: "string" }, x: { $ref: "#/properties/~01" } } })
+  expect((escaped.form as { properties: Record<string, unknown> }).properties.x).toEqual({ type: "number" })
+})
+
+test("R2: a cursor that comes again refuses the server at its second page: the server is asked two times, not 64", async () => {
+  let asked = 0
+  const again: Fake = {
+    transport: () => {
+      const [client, side] = InMemoryTransport.createLinkedPair()
+      serveStdio(() => {
+        const low = new Low({ name: "test", version: "1.0.0" }, { capabilities: { tools: {} } })
+        low.setRequestHandler("tools/list", async () => {
+          asked++
+          return { tools: [tool("t" + asked)], nextCursor: "again" } as never
+        })
+        return low as never
+      }, { transport: side })
+      return client
+    },
+    closes: () => 0
+  }
+  const got = await loaded([server("again", again)])
+  expect(got.refused).toEqual([{ server: "again", reason: "Its list of tools failed." }])
+  expect(asked).toBe(2)
+})
+
+test("R13: two definitions of one name are both refused with the duplicate's sentence, with ask and with a form that has a fault too; with deny they are left out with no refusal", async () => {
+  const DUP = "Its name is given more than once by its server."
+  const faulty = { inputSchema: { type: "object", patternProperties: { "^x": { type: "number" } } } }
+  const got = await loaded([server("s", served([[tool("asked"), tool("asked"), tool("denied"), tool("denied"), tool("faulty", faulty), tool("faulty", faulty), GOOD]]), {
+    tools: { asked: "ask", denied: "deny" }
+  })])
+  expect(names(got)).toEqual(["s.good"])
+  expect(got.refused).toEqual([
+    { server: "s", tool: "asked", reason: DUP },
+    { server: "s", tool: "asked", reason: DUP },
+    { server: "s", tool: "faulty", reason: DUP },
+    { server: "s", tool: "faulty", reason: DUP }
+  ])
+})
+
+test("R14: a server that offers no tools gives no function and no refusal, and the other server loads", async () => {
+  const none: Fake = {
+    transport: () => {
+      const [client, side] = InMemoryTransport.createLinkedPair()
+      serveStdio(() => new Low({ name: "test", version: "1.0.0" }, { capabilities: {} }) as never, { transport: side })
+      return client
+    },
+    closes: () => 0
+  }
+  const got = await loaded([server("none", none), server("s", served([[GOOD]]))])
+  expect(names(got)).toEqual(["s.good"])
+  expect(got.refused).toEqual([])
+})
+
+test("X9: a $ref with keywords beside it: the copy in the allOf is the target's shown schema, with its children's descriptions", () => {
+  const got = made({
+    type: "object",
+    properties: { a: { description: "outer", type: "object", $ref: "#/$defs/t" } },
+    $defs: { t: { description: "target", properties: { b: { type: "string", description: "inner" } } } }
+  })
+  const a = (got.shown as { properties: { a: { allOf: Array<{ properties: { b: unknown } }> } } }).properties.a
+  expect(a.allOf[0]!.properties.b).toEqual({ type: "string", description: "inner" })
+  expect((got.form as { properties: { a: unknown } }).properties.a).toEqual({ type: "object", allOf: [{ properties: { b: { type: "string" } } }] })
+})
+
+test("X14: a form and its annotations that pass FORM_SIZE only together are refused as too large, not by RENDER", () => {
+  const schema = { type: "object", description: "d".repeat(600_000), properties: { a: { const: "c".repeat(600_000) } } }
+  expect(sizeOf({ type: "object", properties: { a: { const: "c".repeat(600_000) } } }, FORM_SIZE)).toBeLessThanOrEqual(FORM_SIZE)
+  expect(checkOf(schema, "input")).toBe(LARGE("input"))
+})
+
+test("X15: the bounds come in order, budget before HEAD_RENDER: a function past both is refused with the budget's sentence", async () => {
+  // As in the H9 case: two functions whose weights sum to HEAD_RENDER.
+  const weighed = (length: number) => ({ type: "object", properties: { a: { type: "string" } }, description: "d".repeat(length) })
+  const half = weighed(500_000 - sizeOf(weighed(0), 1_000))
+  const two = ["a1", "a2"].map((name) => tool(name, { inputSchema: half, outputSchema: half }))
+  const more = tool("a3", { inputSchema: { type: "object" } })
+  const first = await loaded([server("s", served([[...two]]))])
+  expect(names(first)).toEqual(["s.a1", "s.a2"])
+  // The budget that the two fill exactly.
+  const budget = first.declarations.map((one) => renderDeclarations({ globals: [{ ...globalOf(one), execute: () => undefined }] }).length).reduce((a, b) => a + b, 0)
+  const got = await loaded([server("s", served([[...two, more]]))], { budget })
+  expect(names(got)).toEqual(["s.a1", "s.a2"])
+  expect(got.refused).toEqual([{ server: "s", tool: "a3", reason: `Its declaration would pass the ${budget} characters of the declarations of the functions from outside.` }])
+})
+
+test("X1, X4, X19: a description that is no text, a flag that is not true, and a null default are not copied to the shown schema", () => {
+  const got = made({ type: "object", description: 5, uniqueItems: "yes", deprecated: 1, default: null, properties: { a: { type: "array", uniqueItems: false, deprecated: "true" } } })
+  expect(got.shown).toEqual({ type: "object", properties: { a: { type: "array" } } })
+  expect(got.shown).toEqual(got.form)
+})
+
+test("note 3 of ec-9jqhe: the head of a type list, of a required and of a dependentRequired is one part each, and each entry read is one, also the entry that is no text; the form's lists are copies, not the server's arrays", () => {
+  expect(made({}).parts).toBe(1)
+  expect(made({ type: "string" }).parts).toBe(2)
+  // The schema, two entries and the list's head.
+  expect(made({ type: ["string", "number"] }).parts).toBe(4)
+  expect(made({ required: ["a", "b"] }).parts).toBe(4)
+  // The schema, one key, two entries and the head.
+  expect(made({ dependentRequired: { a: ["b", "c"] } }).parts).toBe(5)
+  // A list not of its kind: the schema, then "a" and 5 read and counted;
+  // the read stops at 5, and the list is left out.
+  expect(made({ required: ["a", 5, "b"] }).parts).toBe(3)
+  expect(made({ type: ["string", 5, "number"] }).parts).toBe(3)
+  const required = ["a"]
+  const list = ["b"]
+  const got = made({ type: "object", required, dependentRequired: { a: list } })
+  for (const one of [got.form, got.shown] as Array<{ required: unknown; dependentRequired: { a: unknown } }>) {
+    expect(one.required).toEqual(required)
+    expect(one.required).not.toBe(required)
+    expect(one.dependentRequired.a).toEqual(list)
+    expect(one.dependentRequired.a).not.toBe(list)
+  }
+})

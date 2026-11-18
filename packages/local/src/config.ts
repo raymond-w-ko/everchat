@@ -45,15 +45,21 @@
 // default, no escape, and any other `$` is a `$`. A secret goes into the
 // file only this way, so no fault holds a value of the file or of the
 // environment: a fault names the file, the field and the variable only.
+// One variable is no variable of the file: the key of the author's inference
+// gateway (`KEY_VARIABLE` of gateway.ts). It is still in the environment
+// when the file is read, and nothing that EverChat starts gets it, so its
+// `${...}` is a fault, set or not, and is not replaced.
 //
-// A fault stops the start: a file that cannot be read, that is not JSON or
-// not one object, a field of a wrong type or out of its bounds, an unknown
-// field, an unset variable. The faults of the form come first, all of them;
+// A fault stops the start: a file that cannot be read, a link to no file,
+// that is not JSON or not one object, a field of a wrong type or out of its
+// bounds (an empty `command` too), an unknown field, an unset variable or the
+// gateway's key. The faults of the form come first, all of them;
 // the variables and the addresses are looked at when the form is right.
 
 import { nameFault } from "@everchat/core/head"
 import { Effect, FileSystem, Path, Schema, SchemaIssue } from "effect"
 import * as nodeFs from "node:fs"
+import { KEY_VARIABLE } from "./gateway.ts"
 
 // The file's name in the home.
 export const FILE = "config.json"
@@ -150,7 +156,7 @@ const Texts = Schema.Record(Schema.String, Schema.String)
 // The two forms of a server in one struct, so that each field's fault has
 // its own path; the check says which fields go together.
 const ServerSchema = Schema.Struct({
-  command: Schema.optionalKey(Schema.String),
+  command: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1, { message: "Expected a command that is not empty" }))),
   args: Schema.optionalKey(Schema.Array(Schema.String)),
   env: Schema.optionalKey(Texts),
   cwd: Schema.optionalKey(Schema.String),
@@ -213,18 +219,22 @@ const format = SchemaIssue.makeFormatterStandardSchemaV1({
 
 const line = (path: ReadonlyArray<PropertyKey>, what: string) => (path.length === 0 ? what : pathOf(path) + ": " + what)
 
-// Each text with its variables replaced, or the names of the unset ones.
-const replace = (text: string, env: Readonly<Record<string, string | undefined>>): { readonly text: string; readonly unset: ReadonlyArray<string> } => {
-  const unset: Array<string> = []
+// Each text with its variables replaced, or the faults of its variables:
+// each unset one, and the gateway's key, which is never replaced.
+const replace = (text: string, env: Readonly<Record<string, string | undefined>>): { readonly text: string; readonly wrong: ReadonlyArray<string> } => {
+  const wrong: Array<string> = []
   const replaced = text.replace(VARIABLE, (whole, name: string) => {
-    const value = Object.hasOwn(env, name) ? env[name] : undefined
+    const value = name === KEY_VARIABLE ? undefined : Object.hasOwn(env, name) ? env[name] : undefined
     if (value === undefined) {
-      if (!unset.includes(name)) unset.push(name)
+      const what = name === KEY_VARIABLE
+        ? `the variable ${name} is the key of the author's inference gateway, which is not given to a server`
+        : `the variable ${name} is not set`
+      if (!wrong.includes(what)) wrong.push(what)
       return whole
     }
     return value
   })
-  return { text: replaced, unset }
+  return { text: replaced, wrong }
 }
 
 type Decoded = typeof SettingsSchema.Type
@@ -234,8 +244,8 @@ type DecodedServer = typeof ServerSchema.Type
 const servers = (decoded: Decoded["servers"], env: Readonly<Record<string, string | undefined>>): { readonly servers: ReadonlyArray<Server>; readonly faults: ReadonlyArray<string> } => {
   const faults: Array<string> = []
   const text = (path: ReadonlyArray<PropertyKey>, value: string) => {
-    const { text: replaced, unset } = replace(value, env)
-    for (const name of unset) faults.push(line(path, `the variable ${name} is not set`))
+    const { text: replaced, wrong } = replace(value, env)
+    for (const what of wrong) faults.push(line(path, what))
     return replaced
   }
   // A null prototype, so that a key such as `__proto__` is a key.
@@ -286,7 +296,16 @@ export const read = Effect.fnUntraced(function*(home: string, env: Readonly<Reco
     Effect.catchTag("PlatformError", (error) =>
       error.reason._tag === "NotFound" ? Effect.succeed(undefined) : Effect.fail(faulted(file, ["cannot be read (" + error.reason._tag + ")"])))
   )
-  if (content === undefined) return NONE
+  if (content === undefined) {
+    // No file is the defaults; a link whose target does not exist is a
+    // file that the person meant to give, so it is a fault.
+    const link = yield* fs.lstat(file).pipe(
+      Effect.map((info) => info.type === "SymbolicLink"),
+      Effect.catchTag("PlatformError", () => Effect.succeed(false))
+    )
+    if (link) return yield* faulted(file, ["a link to no file"])
+    return NONE
+  }
   let json: unknown
   try {
     json = JSON.parse(content)

@@ -120,6 +120,8 @@ How to test them:
 - Only the command `everchat` (the terminal and pipe mode) reads it, one
   time, at its start, before the database is opened. `everchat inspect` and
   `everchat serve` do not. No file, and the file `{}`, set nothing.
+  A `config.json` that is a link whose target does not exist is a fault
+  that names the file ("a link to no file"), not the defaults.
 - The form: one JSON object, every field optional.
   - `model`, `effort`, `compactor`: texts, each as its flag. A flag of the
     launch wins over the file, and the file over the fixed defaults.
@@ -129,8 +131,8 @@ How to test them:
     (`^[A-Za-z_$][A-Za-z0-9_$]*$`), the namespace of the server's
     functions. A server is `{ command, args?, env?, cwd? }` (a program on
     stdio) or `{ url, headers? }` (HTTP, an `http:` or `https:` address):
-    one of the two. Each may have `approval` (`"auto"`, `"ask"` or
-    `"deny"`, for each of its tools) and `tools` (a tool's name to one of
+    one of the two; an empty `command` is a fault at its path. Each may
+    have `approval` (`"auto"`, `"ask"` or `"deny"`, for each of its tools) and `tools` (a tool's name to one of
     the three, which wins for that tool); with none, a tool is `"auto"`.
     A launch loads them ("The connectors").
   - `name`: the agent's name in the system prompt, in place of "EverChat"
@@ -149,9 +151,9 @@ How to test them:
   - The name and the rules make the launch's one head: a change of either
     applies at the next launch. Neither takes `${NAME}`.
   - A field that is not in this list is refused, at any depth.
-- The faults: a file that cannot be read, that is not JSON or not one
-  object, a field of a wrong type or out of its bounds, an unknown field, an
-  unset variable, a rules file that cannot be used. Each fault stops the start: the program writes it as one
+- The faults: a file that cannot be read, a link to no file, that is not
+  JSON or not one object, a field of a wrong type or out of its bounds, an
+  unknown field, an unset variable or the gateway's key, a rules file that cannot be used. Each fault stops the start: the program writes it as one
   line on the standard error, with the file's path and the field's path,
   and ends with the code 1, before the screen is up and before the database
   is opened.
@@ -162,6 +164,11 @@ How to test them:
   put a secret in the file itself. No fault, message or test output holds a
   value of the file or a replaced one: a fault names the field and the
   variable only. Keep that rule when you add a field.
+- The gateway's key is no variable of the file: `${EVERCHAT_GATEWAY_KEY}`
+  (`KEY_VARIABLE` of `gateway.ts`) in any of the four places is a fault,
+  set or not, that names the field and the variable, and it is never
+  replaced, since nothing that EverChat starts gets the key of the
+  author's inference gateway.
 
 ## The connectors
 
@@ -173,9 +180,17 @@ How to test them:
   program on stdio is started as a child, with its `command`, `args` and
   `cwd` (the work directory when none); an HTTP address is reached with its
   `url` and `headers`. `everchat inspect` and `everchat serve` start none.
+  The SDK starts each program on stdio two times for a load (its version
+  probe runs on a sibling process), so a server with effects at its start
+  has them twice. A program on stdio shares EverChat's session and
+  terminal: it is the person's own program, with the person's rights, and
+  it can write to the terminal and read its keys.
 - The list: the built-ins first (`DECLARATIONS`), then the servers'
-  functions, `<server>.<tool>`, sorted by name. The head is made one time
-  from that list, so it changes only at the next launch. With no server,
+  functions, `<server>.<tool>`, sorted by name. The member after the dot is
+  the tool's name made an identifier (`toCodemodeIdentifier` of
+  `packages/mcp/src/client.ts`), so it is not always the name as the server
+  wrote it; a call still sends the server its own name. The head is made
+  one time from that list, so it changes only at the next launch. With no server,
   the head keeps its bytes, and a start loads no module of the client
   (`@everchat/mcp`, the SDK): `main.ts` imports them only when the file
   names a server. The executable still holds them.

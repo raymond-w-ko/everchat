@@ -24,7 +24,8 @@ The root `AGENTS.md` holds the rules for every file.
 
 ## Its libraries
 
-Two, from the public npm registry, each at an exact version in
+Three, from the public npm registry (two for the sources, and one for
+the tests only), each at an exact version in
 `packages/mcp/package.json` (no caret, no tilde: a change of version is a
 change of the manifest, reviewed as one):
 
@@ -134,7 +135,8 @@ a sentence). It never fails, and no server can stop it:
   within H9 (H6);
 - each refusal is a warning of Effect's log, with the source `mcp`.
 
-The connections live in the caller's scope, and close with it.
+The connections live in the caller's scope, and close with it, all at one
+time: the scope's end takes as long as the slowest close, not their sum.
 
 **The call** (an entry's `run(args, caller)`):
 
@@ -152,13 +154,15 @@ The connections live in the caller's scope, and close with it.
   a refusal of a header;
 - each error is a `FunctionError` with the server's or the SDK's text: a
   result with `isError`, a refusal of the protocol (an unknown tool), the
-  time limit, a
-  connection that is gone (it names the server). After a time limit the
-  connection serves the next call; nothing connects again: the next load
-  does;
+  time limit, a connection that is gone (it names the server); a cause with
+  no text (a null prototype) gives the ordinary sentence of a failed call.
+  After a time limit the connection serves the next call; nothing connects
+  again: the next load does;
 - the result: with an `outputSchema`, its `structuredContent` must be
   there and pass EverChat's own check with `pi-schema` against the form of
-  that schema, under the same bound, and the program gets the object; with
+  that schema, under the same bound, and the program gets the object (one
+  nested so deep that the check or its JSON text overflows the stack is a
+  `FunctionError` that names the server); with
   none, the text parts of `content`, one line each,
   and a part of another kind is one line that names its kind and its
   type, without its data;
@@ -180,14 +184,18 @@ The connections live in the caller's scope, and close with it.
   the list is joined only until it is past `max`);
 - nothing here writes the store: the call's row is `calls.ts`'s.
 
-Three known limits. The SDK reads a whole answer into memory before any
+Four known limits. The SDK reads a whole answer into memory before any
 bound here can act, so `hard` bounds what the program and the store get,
 not what the process reads. An error's text past `max` has no way to the
 rest: an error is a message, and a failed call keeps no whole text. And
 EverChat sends no `Mcp-Param-*` header (G10): the `x-mcp-header` of a
 tool's schema is not read, so a server over HTTP that asks for such a
-header refuses the call, and the program gets that refusal. The bound of a hosted provider's answers is
-the server plan's.
+header refuses the call, and the program gets that refusal. And the
+candidates of a load (each form, shown schema and compiled check) are held
+to the load's end, with no bound of their bytes: at the default `load`, 256
+tools of 4,000 to 16,000 properties gave a peak of 549 to 671 MB
+(ec-ghh1t); the person names the servers. The bound of a hosted
+provider's answers, and of its load's memory, is the server plan's.
 
 ## The form of a schema
 
@@ -246,14 +254,17 @@ walk makes ("The shown schema"), never the schema as it came.
   `oneOf`, `not`, `if`, `then`, `else`. Every other keyword is left out, as
   an annotation is. Limits that you meet: `pattern`, `uniqueItems` and
   `format` are not checked (no bound of the work of the first two exists;
-  the server's own check is the one that holds for them). Below `not`,
-  `if` or `oneOf`, or in a `contains` that has a `maxContains`, a `pattern`
-  or a `uniqueItems` refuses the tool, since leaving it out there could
-  refuse a value that the schema takes. `patternProperties` refuses the
-  tool: a pattern decides there which schema a property takes. A kept
-  keyword whose value is not of its kind is left out (a list of `items`,
-  the old form of `prefixItems`, too); a schema's place that holds no
-  object or boolean refuses the tool ("does not compile").
+  the server's own check is the one that holds for them). Below `not`, `if`
+  or `oneOf`, or in a `contains` that has a `maxContains`, a `pattern` or a
+  `uniqueItems` refuses the tool, since leaving it out there could refuse a
+  value that the schema takes; so do a list of `items` (draft 7), an
+  `additionalItems` that is not `true`, a `dependencies` that is an object,
+  and a `required` with an entry that is no text (ec-egsmp).
+  `patternProperties` refuses the tool: a pattern decides there which schema
+  a property takes. A kept keyword whose value is not of its kind is left
+  out (a list of `items`, the old form of `prefixItems`, too); a schema's
+  place that holds no object or boolean refuses the tool ("does not
+  compile").
 - **The SDK (S6).** The SDK's `Client` gets a `jsonSchemaValidator` that
   compiles nothing and takes every value, so EverChat's check on the form
   is the only one of a structured result. The SDK still says itself that
@@ -276,13 +287,14 @@ walk makes ("The shown schema"), never the schema as it came.
   the value's texts at each failing place, on each level of its way down.
   Past that, the value is refused with a sentence that says the list was
   not made.
-- **The sentences (S8).** Each refusal of the load names the schema
-  ("Its input schema ...", "Its output schema ...") and keywords of
-  EverChat's own lists only, never a text of the schema: a reference that
-  EverChat does not follow; a schema that holds itself; a form too large or
-  too deep; `patternProperties`; `pattern` or `uniqueItems` below `not`,
-  `if`, `oneOf` or `contains`; a schema that does not compile; a shown
-  schema whose size times its levels is past `RENDER` (H4).
+- **The sentences (S8).** Each refusal of the load names the schema ("Its
+  input schema ...", "Its output schema ...") and keywords of EverChat's own
+  lists only, never a text of the schema: a reference that EverChat does not
+  follow; a schema that holds itself; a form too large or too deep;
+  `patternProperties`; `pattern`, `uniqueItems`, a list of `items`,
+  `additionalItems`, `dependencies` or a `required` with no text below
+  `not`, `if`, `oneOf` or `contains`; a schema that does not compile; a
+  shown schema whose size times its levels is past `RENDER` (H4).
 
 ## The shown schema
 
@@ -365,7 +377,9 @@ small. The lead's rulings are H1 to H6, H5a, H9, H10 to H13 and H5b
   of `items`, no `type` list with a repeated entry, no `default` of a size
   past `TAG` or that is a list or an object, no `format` or `pattern`
   past `TAG` units or that is no text, no boolean `exclusiveMinimum` or `exclusiveMaximum`, and no kept
-  keyword whose value is not of its kind, the declaration's text is the
+  keyword whose value is not of its kind (a keyword of a number takes a
+  finite number: `1e400`, read as `Infinity`, is left out and gives no
+  tag), the declaration's text is the
   same byte for byte as the render of the schema as it came. The accepted
   differences: a reference is filled in at every place (no stop at 32, and
   its target's siblings as the form joins them); a list of `items` shows
@@ -379,6 +393,8 @@ small. The lead's rulings are H1 to H6, H5a, H9, H10 to H13 and H5b
 - **The step and the head (H6).** No step of one definition is long: G2,
   G4 and H4 bound it. The render at the launch reads the shown schemas of
   at most `count` kept functions, each within H4, and their sum within H9.
+  The launch renders each kept function two times: in the head, and in
+  the core's `refusals` of `make` (`packages/core/src/functions.ts`).
 - **The bound of the whole list (H9).** A function's weight is the sum,
   over its input schema and its output schema (when it has one), of the
   shown schema's size times the form's levels (the two numbers of H4). In
@@ -391,7 +407,10 @@ small. The lead's rulings are H1 to H6, H5a, H9, H10 to H13 and H5b
   render is some constant times its weight: 100 functions each at
   `RENDER` whose text the renderer drops at the top took 9.8 s to render
   in the head, and 5 of them (a bound of 10,000,000) up to 1.3 s
-  (ec-kfn3y's measure). An honest list is cut by `budget` long before.
+  (ec-kfn3y's measure). In an object of many lines each line gets 2 spaces
+  a level, so a text of short lines costs about its lines times its levels
+  squared; and with both schemas at `RENDER` one step was measured at 415
+  to 529 ms (ec-ghh1t). An honest list is cut by `budget` long before.
 - **The comparison (H7).** `client.test.ts` compares the render of the
   shown schema with the render of the schema as it came (the oracle) on
   schemas of H5's first sentence, from a seeded generator: 8 fixed seeds
