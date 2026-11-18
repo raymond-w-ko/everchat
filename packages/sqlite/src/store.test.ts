@@ -13,7 +13,29 @@ import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
 import { chatsLayer, chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
 import { TestClock } from "effect/testing"
-import { ANSWER_MAX, type Answered, Chats, DatabaseVersion, LaunchLive, type NewEvent, NoChat, type Part, Reads, type Reading, Store, StoreError, WAIT, WHO_MAX } from "@everchat/core/store"
+import {
+  ANSWER_MAX,
+  type Answered,
+  Chats,
+  DatabaseVersion,
+  LaunchLive,
+  type Message,
+  type NewEvent,
+  NoChat,
+  type Part,
+  Reads,
+  type Reading,
+  Store,
+  StoreError,
+  type Turn,
+  type UnsettledWake,
+  WAIT,
+  WAKE_FAILURES,
+  WAKE_TEXT_MAX,
+  type Wake,
+  type WakeOf,
+  WHO_MAX
+} from "@everchat/core/store"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
@@ -1111,6 +1133,1553 @@ test("tellApproval sets msg one time and refuses a pending, yes or running row; 
   ])
   expect(approvalRow(file, 6)).toMatchObject({ msg: 1, updated: 1000 + WAIT + 2 })
 })
+
+// Wake-ups
+// --------
+
+// A wake-up's row as the file has it.
+const wakeRow = (file: string, n: number) =>
+  rows(file, `select chat, n, text, cron, at, zone, first, turn, call, due, slot, pending, missed, fired, last_turn, settled, failed, stopped, why, stop_call, created, updated from everchat_wake where chat = 1 and n = ${n}`)[0]
+
+const wakeCount = (file: string) => rows<{ n: number }>(file, "select count(*) as n from everchat_wake")[0]!.n
+
+// A routine and a reminder in Berlin, as the wake-ups' package gives them.
+const ROUTINE = { text: "stand up", cron: "0 9 * * 1-5", zone: "Europe/Berlin", first: 1_800_000_000_000 }
+const REMINDER = { text: "call back", at: 1_800_000_600_000, zone: "Europe/Berlin", first: 1_800_000_600_000 }
+
+test("makeWake: a reminder and a routine that a function's call made are made with their whole rows: the ids 1 and 2, due = first, the clock's time, nothing fired; a new chat has its wake-ups on, a new turn no ceiling", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(5000)
+    const reminder = yield* store.makeWake(REMINDER, 20)
+    const [call] = yield* functions(store, 1)
+    yield* TestClock.setTime(6000)
+    const routine = yield* store.makeWake({ ...ROUTINE, turn: 1, call: call! }, 20)
+    return { reminder, routine, call: call!, all: yield* store.wakes() }
+  }))
+  const base = { slot: null, pending: null, missed: 0, fired: 0, lastTurn: null, settled: true, failed: 0, stopped: null, why: null, stopCall: null }
+  expect(got.reminder).toEqual({
+    _tag: "made",
+    wake: { id: 1, text: "call back", cron: null, at: REMINDER.at, zone: "Europe/Berlin", first: REMINDER.first, turn: null, call: null, due: REMINDER.first, ...base, created: 5000, updated: 5000 }
+  })
+  expect(got.routine).toEqual({
+    _tag: "made",
+    wake: { id: 2, text: "stand up", cron: "0 9 * * 1-5", at: null, zone: "Europe/Berlin", first: ROUTINE.first, turn: 1, call: got.call, due: ROUTINE.first, ...base, created: 6000, updated: 6000 }
+  })
+  expect(got.all).toEqual([got.reminder, got.routine].flatMap((made) => made._tag === "made" ? [made.wake] : []))
+  expect(wakeRow(file, 2)).toEqual({
+    chat: 1, n: 2, text: "stand up", cron: "0 9 * * 1-5", at: null, zone: "Europe/Berlin", first: ROUTINE.first, turn: 1, call: got.call, due: ROUTINE.first,
+    slot: null, pending: null, missed: 0, fired: 0, last_turn: null, settled: 1, failed: 0, stopped: null, why: null, stop_call: null, created: 6000, updated: 6000
+  })
+  // A new chat's wake-ups are on, and a turn started with no ceiling has
+  // none.
+  expect(rows(file, "select wakeups from everchat_chat")).toEqual([{ wakeups: 1 }])
+  expect(rows(file, "select steps, tokens from everchat_turn")).toEqual([{ steps: null, tokens: null }])
+})
+
+test("makeWake: a text of 0 or 2,001 characters is refused with StoreError before the transaction and writes nothing; 1 and 2,000 are kept; a lone surrogate is made well formed, and counted so", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const refused = [
+      yield* Effect.exit(store.makeWake({ ...REMINDER, text: "" }, 20)),
+      yield* Effect.exit(store.makeWake({ ...REMINDER, text: "t".repeat(WAKE_TEXT_MAX + 1) }, 20)),
+      yield* Effect.exit(store.makeWake({ ...REMINDER, text: "t".repeat(WAKE_TEXT_MAX) + "\ud800" }, 20))
+    ]
+    const count = wakeCount(file)
+    const made = [
+      yield* store.makeWake({ ...REMINDER, text: "t" }, 20),
+      yield* store.makeWake({ ...REMINDER, text: "t".repeat(WAKE_TEXT_MAX) }, 20),
+      yield* store.makeWake({ ...REMINDER, text: "a\ud800b" }, 20),
+      yield* store.makeWake({ ...REMINDER, text: "t".repeat(WAKE_TEXT_MAX - 1) + "\ud800" }, 20)
+    ]
+    return { refused, count, made }
+  }))
+  expect(WAKE_TEXT_MAX).toBe(2000)
+  const failure = (exit: Exit.Exit<unknown, StoreError>) => {
+    if (Exit.isSuccess(exit)) return "it was made"
+    const error = Cause.squash(exit.cause)
+    return [error instanceof StoreError, error instanceof StoreError ? error.op : null, error instanceof StoreError ? String(error.cause) : String(error)]
+  }
+  expect(got.refused.map(failure)).toEqual([
+    [true, "makeWake", "Error: a wake-up's text is a text of 1 to 2000 characters, not 0"],
+    [true, "makeWake", "Error: a wake-up's text is a text of 1 to 2000 characters, not 2001"],
+    [true, "makeWake", "Error: a wake-up's text is a text of 1 to 2000 characters, not 2001"]
+  ])
+  expect(got.count).toBe(0)
+  expect(got.made.map((made) => made._tag === "made" ? [made.wake.id, made.wake.text.length, made.wake.text.isWellFormed()] : made._tag)).toEqual([
+    [1, 1, true],
+    [2, 2000, true],
+    [3, 3, true],
+    [4, 2000, true]
+  ])
+  expect(rows(file, "select n, text from everchat_wake where n in (3, 4) order by n")).toEqual([
+    { n: 3, text: "a\ufffdb" },
+    { n: 4, text: "t".repeat(WAKE_TEXT_MAX - 1) + "\ufffd" }
+  ])
+})
+
+test("makeWake: the schema refuses a turn with no call, a call with no turn, a routine with a time, a wake-up with neither, a reminder whose first slot is not its time, and a turn that the chat has not: StoreError, nothing written; the next make takes id 1", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const [call] = yield* functions(store, 1)
+    const tries = [
+      { ...REMINDER, turn: 1 },
+      { ...REMINDER, call: call! },
+      { ...ROUTINE, at: ROUTINE.first },
+      { text: "neither", zone: "UTC", first: 1 },
+      { ...REMINDER, first: REMINDER.first + 1 },
+      { ...REMINDER, turn: 99, call: call! }
+    ]
+    const errors = []
+    for (const wake of tries) errors.push(yield* Effect.flip(store.makeWake(wake, 20)))
+    const count = wakeCount(file)
+    return { errors, count, next: yield* store.makeWake(REMINDER, 20) }
+  }))
+  // SQLite's own text: the driver's error (`reason`) holds it.
+  const sqlite = (error: StoreError) => String((error.cause as { readonly reason?: { readonly cause?: unknown } }).reason?.cause)
+  expect(got.errors.map((error) => [error instanceof StoreError, error.op, sqlite(error)])).toEqual([
+    [true, "makeWake", expect.stringContaining("CHECK constraint failed: (turn is null) = (call is null)")],
+    [true, "makeWake", expect.stringContaining("CHECK constraint failed: (turn is null) = (call is null)")],
+    [true, "makeWake", expect.stringContaining("CHECK constraint failed: (cron is null) <> (at is null)")],
+    [true, "makeWake", expect.stringContaining("CHECK constraint failed: (cron is null) <> (at is null)")],
+    [true, "makeWake", expect.stringContaining("CHECK constraint failed: at is null or first = at")],
+    [true, "makeWake", expect.stringContaining("FOREIGN KEY constraint failed")]
+  ])
+  expect(got.count).toBe(0)
+  expect(got.next._tag === "made" ? got.next.wake.id : got.next._tag).toBe(1)
+})
+
+test("makeWake: full at limit active rows, and nothing is written; a row that stopped (by plain SQL) is not counted; a limit of 0 is full", async () => {
+  const file = newFile()
+  const made = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    return [
+      yield* store.makeWake(REMINDER, 2),
+      yield* store.makeWake(ROUTINE, 2),
+      yield* store.makeWake({ ...REMINDER, text: "a third" }, 2),
+      yield* store.makeWake({ ...REMINDER, text: "a third" }, 3)
+    ]
+  }))
+  expect(made.map((one) => one._tag === "made" ? one.wake.id : one._tag)).toEqual([1, 2, "full", 3])
+  // The person stops wake-up 2, as the cut's later member will.
+  write(file, "update everchat_wake set stopped = 9, why = 'person', due = null, updated = 9 where chat = 1 and n = 2")
+  const after = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    return [
+      yield* store.makeWake({ ...REMINDER, text: "a fourth" }, 3),
+      yield* store.makeWake({ ...REMINDER, text: "a fifth" }, 3),
+      yield* store.makeWake({ ...REMINDER, text: "none" }, 0)
+    ]
+  }))
+  expect(after.map((one) => one._tag === "made" ? one.wake.id : one._tag)).toEqual([4, "full", "full"])
+  expect(rows(file, "select n, text, stopped from everchat_wake order by n")).toEqual([
+    { n: 1, text: "call back", stopped: null },
+    { n: 2, text: "stand up", stopped: 9 },
+    { n: 3, text: "a third", stopped: null },
+    { n: 4, text: "a fourth", stopped: null }
+  ])
+})
+
+test("wakes: the rows in the order of their ids; active: true, those not stopped; active: false, those stopped; on the store and on the reads", async () => {
+  const file = newFile()
+  await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    for (const text of ["one", "two", "three", "four"]) yield* store.makeWake({ ...REMINDER, text }, 20)
+  }))
+  write(file, "update everchat_wake set stopped = 9, why = 'person', due = null, updated = 9 where chat = 1 and n in (2, 3)")
+  const read = (reads: Reading) =>
+    Effect.gen(function*() {
+      const of = (wakes: ReadonlyArray<Wake>) => wakes.map((wake) => [wake.id, wake.text, wake.stopped, wake.why])
+      return {
+        all: of(yield* reads.wakes()),
+        none: of(yield* reads.wakes({})),
+        active: of(yield* reads.wakes({ active: true })),
+        stopped: of(yield* reads.wakes({ active: false }))
+      }
+    })
+  const fromStore = await withStore(file, Store.use(read))
+  const fromReads = await withReads(file, Reads.use(read))
+  expect(fromReads).toEqual(fromStore)
+  expect(fromStore).toEqual({
+    all: [[1, "one", null, null], [2, "two", 9, "person"], [3, "three", 9, "person"], [4, "four", null, null]],
+    none: [[1, "one", null, null], [2, "two", 9, "person"], [3, "three", 9, "person"], [4, "four", null, null]],
+    active: [[1, "one", null, null], [4, "four", null, null]],
+    stopped: [[2, "two", 9, "person"], [3, "three", 9, "person"]]
+  })
+})
+
+// The fire's members (docs/wakeups.md, section 3)
+// ------------------------------------------------
+
+// Slots: a time in 2027, and an hour.
+const T0 = 1_800_000_000_000
+const H = 3_600_000
+
+// The chat's switch of its wake-ups, by plain SQL, so that the cases of the
+// fire's members do not rest on `setWakeups` (its own cases are below).
+const switchBySql = (file: string, on: boolean, chat = 1) => write(file, "update everchat_chat set wakeups = ? where id = ?", [on ? 1 : 0, chat])
+
+// The count of a fire's end, by plain SQL, as `settleWake` counts the end
+// `kept`: `settled` 1, `updated` the time given; so that the cases of the
+// fire's members do not rest on `settleWake` (its own cases are below).
+const settleBySql = (file: string, n: number, at: number, chat = 1) =>
+  write(file, "update everchat_wake set settled = 1, updated = ? where chat = ? and n = ? and settled = 0", [at, chat, n])
+
+// A fire as an offer writes it: the turn's row, then the fire, in one
+// transaction. Gives the turn's id.
+const fire = (store: typeof Store.Service, n: number, read: { readonly pending: number; readonly missed: number }) =>
+  store.transaction(Effect.gen(function*() {
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    yield* store.fireWake(n, turn.id, read)
+    return turn.id
+  }))
+
+// One wake-up's row, by the store.
+const wakeOf = (store: typeof Store.Service, n: number) => Effect.map(store.wakes(), (all) => all.find((wake) => wake.id === n))
+
+// A row as `makeWake` gives it, with what is given over it.
+const made = (one: { readonly _tag: string; readonly wake?: Wake }) => {
+  if (one._tag !== "made" || one.wake === undefined) throw new Error(`not made: ${one._tag}`)
+  return one.wake
+}
+
+test("dueWakes: the active rows whose due is at or before now, in the order of due, then of n; a stopped row, a row with no due and a row due later are left out; none while the chat's wake-ups are off; the same on the reads", async () => {
+  const file = newFile()
+  await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.makeWake({ ...ROUTINE, text: "1", first: T0 + 2 * H }, 20)
+    yield* store.makeWake({ ...REMINDER, text: "2", at: T0 + H, first: T0 + H }, 20)
+    yield* store.makeWake({ ...ROUTINE, text: "3", first: T0 + H }, 20)
+    yield* store.makeWake({ ...REMINDER, text: "4", at: T0, first: T0 }, 20)
+    yield* store.makeWake({ ...ROUTINE, text: "5", first: T0 + 3 * H }, 20)
+    yield* store.makeWake({ ...ROUTINE, text: "6", first: T0 }, 20)
+  }))
+  write(file, "update everchat_wake set stopped = 9, why = 'person', due = null, updated = 9 where chat = 1 and n = 4")
+  write(file, "update everchat_wake set due = null where chat = 1 and n = 6")
+  const ask = (reads: Reading) =>
+    Effect.gen(function*() {
+      const ids = (wakes: ReadonlyArray<Wake>) => wakes.map((wake) => wake.id)
+      return [
+        ids(yield* reads.dueWakes(T0 + H - 1)),
+        ids(yield* reads.dueWakes(T0 + H)),
+        ids(yield* reads.dueWakes(T0 + 2 * H - 1)),
+        ids(yield* reads.dueWakes(T0 + 2 * H)),
+        ids(yield* reads.dueWakes(Number.MAX_SAFE_INTEGER))
+      ]
+    })
+  const on = [[], [2, 3], [2, 3], [2, 3, 1], [2, 3, 1, 5]]
+  expect(await withStore(file, Store.use(ask))).toEqual(on)
+  expect(await withReads(file, Reads.use(ask))).toEqual(on)
+  // The rows are whole.
+  const due = await withStore(file, Store.use((store) => store.dueWakes(T0 + H)))
+  const all = await withStore(file, Store.use((store) => store.wakes()))
+  expect(due).toEqual([all[1]!, all[2]!])
+  switchBySql(file, false)
+  expect(await withStore(file, Store.use(ask))).toEqual([[], [], [], [], []])
+  expect(await withReads(file, Reads.use(ask))).toEqual([[], [], [], [], []])
+  switchBySql(file, true)
+  expect(await withStore(file, Store.use(ask))).toEqual(on)
+})
+
+test("pendWake with no fire waiting: pending, missed and due as given, updated the clock's time, and true; missed 0, 1, 999 and 1,000 as given, 1,001 kept at 1,000; a reminder's due may be null", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const rows = []
+    for (const missed of [0, 1, 999, 1000, 1001]) rows.push(made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20)))
+    const reminder = made(yield* store.makeWake({ ...REMINDER, at: T0, first: T0 }, 20))
+    yield* TestClock.setTime(T0 + 5)
+    const answers = []
+    for (const [k, missed] of [0, 1, 999, 1000, 1001].entries()) answers.push(yield* store.pendWake(rows[k]!.id, { pending: T0, missed, due: T0 + H }))
+    answers.push(yield* store.pendWake(reminder.id, { pending: T0, missed: 0, due: null }))
+    return { rows, reminder, answers, after: yield* store.wakes() }
+  }))
+  expect(got.answers).toEqual([true, true, true, true, true, true])
+  expect(got.after).toEqual([
+    ...[0, 1, 999, 1000, 1000].map((missed, k) => ({ ...got.rows[k]!, pending: T0, missed, due: T0 + H, updated: T0 + 5 })),
+    { ...got.reminder, pending: T0, missed: 0, due: null, updated: T0 + 5 }
+  ])
+})
+
+test("pendWake with a fire waiting: one fire still waits, pending the given slot, missed the old missed + 1 + the given count, at most 1,000, due as given", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const row = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const capped = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const full = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    yield* store.pendWake(row.id, { pending: T0, missed: 3, due: T0 + H })
+    yield* store.pendWake(capped.id, { pending: T0, missed: 3, due: T0 + H })
+    yield* store.pendWake(full.id, { pending: T0, missed: 1000, due: T0 + H })
+    yield* TestClock.setTime(T0 + 7)
+    const answers = [
+      yield* store.pendWake(row.id, { pending: T0 + 2 * H, missed: 5, due: T0 + 3 * H }),
+      yield* store.pendWake(capped.id, { pending: T0 + 2 * H, missed: 996, due: T0 + 3 * H }),
+      yield* store.pendWake(full.id, { pending: T0 + 2 * H, missed: 0, due: T0 + 3 * H })
+    ]
+    const once = yield* store.wakes()
+    yield* TestClock.setTime(T0 + 8)
+    answers.push(yield* store.pendWake(capped.id, { pending: T0 + 3 * H, missed: 0, due: T0 + 4 * H }))
+    return { rows: [row, capped, full], answers, once, twice: yield* wakeOf(store, capped.id) }
+  }))
+  expect(got.answers).toEqual([true, true, true, true])
+  const [row, capped, full] = got.rows
+  expect(got.once).toEqual([
+    { ...row!, pending: T0 + 2 * H, missed: 3 + 1 + 5, due: T0 + 3 * H, updated: T0 + 7 },
+    { ...capped!, pending: T0 + 2 * H, missed: 1000, due: T0 + 3 * H, updated: T0 + 7 },
+    { ...full!, pending: T0 + 2 * H, missed: 1000, due: T0 + 3 * H, updated: T0 + 7 }
+  ])
+  // 3 + 1 + 996 is the bound itself; one more slot stays at it.
+  expect(got.twice).toEqual({ ...capped!, pending: T0 + 3 * H, missed: 1000, due: T0 + 4 * H, updated: T0 + 8 })
+})
+
+test("pendWake changes nothing and gives false, with no StoreError: a slot at or before the waiting pending, at or before the row's slot, a stopped row, a row that is not there, and a chat whose wake-ups are off; then on, the same slot is taken", async () => {
+  const file = newFile()
+  const first = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const waiting = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const fired = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const stopped = made(yield* store.makeWake({ ...REMINDER, at: T0, first: T0 }, 20))
+    yield* store.pendWake(waiting.id, { pending: T0, missed: 2, due: T0 + H })
+    yield* store.pendWake(fired.id, { pending: T0, missed: 2, due: T0 + H })
+    yield* fire(store, fired.id, { pending: T0, missed: 2 })
+    yield* store.pendWake(stopped.id, { pending: T0, missed: 0, due: null })
+    yield* fire(store, stopped.id, { pending: T0, missed: 0 })
+    const before = yield* store.wakes()
+    yield* TestClock.setTime(T0 + 9)
+    const answers = [
+      yield* store.pendWake(waiting.id, { pending: T0, missed: 0, due: T0 + 2 * H }),
+      yield* store.pendWake(waiting.id, { pending: T0 - 1, missed: 0, due: T0 + 2 * H }),
+      yield* store.pendWake(fired.id, { pending: T0, missed: 0, due: T0 + 2 * H }),
+      yield* store.pendWake(fired.id, { pending: T0 - H, missed: 0, due: T0 + 2 * H }),
+      yield* store.pendWake(stopped.id, { pending: T0 + H, missed: 0, due: null }),
+      yield* store.pendWake(9, { pending: T0 + H, missed: 0, due: null })
+    ]
+    return { before, answers, after: yield* store.wakes() }
+  }))
+  expect(first.before.map((wake) => [wake.id, wake.slot, wake.pending, wake.stopped !== null])).toEqual([[1, null, T0, false], [2, T0, null, false], [3, T0, null, true]])
+  expect(first.answers).toEqual([false, false, false, false, false, false])
+  expect(first.after).toEqual(first.before)
+  switchBySql(file, false)
+  const off = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0 + 10)
+    return {
+      answers: [
+        yield* store.pendWake(1, { pending: T0 + H, missed: 0, due: T0 + 2 * H }),
+        yield* store.pendWake(2, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+      ],
+      after: yield* store.wakes()
+    }
+  }))
+  expect(off.answers).toEqual([false, false])
+  expect(off.after).toEqual(first.before)
+  switchBySql(file, true)
+  const on = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0 + 11)
+    return {
+      answers: [
+        yield* store.pendWake(1, { pending: T0 + H, missed: 0, due: T0 + 2 * H }),
+        yield* store.pendWake(2, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+      ],
+      after: yield* store.wakes()
+    }
+  }))
+  expect(on.answers).toEqual([true, true])
+  expect(on.after).toEqual([
+    { ...first.before[0]!, pending: T0 + H, missed: 2 + 1 + 0, due: T0 + 2 * H, updated: T0 + 11 },
+    { ...first.before[1]!, pending: T0 + H, missed: 0, due: T0 + 2 * H, updated: T0 + 11 },
+    first.before[2]!
+  ])
+})
+
+test("pendingWake: the least pending, then the least n, of the active rows whose last end is counted; a row with settled = 0 is left out until its end is counted (plain SQL); none while the chat's wake-ups are off, and none with no fire waiting; the same on the reads", async () => {
+  const file = newFile()
+  const ids = (reads: Reading) => Effect.map(reads.pendingWake(), Option.map((wake) => wake.id))
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const answers = []
+    for (const text of ["1", "2", "3"]) yield* store.makeWake({ ...ROUTINE, text, first: T0 }, 20)
+    answers.push(yield* ids(store))
+    yield* store.pendWake(1, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+    yield* store.pendWake(2, { pending: T0, missed: 0, due: T0 + H })
+    yield* store.pendWake(3, { pending: T0, missed: 0, due: T0 + H })
+    // The oldest fire: 2 and 3 wait at one slot, before 1's; 2 has the least n.
+    answers.push(yield* ids(store))
+    const whole = { given: yield* store.pendingWake(), row: yield* wakeOf(store, 2) }
+    yield* fire(store, 2, { pending: T0, missed: 0 })
+    answers.push(yield* ids(store))
+    // 3 fires, and waits again at a slot before 1's, with its end not counted.
+    yield* fire(store, 3, { pending: T0, missed: 0 })
+    yield* store.pendWake(3, { pending: T0 + H / 2, missed: 0, due: T0 + H })
+    answers.push(yield* ids(store))
+    return { answers, whole }
+  }))
+  expect(got.answers).toEqual([Option.none(), Option.some(2), Option.some(3), Option.some(1)])
+  // The whole row, with the pending and missed that a source hands on.
+  expect(got.whole.given).toEqual(Option.some(got.whole.row!))
+  expect(got.whole.row).toMatchObject({ pending: T0, missed: 0, settled: true })
+  expect(await withReads(file, Reads.use(ids))).toEqual(Option.some(1))
+  settleBySql(file, 3, T0)
+  expect(await withStore(file, Store.use(ids))).toEqual(Option.some(3))
+  expect(await withReads(file, Reads.use(ids))).toEqual(Option.some(3))
+  switchBySql(file, false)
+  expect(await withStore(file, Store.use(ids))).toEqual(Option.none())
+  expect(await withReads(file, Reads.use(ids))).toEqual(Option.none())
+})
+
+test("fireWake: the fire goes in the offer's transaction, after the turn's row: slot the slot read, pending null, missed 0, fired + 1, lastTurn the turn, settled false, due kept, updated the clock's time; a failed transaction writes neither the turn nor the fire", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const row = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    yield* store.pendWake(row.id, { pending: T0, missed: 4, due: T0 + H })
+    const read = Option.getOrThrow(yield* store.pendingWake())
+    const before = yield* wakeOf(store, row.id)
+    const failed = yield* Effect.exit(store.transaction(Effect.gen(function*() {
+      const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+      yield* store.fireWake(row.id, turn.id, { pending: read.pending!, missed: read.missed })
+      return yield* Effect.fail("a later write of the offer failed")
+    })))
+    const kept = { wake: yield* wakeOf(store, row.id), turns: (yield* store.turns(null, 10)).length }
+    yield* TestClock.setTime(T0 + 3)
+    const turn = yield* fire(store, row.id, { pending: read.pending!, missed: read.missed })
+    return { row, before, failed, kept, turn, after: yield* wakeOf(store, row.id) }
+  }))
+  expect(Exit.isFailure(got.failed)).toBe(true)
+  expect(got.kept).toEqual({ wake: got.before, turns: 0 })
+  expect(got.after).toEqual({ ...got.before!, slot: T0, pending: null, missed: 0, fired: 1, lastTurn: got.turn, settled: false, due: T0 + H, updated: T0 + 3 })
+  // Its end counted, the next slot fires again.
+  settleBySql(file, 1, T0 + 4)
+  const again = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* store.pendWake(1, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+    yield* TestClock.setTime(T0 + H)
+    const turn = yield* fire(store, 1, { pending: T0 + H, missed: 0 })
+    return { turn, after: yield* wakeOf(store, 1) }
+  }))
+  expect(again.after).toEqual({ ...got.after!, slot: T0 + H, fired: 2, lastTurn: again.turn, due: T0 + 2 * H, updated: T0 + H })
+})
+
+test("fireWake with a newer slot written between the read and the fire: slot the slot read, the newer slot waits on, and missed loses the read's missed + 1; not below 0; a count at 1,000 stays", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const newer = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const stale = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const capped = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    for (const [row, missed] of [[newer, 4], [stale, 4], [capped, 998]] as const) {
+      yield* store.pendWake(row.id, { pending: T0, missed, due: T0 + H })
+    }
+    const reads = [yield* wakeOf(store, newer.id), yield* wakeOf(store, stale.id), yield* wakeOf(store, capped.id)]
+    // The firer writes a newer slot of each before the fire.
+    for (const row of [newer, stale, capped]) yield* store.pendWake(row.id, { pending: T0 + 2 * H, missed: 5, due: T0 + 3 * H })
+    yield* TestClock.setTime(T0 + 2 * H + 1)
+    const turns = [
+      yield* fire(store, newer.id, { pending: T0, missed: 4 }),
+      // A read whose missed is past the row's: missed stops at 0.
+      yield* fire(store, stale.id, { pending: T0, missed: 50 }),
+      yield* fire(store, capped.id, { pending: T0, missed: 998 })
+    ]
+    return { reads, turns, after: yield* store.wakes() }
+  }))
+  const [newer, stale, capped] = got.reads
+  expect([newer!.missed, stale!.missed, capped!.missed]).toEqual([4, 4, 998])
+  const fired = { slot: T0, pending: T0 + 2 * H, fired: 1, settled: false, due: T0 + 3 * H, updated: T0 + 2 * H + 1 }
+  expect(got.after).toEqual([
+    // 4 + 1 + 5 = 10 before the fire; the fire takes 4 + 1.
+    { ...newer!, ...fired, missed: 5, lastTurn: got.turns[0]! },
+    { ...stale!, ...fired, missed: 0, lastTurn: got.turns[1]! },
+    // 998 + 1 + 5 is past the bound: it stays at 1,000.
+    { ...capped!, ...fired, missed: 1000, lastTurn: got.turns[2]! }
+  ])
+})
+
+test("fireWake of a reminder stops it, why fired, with nothing left to fire; also a reminder whose pendWake gave a due, and one with a newer pending written between the read and the fire (ruling 4a): no StoreError", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const plain = made(yield* store.makeWake({ ...REMINDER, text: "plain", at: T0, first: T0 }, 20))
+    const withDue = made(yield* store.makeWake({ ...REMINDER, text: "with a due", at: T0, first: T0 }, 20))
+    const newer = made(yield* store.makeWake({ ...REMINDER, text: "a newer slot", at: T0, first: T0 }, 20))
+    yield* store.pendWake(plain.id, { pending: T0, missed: 0, due: null })
+    yield* store.pendWake(withDue.id, { pending: T0, missed: 0, due: T0 + H })
+    yield* store.pendWake(newer.id, { pending: T0, missed: 1, due: null })
+    yield* store.pendWake(newer.id, { pending: T0 + H, missed: 2, due: null })
+    yield* TestClock.setTime(T0 + H + 1)
+    const exits = [
+      yield* Effect.exit(fire(store, plain.id, { pending: T0, missed: 0 })),
+      yield* Effect.exit(fire(store, withDue.id, { pending: T0, missed: 0 })),
+      yield* Effect.exit(fire(store, newer.id, { pending: T0, missed: 1 }))
+    ]
+    return { rows: [plain, withDue, newer], exits, after: yield* store.wakes(), active: yield* store.wakes({ active: true }) }
+  }))
+  expect(got.exits.map((exit) => Exit.isSuccess(exit) ? "fired" : String(Cause.squash(exit.cause)))).toEqual(["fired", "fired", "fired"])
+  const turns = got.exits.map((exit) => (Exit.isSuccess(exit) ? exit.value : null))
+  const stopped = { slot: T0, pending: null, missed: 0, due: null, fired: 1, settled: false, stopped: T0 + H + 1, why: "fired" as const, updated: T0 + H + 1 }
+  expect(got.after).toEqual(got.rows.map((row, k) => ({ ...row, ...stopped, lastTurn: turns[k] ?? null })))
+  expect(got.active).toEqual([])
+})
+
+test("fireWake fails with StoreError and writes nothing for a row that is not there, a stopped row, a row whose end is not counted, a row with no fire waiting, a read of a slot that is not the row's waiting one or older, and a turn that the chat has not", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const waits = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const unsettled = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const idle = made(yield* store.makeWake({ ...ROUTINE, first: T0 }, 20))
+    const reminder = made(yield* store.makeWake({ ...REMINDER, at: T0, first: T0 }, 20))
+    yield* store.pendWake(waits.id, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+    yield* store.pendWake(unsettled.id, { pending: T0, missed: 0, due: T0 + H })
+    yield* fire(store, unsettled.id, { pending: T0, missed: 0 })
+    yield* store.pendWake(unsettled.id, { pending: T0 + H, missed: 0, due: T0 + 2 * H })
+    yield* store.pendWake(reminder.id, { pending: T0, missed: 0, due: null })
+    yield* fire(store, reminder.id, { pending: T0, missed: 0 })
+    const before = { wakes: yield* store.wakes(), turns: (yield* store.turns(null, 10)).length }
+    const [turn] = yield* store.turns(null, 1)
+    const tries = [
+      store.fireWake(9, turn!.id, { pending: T0 + H, missed: 0 }),
+      store.fireWake(reminder.id, turn!.id, { pending: T0, missed: 0 }),
+      store.fireWake(unsettled.id, turn!.id, { pending: T0 + H, missed: 0 }),
+      store.fireWake(idle.id, turn!.id, { pending: T0, missed: 0 }),
+      store.fireWake(waits.id, turn!.id, { pending: T0 + 2 * H, missed: 0 }),
+      store.fireWake(waits.id, 99, { pending: T0 + H, missed: 0 })
+    ]
+    const errors = []
+    for (const one of tries) errors.push(yield* Effect.flip(one))
+    return { before, errors, after: { wakes: yield* store.wakes(), turns: (yield* store.turns(null, 10)).length } }
+  }))
+  // SQLite's own text: the driver's error (`reason`) holds it.
+  const sqlite = (error: StoreError) => String((error.cause as { readonly reason?: { readonly cause?: unknown } }).reason?.cause)
+  expect(got.errors.map((error, k) => [error instanceof StoreError, error.op, k < 5 ? String(error.cause) : sqlite(error)])).toEqual([
+    [true, "fireWake", "Error: the chat has no wake-up 9"],
+    [true, "fireWake", "Error: the wake-up 4 stopped, and has no fire"],
+    [true, "fireWake", "Error: the wake-up 2's last fire is not settled"],
+    [true, "fireWake", `Error: the wake-up 3 has no fire of the slot ${T0} waiting`],
+    [true, "fireWake", `Error: the wake-up 1 has no fire of the slot ${T0 + 2 * H} waiting`],
+    [true, "fireWake", expect.stringContaining("FOREIGN KEY constraint failed")]
+  ])
+  expect(got.after).toEqual(got.before)
+})
+
+test("fires: the wake messages created at or after since, each counted once at its last page; a page with more = 1 and a message of another kind are not counted; since exactly counts, 1 ms after it does not; the same on the reads", async () => {
+  const file = newFile()
+  await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    yield* store.append([{ kind: "wake", text: "page 1", more: true }, { kind: "wake", text: "page 2" }])
+    yield* TestClock.setTime(T0 + 1)
+    yield* store.append([{ kind: "wake", text: "one page" }])
+    yield* store.append([{ kind: "note", text: "a note" }, { kind: "user", text: "a word" }])
+    yield* TestClock.setTime(T0 + 2)
+    yield* store.append([{ kind: "late", text: "a late result" }])
+  }))
+  const ask = (reads: Reading) => Effect.all([reads.fires(0), reads.fires(T0 - 1), reads.fires(T0), reads.fires(T0 + 1), reads.fires(T0 + 2)])
+  expect(rows(file, "select k.name as kind, m.more, m.created from everchat_msg m join everchat_kind k on k.id = m.kind order by m.i")).toEqual([
+    { kind: "wake", more: 1, created: T0 },
+    { kind: "wake", more: 0, created: T0 },
+    { kind: "wake", more: 0, created: T0 + 1 },
+    { kind: "note", more: 0, created: T0 + 1 },
+    { kind: "user", more: 0, created: T0 + 1 },
+    { kind: "late", more: 0, created: T0 + 2 }
+  ])
+  expect(await withStore(file, Store.use(ask))).toEqual([2, 2, 2, 1, 0])
+  expect(await withReads(file, Reads.use(ask))).toEqual([2, 2, 2, 1, 0])
+})
+
+// The settle, the stops, the switch, the rows of a program (docs/wakeups.md,
+// sections 3 and 7)
+// --------------------------------------------------------------------------
+
+// A slot `slot` of the wake-up `n` comes (`pendWake`, the next slot an hour
+// on) and fires, as an offer writes it: gives the turn that the fire
+// started. The row's end is not counted yet.
+const fireSlot = (store: typeof Store.Service, n: number, slot: number) =>
+  Effect.andThen(store.pendWake(n, { pending: slot, missed: 0, due: slot + H }), fire(store, n, { pending: slot, missed: 0 }))
+
+// The why of a turn that its ceiling stopped, as the turn loop will write it
+// (docs/wakeups.md, section 6).
+const CEILING_WHY = "Stopped: this wake-up's turn reached its ceiling of steps or tokens."
+
+// What a row of `unsettledWakes` says.
+const unsettledOf = (rows: ReadonlyArray<UnsettledWake>) => rows.map((row) => [row.wake.id, row.wake.lastTurn, row.status, row.why, row.wake.failed])
+
+test("settleWake: each end of section 7's table: a done turn sets failed to 0, a failed turn and one that its ceiling stopped (end failed) add 1, a turn that the person stopped (end kept) keeps the count; each sets settled, updated the clock's time, and gives settled and not stopped", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    const ends = [
+      { status: "failed", why: "the model failed", end: "failed" },
+      { status: "done", why: null, end: "done" },
+      { status: "stopped", why: CEILING_WHY, end: "failed" },
+      { status: "stopped", why: "Stopped.", end: "kept" },
+      { status: "done", why: null, end: "done" }
+    ] as const
+    const seen = []
+    for (const [k, { end, status, why }] of ends.entries()) {
+      const slot = T0 + k * H
+      yield* TestClock.setTime(slot)
+      const turn = yield* fireSlot(store, 1, slot)
+      yield* store.endTurn(turn, status, why)
+      const unsettled = unsettledOf(yield* store.unsettledWakes())
+      yield* TestClock.setTime(slot + 1)
+      const answer = yield* store.settleWake(1, turn, end)
+      const row = (yield* wakeOf(store, 1))!
+      seen.push({ unsettled, answer, row: [row.failed, row.settled, row.updated, row.stopped, row.why, row.lastTurn, row.fired] })
+    }
+    return seen
+  }))
+  expect(got).toEqual([
+    { unsettled: [[1, 1, "failed", "the model failed", 0]], answer: { settled: true, stopped: false }, row: [1, true, T0 + 1, null, null, 1, 1] },
+    { unsettled: [[1, 2, "done", null, 1]], answer: { settled: true, stopped: false }, row: [0, true, T0 + H + 1, null, null, 2, 2] },
+    { unsettled: [[1, 3, "stopped", CEILING_WHY, 0]], answer: { settled: true, stopped: false }, row: [1, true, T0 + 2 * H + 1, null, null, 3, 3] },
+    { unsettled: [[1, 4, "stopped", "Stopped.", 1]], answer: { settled: true, stopped: false }, row: [1, true, T0 + 3 * H + 1, null, null, 4, 4] },
+    { unsettled: [[1, 5, "done", null, 1]], answer: { settled: true, stopped: false }, row: [0, true, T0 + 4 * H + 1, null, null, 5, 5] }
+  ])
+})
+
+test(`settleWake: the second failure in a row (WAKE_FAILURES) stops the active row in the same statement, why failed, at the clock's time, with its waiting fire cleared (due, pending null, missed 0); it gives settled and stopped, and the row is in no answer of dueWakes, pendingWake or wakes({ active: true })`, async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    const first = yield* fireSlot(store, 1, T0)
+    const once = yield* store.settleWake(1, first, "failed")
+    yield* TestClock.setTime(T0 + H)
+    const second = yield* fireSlot(store, 1, T0 + H)
+    // While the turn runs, a newer slot comes and waits, with 4 missed.
+    yield* TestClock.setTime(T0 + 3 * H)
+    const pended = yield* store.pendWake(1, { pending: T0 + 3 * H, missed: 4, due: T0 + 4 * H })
+    const waiting = (yield* wakeOf(store, 1))!
+    yield* TestClock.setTime(T0 + 3 * H + 5)
+    const twice = yield* store.settleWake(1, second, "failed")
+    return {
+      once,
+      pended,
+      waiting: [waiting.pending, waiting.missed, waiting.due],
+      twice,
+      row: (yield* wakeOf(store, 1))!,
+      due: yield* store.dueWakes(Number.MAX_SAFE_INTEGER),
+      pending: yield* store.pendingWake(),
+      active: yield* store.wakes({ active: true })
+    }
+  }))
+  expect(WAKE_FAILURES).toBe(2)
+  expect(got.once).toEqual({ settled: true, stopped: false })
+  expect(got.pended).toBe(true)
+  expect(got.waiting).toEqual([T0 + 3 * H, 4, T0 + 4 * H])
+  expect(got.twice).toEqual({ settled: true, stopped: true })
+  expect(got.row).toMatchObject({
+    failed: 2,
+    settled: true,
+    stopped: T0 + 3 * H + 5,
+    why: "failed",
+    stopCall: null,
+    due: null,
+    pending: null,
+    missed: 0,
+    slot: T0 + H,
+    fired: 2,
+    lastTurn: 2,
+    updated: T0 + 3 * H + 5
+  })
+  expect(got.due).toEqual([])
+  expect(Option.isNone(got.pending)).toBe(true)
+  expect(got.active).toEqual([])
+})
+
+test("settleWake of a row stopped in between (by the person, by unwake, a reminder that fired) counts the end and settles it, and the row keeps its first stopped and why: a count that reaches 2 then stops nothing, and the answer is settled and not stopped", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const [call] = yield* functions(store, 1)
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "the other" }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "the third" }, 20))
+    made(yield* store.makeWake({ ...REMINDER, at: T0 + 2 * H, first: T0 + 2 * H }, 20))
+    // Routines 2 and 3 have failed once; each fires again.
+    const turns: Array<number> = []
+    for (const n of [2, 3]) {
+      yield* store.settleWake(n, yield* fireSlot(store, n, T0), "failed")
+      turns.push(yield* fireSlot(store, n, T0 + H))
+    }
+    // The reminder fires: it stops, why fired.
+    const reminder = yield* fireSlot(store, 4, T0 + 2 * H)
+    yield* TestClock.setTime(T0 + 3 * H)
+    const stops = [yield* store.stopWake(2, "person"), yield* store.stopWake(3, "unwake", call!)]
+    yield* TestClock.setTime(T0 + 4 * H)
+    const answers = [
+      yield* store.settleWake(2, turns[0]!, "failed"),
+      yield* store.settleWake(3, turns[1]!, "failed"),
+      yield* store.settleWake(4, reminder, "failed")
+    ]
+    const rows = (yield* store.wakes()).filter((wake) => wake.id > 1)
+    return { stops, answers, rows: rows.map((row) => [row.id, row.failed, row.settled, row.stopped, row.why, row.stopCall, row.updated]) }
+  }))
+  expect(got.stops).toEqual([true, true])
+  expect(got.answers).toEqual([{ settled: true, stopped: false }, { settled: true, stopped: false }, { settled: true, stopped: false }])
+  expect(got.rows).toEqual([
+    [2, 2, true, T0 + 3 * H, "person", null, T0 + 4 * H],
+    [3, 2, true, T0 + 3 * H, "unwake", 2, T0 + 4 * H],
+    [4, 1, true, T0, "fired", null, T0 + 4 * H]
+  ])
+})
+
+test("settleWake while the chat's wake-ups are off: the end is counted, and the second failure stops the row, as when on (the switch is not read)", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "the other" }, 20))
+    const one = yield* fireSlot(store, 1, T0)
+    const two = yield* fireSlot(store, 2, T0)
+    const off = yield* store.setWakeups(false)
+    const done = yield* store.settleWake(1, one, "done")
+    const failed = yield* store.settleWake(2, two, "failed")
+    // Off: no fire is pended; on, routine 2 fires again; off, its second
+    // failure is counted.
+    yield* store.setWakeups(true)
+    const again = yield* fireSlot(store, 2, T0 + H)
+    yield* store.setWakeups(false)
+    const stopped = yield* store.settleWake(2, again, "failed")
+    return { off, done, failed, stopped, chat: (yield* store.chat).wakeups, rows: (yield* store.wakes()).map((row) => [row.id, row.failed, row.settled, row.why]) }
+  }))
+  expect(got).toEqual({
+    off: true,
+    done: { settled: true, stopped: false },
+    failed: { settled: true, stopped: false },
+    stopped: { settled: true, stopped: true },
+    chat: false,
+    rows: [[1, 0, true, null], [2, 2, true, "failed"]]
+  })
+})
+
+test("settleWake changes nothing, and gives not settled, for another turn than the row's last, an older one, a second settle, a row that never fired, and a row that is not there: the row and its updated as they were", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "never fired" }, 20))
+    const first = yield* fireSlot(store, 1, T0)
+    yield* store.settleWake(1, first, "failed")
+    yield* TestClock.setTime(T0 + H)
+    const last = yield* fireSlot(store, 1, T0 + H)
+    // A turn of no fire of this row.
+    const other = (yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })).id
+    const before = wakeRow(file, 1)
+    yield* TestClock.setTime(T0 + 2 * H)
+    const refused = [
+      yield* store.settleWake(1, other, "failed"),
+      yield* store.settleWake(1, first, "failed"),
+      yield* store.settleWake(1, 99, "done"),
+      yield* store.settleWake(2, last, "failed"),
+      yield* store.settleWake(9, last, "failed")
+    ]
+    const unchanged = wakeRow(file, 1)
+    const settled = yield* store.settleWake(1, last, "done")
+    const after = wakeRow(file, 1)
+    yield* TestClock.setTime(T0 + 3 * H)
+    const twice = [yield* store.settleWake(1, last, "failed"), yield* store.settleWake(1, last, "done")]
+    return { before, refused, unchanged, settled, after, twice, again: wakeRow(file, 1), never: wakeRow(file, 2) }
+  }))
+  const none = { settled: false, stopped: false }
+  expect(got.refused).toEqual([none, none, none, none, none])
+  expect(got.unchanged).toEqual(got.before)
+  expect(got.before).toMatchObject({ failed: 1, settled: 0, last_turn: 2 })
+  expect(got.settled).toEqual({ settled: true, stopped: false })
+  expect(got.after).toMatchObject({ failed: 0, settled: 1, last_turn: 2, updated: T0 + 2 * H })
+  expect(got.twice).toEqual([none, none])
+  expect(got.again).toEqual(got.after)
+  expect(got.never).toMatchObject({ failed: 0, settled: 1, last_turn: null, updated: T0 })
+})
+
+test("settleWake, stopWake and setWakeups are each the write of a note: in the note's transaction they commit with its page, and a transaction that fails after them leaves neither the page nor their change", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "the other" }, 20))
+    yield* store.settleWake(1, yield* fireSlot(store, 1, T0), "failed")
+    const turn = yield* fireSlot(store, 1, T0 + H)
+    // The form of `Turns.note`'s `write` (turn.ts).
+    const writes: ReadonlyArray<readonly [string, (first: Message) => Effect.Effect<void, StoreError>]> = [
+      ["Wake-up 1 stopped: two of its turns in a row failed or reached the ceiling.", () => store.settleWake(1, turn, "failed")],
+      ["Wake-up 2 stopped by the person.", () => store.stopWake(2, "person")],
+      ["The person turned the wake-ups off.", () => store.setWakeups(false)]
+    ]
+    // As `Turns.note` logs a note: its page, then the write, in one
+    // transaction.
+    const note = (text: string, write: (first: Message) => Effect.Effect<void, StoreError>) =>
+      store.transaction(Effect.flatMap(store.append([{ kind: "note", text }]), (written) => write(written[0]!)))
+    const failed = []
+    for (const [text, write] of writes) failed.push(yield* Effect.flip(store.transaction(Effect.andThen(note(text, write), Effect.fail("after the write")))))
+    const kept = { rows: [wakeRow(file, 1), wakeRow(file, 2)], chat: (yield* store.chat).wakeups, count: yield* store.count }
+    for (const [text, write] of writes) yield* note(text, write)
+    const notes = (yield* store.messages(0, 100)).filter((message) => message.kind === "note").map((message) => message.text)
+    return { failed, kept, notes, rows: (yield* store.wakes()).map((row) => [row.id, row.settled, row.failed, row.why]), chat: (yield* store.chat).wakeups }
+  }))
+  expect(got.failed).toEqual(["after the write", "after the write", "after the write"])
+  expect(got.kept.rows[0]).toMatchObject({ settled: 0, failed: 1, stopped: null })
+  expect(got.kept.rows[1]).toMatchObject({ stopped: null, why: null })
+  expect(got.kept.chat).toBe(true)
+  expect(got.kept.count).toBe(0)
+  expect(got.notes).toEqual([
+    "Wake-up 1 stopped: two of its turns in a row failed or reached the ceiling.",
+    "Wake-up 2 stopped by the person.",
+    "The person turned the wake-ups off."
+  ])
+  expect(got.rows).toEqual([[1, true, 2, "failed"], [2, true, 0, "person"]])
+  expect(got.chat).toBe(false)
+})
+
+test("unsettledWakes: the rows whose end is not counted, in the order of their ids, each with its last turn's status and why and its failed count; a settled row and a row that never fired are left out; the switch is not read; the same on the reads", async () => {
+  const file = newFile()
+  await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    yield* TestClock.setTime(T0)
+    for (const text of ["one", "two", "three", "four", "five"]) made(yield* store.makeWake({ ...ROUTINE, text }, 20))
+    // 1: fired, its turn runs. 2: fired once and failed, settled; fired
+    // again, its turn failed. 3: never fired. 4: fired, settled. 5: fired,
+    // its turn stopped by the ceiling.
+    yield* fireSlot(store, 1, T0)
+    yield* store.settleWake(2, yield* fireSlot(store, 2, T0), "failed")
+    yield* store.endTurn(yield* fireSlot(store, 2, T0 + H), "failed", "the model failed")
+    yield* store.settleWake(4, yield* fireSlot(store, 4, T0), "done")
+    yield* store.endTurn(yield* fireSlot(store, 5, T0), "stopped", CEILING_WHY)
+    yield* store.setWakeups(false)
+  }))
+  const read = (reads: Reading) => Effect.map(reads.unsettledWakes(), (rows) => ({ rows: unsettledOf(rows), wakes: rows.map((row) => row.wake) }))
+  const fromStore = await withStore(file, Store.use((store) => Effect.all({ got: read(store), wakes: store.wakes() })))
+  const fromReads = await withReads(file, Reads.use(read))
+  expect(fromStore.got.rows).toEqual([
+    [1, 1, "running", null, 0],
+    [2, 3, "failed", "the model failed", 1],
+    [5, 5, "stopped", CEILING_WHY, 0]
+  ])
+  // Each row whole, as `wakes` gives it.
+  expect(fromStore.got.wakes).toEqual(fromStore.wakes.filter((wake) => [1, 2, 5].includes(wake.id)))
+  expect(fromReads).toEqual(fromStore.got)
+})
+
+test("stopWake: an active row stops at the clock's time, why unwake with the function's call or person with none, with its waiting fire cleared (due, pending null, missed 0), and gives true; it is in no answer of dueWakes or pendingWake; its end, if not counted, stays to count", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const [call] = yield* functions(store, 1)
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "the other" }, 20))
+    // 1: fired, and a newer slot waits, with 3 missed; its end not counted.
+    const turn = yield* fireSlot(store, 1, T0)
+    yield* store.pendWake(1, { pending: T0 + H, missed: 3, due: T0 + 2 * H })
+    // 2: a fire waits.
+    yield* store.pendWake(2, { pending: T0, missed: 1, due: T0 + H })
+    yield* TestClock.setTime(T0 + 2 * H)
+    const before = { due: (yield* store.dueWakes(T0 + 2 * H)).map((wake) => wake.id), pending: Option.map(yield* store.pendingWake(), (wake) => wake.id) }
+    const stops = [yield* store.stopWake(1, "unwake", call!), yield* store.stopWake(2, "person")]
+    return {
+      before,
+      stops,
+      rows: yield* store.wakes(),
+      due: yield* store.dueWakes(Number.MAX_SAFE_INTEGER),
+      pending: yield* store.pendingWake(),
+      unsettled: unsettledOf(yield* store.unsettledWakes()),
+      turn,
+      call: call!
+    }
+  }))
+  expect(got.before).toEqual({ due: [2, 1], pending: Option.some(2) })
+  expect(got.stops).toEqual([true, true])
+  const stopped = { stopped: T0 + 2 * H, due: null, pending: null, missed: 0, updated: T0 + 2 * H }
+  expect(got.rows[0]).toMatchObject({ ...stopped, why: "unwake", stopCall: got.call, settled: false, lastTurn: got.turn, slot: T0, fired: 1 })
+  expect(got.rows[1]).toMatchObject({ ...stopped, why: "person", stopCall: null, settled: true, lastTurn: null, slot: null, fired: 0 })
+  expect(got.due).toEqual([])
+  expect(Option.isNone(got.pending)).toBe(true)
+  expect(got.unsettled).toEqual([[1, got.turn, "running", null, 0]])
+})
+
+test("stopWake changes nothing and gives false for a row that stopped already (each why, each kind of stop) and a row that is not there; the person's stop with a call fails with StoreError and writes nothing; a call that the chat has not is refused by the reference", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const [call] = yield* functions(store, 1)
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake(ROUTINE, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "two" }, 20))
+    made(yield* store.makeWake({ ...REMINDER, at: T0, first: T0 }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "four" }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "five" }, 20))
+    yield* store.stopWake(1, "unwake", call!)
+    yield* store.stopWake(2, "person")
+    yield* fireSlot(store, 3, T0)
+    // 4 stops at its second failure.
+    yield* store.settleWake(4, yield* fireSlot(store, 4, T0), "failed")
+    yield* store.settleWake(4, yield* fireSlot(store, 4, T0 + H), "failed")
+    const before = [1, 2, 3, 4].map((n) => wakeRow(file, n))
+    yield* TestClock.setTime(T0 + 5 * H)
+    const again = []
+    for (const n of [1, 2, 3, 4]) again.push(yield* store.stopWake(n, "person"), yield* store.stopWake(n, "unwake", call!), yield* store.stopWake(n, "unwake"))
+    const missing = [yield* store.stopWake(9, "person"), yield* store.stopWake(9, "unwake", call!)]
+    const after = [1, 2, 3, 4].map((n) => wakeRow(file, n))
+    const five = wakeRow(file, 5)
+    const refused = [yield* Effect.flip(store.stopWake(5, "person", call!)), yield* Effect.flip(store.stopWake(5, "unwake", 99))]
+    return { before, again, missing, after, five, refused, still: wakeRow(file, 5) }
+  }))
+  expect(got.before.map((row) => row!["why"])).toEqual(["unwake", "person", "fired", "failed"])
+  expect(got.again).toEqual(Array.from({ length: 12 }, () => false))
+  expect(got.missing).toEqual([false, false])
+  expect(got.after).toEqual(got.before)
+  expect(got.refused.map((error) => [error instanceof StoreError, error.op])).toEqual([[true, "stopWake"], [true, "stopWake"]])
+  expect(String(got.refused[0]!.cause)).toBe("Error: the person's stop of a wake-up has no call")
+  expect(String((got.refused[1]!.cause as { readonly cause?: unknown }).cause)).toContain("ConstraintError")
+  expect(got.still).toEqual(got.five)
+  expect(got.five).toMatchObject({ stopped: null, why: null, stop_call: null })
+})
+
+test("setWakeups: off and on, each gives true, sets the chat's wakeups and updated; the same value again gives false and changes nothing, updated too; read by chat on the store and on the reads", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const read = Effect.map(store.chat, (chat) => [chat.wakeups, chat.updated])
+    const fresh = yield* read
+    const seen = []
+    for (const [at, on] of [[1000, false], [2000, false], [3000, true], [4000, true], [5000, false]] as const) {
+      yield* TestClock.setTime(at)
+      seen.push([on, yield* store.setWakeups(on), ...(yield* read)])
+    }
+    return { fresh, seen }
+  }))
+  expect(got.fresh[0]).toBe(true)
+  expect(got.seen).toEqual([
+    [false, true, false, 1000],
+    [false, false, false, 1000],
+    [true, true, true, 3000],
+    [true, false, true, 3000],
+    [false, true, false, 5000]
+  ])
+  expect(rows(file, "select wakeups, updated from everchat_chat")).toEqual([{ wakeups: 0, updated: 5000 }])
+  expect((await withReads(file, Reads.use((reads) => reads.chat))).wakeups).toBe(false)
+})
+
+test("wakesOf: the rows that a function call of the program made or stopped, in the order of those calls, each with which and the call; a row made and stopped by one program is given two times; a row made by the program's own call, by another program, or otherwise is not; a function or no call gives none; the same on the reads", async () => {
+  const file = newFile()
+  const want = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    // Program 1 with its functions 2, 3, 4 and 5; program 6 with its 7.
+    const [f1, f2, f3, f4] = yield* functions(store, 4)
+    const [g1] = yield* functions(store, 1)
+    yield* TestClock.setTime(T0)
+    made(yield* store.makeWake({ ...ROUTINE, text: "made by 4, stopped by 5", turn: 1, call: f3! }, 20))
+    made(yield* store.makeWake({ ...REMINDER, text: "made by 2", turn: 1, call: f1! }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "made otherwise, stopped by 3" }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "made by 7", turn: 2, call: g1! }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "made by program 1 itself", turn: 1, call: 1 }, 20))
+    made(yield* store.makeWake({ ...ROUTINE, text: "stopped by the person" }, 20))
+    yield* store.stopWake(3, "unwake", f2!)
+    yield* store.stopWake(1, "unwake", f4!)
+    yield* store.stopWake(6, "person")
+    const all = yield* store.wakes()
+    const of = (n: number) => all.find((wake) => wake.id === n)!
+    const wants: Record<1 | 6, Array<WakeOf>> = {
+      1: [{ wake: of(2), by: "made", call: 2 }, { wake: of(3), by: "stopped", call: 3 }, { wake: of(1), by: "made", call: 4 }, { wake: of(1), by: "stopped", call: 5 }],
+      6: [{ wake: of(4), by: "made", call: 7 }]
+    }
+    return wants
+  }))
+  const read = (reads: Reading) => Effect.all([1, 6, 2, 5, 7, 99].map((program) => reads.wakesOf(program)))
+  const fromStore = await withStore(file, Store.use(read))
+  const fromReads = await withReads(file, Reads.use(read))
+  expect(fromStore).toEqual([want[1], want[6], [], [], [], []])
+  expect(fromReads).toEqual(fromStore)
+})
+
+// A turn's ceiling (docs/wakeups.md, sections 3 and 6)
+// ----------------------------------------------------
+
+test("startTurn with a ceiling: the turn is given with its steps and tokens by startTurn, turn, turns and runningTurns, on the store and on the reads, and after the store is opened again; a turn started with none has both null, and the ceiling stays when the turn ends", async () => {
+  const file = newFile()
+  const started = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const wake = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0, steps: 20, tokens: 2_000_000 })
+    const person = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const given = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0, steps: null, tokens: null })
+    const ended = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0, steps: 1, tokens: Number.MAX_SAFE_INTEGER })
+    yield* store.endTurn(ended.id, "stopped", CEILING_WHY)
+    return [wake, person, given, ended].map((turn) => [turn.id, turn.steps, turn.tokens])
+  }))
+  expect(started).toEqual([[1, 20, 2_000_000], [2, null, null], [3, null, null], [4, 1, Number.MAX_SAFE_INTEGER]])
+  const want = [[1, 20, 2_000_000], [2, null, null], [3, null, null], [4, 1, Number.MAX_SAFE_INTEGER]]
+  const read = (reads: Reading) =>
+    Effect.gen(function*() {
+      const ceiling = (turn: Turn) => [turn.id, turn.steps, turn.tokens]
+      const one = []
+      for (const n of [1, 2, 3, 4]) one.push(Option.map(yield* reads.turn(n), ceiling))
+      return {
+        turn: one,
+        turns: (yield* reads.turns(null, 10)).map(ceiling),
+        running: (yield* reads.runningTurns(null)).map(ceiling)
+      }
+    })
+  const fromStore = await withStore(file, Store.use(read))
+  const fromReads = await withReads(file, Reads.use(read))
+  expect(fromStore).toEqual({
+    turn: want.map((turn) => Option.some(turn)),
+    turns: [...want].reverse(),
+    running: want.slice(0, 3)
+  })
+  expect(fromReads).toEqual(fromStore)
+  expect(rows(file, "select n, steps, tokens from everchat_turn order by n")).toEqual(want.map(([n, steps, tokens]) => ({ n, steps, tokens })))
+})
+
+test("startTurn refuses a ceiling of steps with no tokens, tokens with no steps, 0, a negative number, a fraction, NaN and Infinity with StoreError before its transaction: no turn, head or pick is written; the next turn takes id 1", async () => {
+  const file = newFile()
+  const tries: ReadonlyArray<{ readonly steps?: number | null; readonly tokens?: number | null }> = [
+    { steps: 20 },
+    { steps: 20, tokens: null },
+    { tokens: 100 },
+    { steps: null, tokens: 100 },
+    { steps: 0, tokens: 100 },
+    { steps: 20, tokens: 0 },
+    { steps: -1, tokens: 100 },
+    { steps: 20, tokens: -100 },
+    { steps: 1.5, tokens: 100 },
+    { steps: 20, tokens: 100.25 },
+    { steps: Number.NaN, tokens: 100 },
+    { steps: 20, tokens: Number.POSITIVE_INFINITY }
+  ]
+  const counts = () => rows(file, "select (select count(*) from everchat_turn) as turns, (select count(*) from everchat_head) as heads, (select count(*) from everchat_pick) as picks")[0]
+  await withStore(file, Effect.void)
+  const before = counts()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const errors = []
+    for (const [k, ceiling] of tries.entries()) {
+      errors.push(yield* Effect.flip(store.startTurn({ pick: { ...PICK, model: `refused ${k}` }, head: `{"refused":${k}}`, firstMsg: 0, ...ceiling })))
+    }
+    const after = counts()
+    return { errors, after, next: yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0, steps: 20, tokens: 100 }) }
+  }))
+  expect(got.errors.map((error) => [error instanceof StoreError, error.op])).toEqual(tries.map(() => [true, "startTurn"]))
+  expect(got.errors.map((error) => String(error.cause))).toEqual(tries.map((ceiling) =>
+    `Error: a turn's ceiling is both steps and tokens, each a whole number over 0, or neither, not ${ceiling.steps ?? null} steps and ${ceiling.tokens ?? null} tokens`
+  ))
+  expect(got.after).toEqual(before)
+  expect([got.next.id, got.next.steps, got.next.tokens]).toEqual([1, 20, 100])
+})
+
+// The comparison of the row's states
+// ----------------------------------
+//
+// Two pieces: the page's states of a wake-up (docs/wakeups.md, sections 2
+// and 7, with the lead's rulings 2 to 4a of ec-muncvc and 1 to 4 of
+// ec-w8sgt0), written below as a model of the rows of a chat with no SQL;
+// and the store's members over SQLite. The relation: equal. After each
+// step of a seeded sequence, over two chats of one file, each row that
+// `wakes()` gives equals the model's row, and `dueWakes(now)`,
+// `pendingWake()`, `unsettledWakes()` and the chat's `wakeups` equal the
+// model's answers; so do the answers of `pendWake`, `settleWake`,
+// `stopWake` and `setWakeups`. The oracle is the model; a `StoreError` in a
+// step is a failure too (lead, ec-e75r, D1). Three claims hold after each
+// step, on the store's answers: a stopped row is in no answer of
+// `dueWakes` and `pendingWake`; a count of failures at `WAKE_FAILURES` is a
+// row stopped with why `failed`, unless it stopped before; no row has its
+// count to come (`settled` false) with no last turn.
+//
+// The steps: a make (a routine or a reminder); a `pendWake` of a slot
+// before, at and after the row's `slot`, its waiting `pending` and its
+// `due`, with a count of 0, 1, 999, 1,000 or 1,001 and a next `due` or
+// none, also while the chat is off; a fire of what `pendingWake` gave, as
+// an offer writes it (the turn's row, then `fireWake`, in one transaction),
+// with or without a `pendWake` of the same row between the read and the
+// fire, and while off a fire that the source read before the switch; a
+// `settleWake` with each end, of the row's last turn, of another turn, of
+// a row not there, and a second time; the end of a turn (done, failed, or
+// stopped by its ceiling or the person); a `stopWake` of each kind, with
+// and without `unwake`'s call, on an active row, on a stopped one and on
+// one not there; `setWakeups` off and on, also to the value it had; and the
+// clock moved on or back. The bounds: SEEDS sequences of STEPS steps each
+// (100 of 100: 10,000 steps), fixed seeds 1 to 100, in one case with its
+// own timeout (BOUND, 120 s); it ran in about 11 s at its writing (junit).
+// A failure prints its seed and the whole sequence up to the step that
+// failed. It found no disagreement of the model and the store, so it has
+// no fixed case of its own; the planted faults that only it finds:
+// `pendWake` that keeps the old `due` when a fire waits and the given
+// `due` is null (ec-muncvc); `unsettledWakes` in the order of `last_turn`,
+// not of the row's id (ec-w8sgt0).
+
+const SEEDS = Array.from({ length: 100 }, (_, k) => 1 + k)
+const STEPS = 100
+const BOUND = 120_000
+
+// A seeded generator (mulberry32): the same seed, the same sequence.
+const seeded = (seed: number) => {
+  let a = seed >>> 0
+  const next = () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const pick = <A>(from: ReadonlyArray<A>): A => from[Math.floor(next() * from.length)]!
+  return { next, pick }
+}
+
+type Row = { -readonly [K in keyof Wake]: Wake[K] }
+
+// The model of one chat: its switch, the counts of its turns and calls,
+// the ends of its turns, the rows whose count of failures reached
+// `WAKE_FAILURES` after they had stopped, and its rows.
+interface Modeled {
+  on: boolean
+  turns: number
+  calls: number
+  readonly ended: Map<number, { readonly status: Turn["status"]; readonly why: string | null }>
+  readonly stoppedFirst: Set<number>
+  readonly rows: Array<Row>
+}
+
+const newModeled = (): Modeled => ({ on: true, turns: 0, calls: 0, ended: new Map(), stoppedFirst: new Set(), rows: [] })
+
+const MISSED_MAX = 1000
+
+// The model's rows as `wakes()` gives them, in the order of their ids.
+const modelWakes = (chat: Modeled): Array<Wake> => chat.rows.map((row) => ({ ...row }))
+
+const modelMake = (chat: Modeled, wake: { readonly text: string; readonly cron: string | null; readonly at: number | null; readonly first: number }, now: number): Wake => {
+  const row: Row = {
+    id: chat.rows.length + 1,
+    text: wake.text,
+    cron: wake.cron,
+    at: wake.at,
+    zone: "Europe/Berlin",
+    first: wake.first,
+    turn: null,
+    call: null,
+    due: wake.first,
+    slot: null,
+    pending: null,
+    missed: 0,
+    fired: 0,
+    lastTurn: null,
+    settled: true,
+    failed: 0,
+    stopped: null,
+    why: null,
+    stopCall: null,
+    created: now,
+    updated: now
+  }
+  chat.rows.push(row)
+  return { ...row }
+}
+
+// The table's row "its slot comes" and "another slot comes before it
+// fires" (rulings 2): only an active row of a chat that is on, only a slot
+// after `slot` and after the waiting `pending`.
+const modelPend = (chat: Modeled, n: number, pend: { readonly pending: number; readonly missed: number; readonly due: number | null }, now: number): boolean => {
+  const row = chat.rows.find((one) => one.id === n)
+  if (row === undefined || !chat.on || row.stopped !== null) return false
+  if (row.slot !== null && pend.pending <= row.slot) return false
+  if (row.pending !== null && pend.pending <= row.pending) return false
+  row.missed = row.pending === null ? Math.min(pend.missed, MISSED_MAX) : Math.min(row.missed + 1 + pend.missed, MISSED_MAX)
+  row.pending = pend.pending
+  row.due = pend.due
+  row.updated = now
+  return true
+}
+
+// Ruling 1.
+const modelDue = (chat: Modeled, now: number): Array<Wake> =>
+  chat.on
+    ? chat.rows.filter((row) => row.stopped === null && row.due !== null && row.due <= now).sort((x, y) => x.due! - y.due! || x.id - y.id).map((row) => ({ ...row }))
+    : []
+
+// Ruling 3.
+const modelPending = (chat: Modeled): Option.Option<Wake> => {
+  if (!chat.on) return Option.none()
+  const waiting = chat.rows.filter((row) => row.stopped === null && row.settled && row.pending !== null).sort((x, y) => x.pending! - y.pending! || x.id - y.id)
+  return waiting.length === 0 ? Option.none() : Option.some({ ...waiting[0]! })
+}
+
+// The table's row "the source offers it" (rulings 4 and 4a).
+const modelFire = (chat: Modeled, n: number, turn: number, read: { readonly pending: number; readonly missed: number }, now: number) => {
+  const row = chat.rows.find((one) => one.id === n)!
+  row.slot = read.pending
+  row.fired += 1
+  row.lastTurn = turn
+  row.settled = false
+  row.updated = now
+  if (row.cron === null) {
+    row.stopped = now
+    row.why = "fired"
+    row.due = null
+    row.pending = null
+    row.missed = 0
+  } else if (row.pending === read.pending) {
+    row.pending = null
+    row.missed = 0
+  } else if (row.missed < MISSED_MAX) {
+    row.missed = Math.max(row.missed - read.missed - 1, 0)
+  }
+}
+
+// The table's rows of the end of `last_turn` (ruling 1 of this bead,
+// ec-w8sgt0): only the row's last turn, not counted yet; the count by the
+// end; at `WAKE_FAILURES`, an active row stops, with nothing left to fire.
+// The switch is not read.
+const modelSettle = (chat: Modeled, n: number, turn: number, end: "done" | "failed" | "kept", now: number) => {
+  const row = chat.rows.find((one) => one.id === n)
+  if (row === undefined || row.lastTurn !== turn || row.settled) return { settled: false, stopped: false }
+  row.failed = end === "done" ? 0 : end === "failed" ? row.failed + 1 : row.failed
+  row.settled = true
+  row.updated = now
+  if (row.failed >= WAKE_FAILURES && end === "failed") {
+    if (row.stopped !== null) {
+      chat.stoppedFirst.add(row.id)
+      return { settled: true, stopped: false }
+    }
+    row.stopped = now
+    row.why = "failed"
+    row.due = null
+    row.pending = null
+    row.missed = 0
+    return { settled: true, stopped: true }
+  }
+  return { settled: true, stopped: false }
+}
+
+// The table's row "active: unwake, or /wakeups stop" (ruling 3).
+const modelStop = (chat: Modeled, n: number, why: "unwake" | "person", call: number | null, now: number): boolean => {
+  const row = chat.rows.find((one) => one.id === n)
+  if (row === undefined || row.stopped !== null) return false
+  row.stopped = now
+  row.why = why
+  row.stopCall = call
+  row.due = null
+  row.pending = null
+  row.missed = 0
+  row.updated = now
+  return true
+}
+
+// Ruling 4: whether the value changed.
+const modelSwitch = (chat: Modeled, on: boolean): boolean => {
+  const changed = chat.on !== on
+  chat.on = on
+  return changed
+}
+
+// Ruling 2: the rows not counted, with their last turn's end.
+const modelUnsettled = (chat: Modeled): Array<UnsettledWake> =>
+  chat.rows.filter((row) => !row.settled).map((row) => ({ wake: { ...row }, ...(chat.ended.get(row.lastTurn!) ?? { status: "running" as const, why: null }) }))
+
+// The checks of section 2, on the model's rows: a model that breaks one is
+// wrong, whatever the store says.
+const modelChecks = (chat: Modeled): Array<string> =>
+  chat.rows.flatMap((row) => {
+    const broken: Array<string> = []
+    if ((row.cron === null) === (row.at === null)) broken.push("cron or at")
+    if (row.at !== null && row.first !== row.at) broken.push("first = at")
+    if ((row.stopped === null) !== (row.why === null)) broken.push("stopped and why")
+    if (row.stopCall !== null && row.why !== "unwake") broken.push("a stop's call only with unwake")
+    if (row.stopped !== null && (row.due !== null || row.pending !== null)) broken.push("a stopped row has nothing to fire")
+    if (row.pending !== null && row.slot !== null && !(row.pending > row.slot)) broken.push("pending > slot")
+    if (row.lastTurn === null && !row.settled) broken.push("last_turn or settled")
+    if (row.missed < 0 || row.fired < 0 || row.failed < 0) broken.push("counts 0 or more")
+    return broken.map((check) => `row ${row.id}: ${check}`)
+  })
+
+// One sequence: its steps as text, and the first disagreement, if any.
+const compareSeed = (seed: number) => {
+  const file = newFile()
+  const random = seeded(seed)
+  const steps: Array<string> = []
+  const model: Array<Modeled> = [newModeled(), newModeled()]
+  // What the sequence reached, for the case's check of its reach.
+  const seen = new Set<string>()
+  const run = Effect.gen(function*() {
+    const chats = yield* Chats
+    const uuids = [yield* chats.make(TENANT_A, PICK), yield* chats.make(TENANT_B, PICK)]
+    const stores = [yield* chats.store(TENANT_A, uuids[0]!, LAUNCH), yield* chats.store(TENANT_B, uuids[1]!, LAUNCH)]
+    // The two chats are the file's first two: ids 1 and 2.
+    const ids = rows<{ id: number }>(file, "select id from everchat_chat order by id").map((row) => row.id)
+    if (ids.join() !== "1,2") return `the chats are ${ids.join()}`
+    let now = T0
+    yield* TestClock.setTime(now)
+
+    // A step of the store that fails is a disagreement (D1).
+    const why = (error: unknown): string =>
+      error instanceof StoreError ? `${error.op}: ${why(error.cause)}` : `${String(error)}${error instanceof Error && error.cause !== undefined ? ` (${why(error.cause)})` : ""}`
+    const step = <A>(effect: Effect.Effect<A, unknown>) =>
+      Effect.map(Effect.exit(effect), (exit) => (Exit.isSuccess(exit) ? { ok: true as const, value: exit.value } : { ok: false as const, error: why(Cause.squash(exit.cause)) }))
+
+    // The slots a pendWake may give a row: before, at and after its slot,
+    // its waiting pending and its due, and now.
+    const slots = (row: Row | undefined) => {
+      const bases = [row?.slot, row?.pending, row?.due, now].filter((base): base is number => base !== null && base !== undefined)
+      return bases.flatMap((base) => [base - H, base - 1, base, base + 1, base + H])
+    }
+    const pendOf = (row: Row | undefined) => ({
+      pending: random.pick(slots(row)),
+      missed: random.pick([0, 1, 999, 1000, 1001]),
+      due: random.pick([null, now + H, now + 2 * H, now - H])
+    })
+
+    for (let k = 0; k < STEPS; k++) {
+      const c = random.pick([0, 1])
+      const chat = model[c]!
+      const store = stores[c]!
+      const kind = random.pick(["make", "pend", "pend", "pend", "fire", "fire", "fire", "settle", "settle", "end", "stop", "switch", "clock"] as const)
+      if (kind === "make" && chat.rows.length < 4) {
+        const routine = random.next() < 0.5
+        const first = now + random.pick([-2 * H, -H, 0, H, 3 * H])
+        const wake = { text: `${c}.${chat.rows.length + 1}`, cron: routine ? "0 * * * *" : null, at: routine ? null : first, first }
+        steps.push(`chat ${c + 1}: makeWake(${JSON.stringify(wake)}) at ${now - T0}`)
+        seen.add(routine ? "a routine made" : "a reminder made")
+        const got = yield* step(store.makeWake({ ...wake, zone: "Europe/Berlin" }, 20))
+        const want = modelMake(chat, wake, now)
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (!Equal(got.value, { _tag: "made", wake: want })) return `makeWake gave ${JSON.stringify(got.value)}, the model ${JSON.stringify(want)}`
+      } else if (kind === "pend" || kind === "make") {
+        const n = 1 + Math.floor(random.next() * (chat.rows.length + 1))
+        const row = chat.rows.find((one) => one.id === n)
+        const pend = pendOf(row)
+        steps.push(`chat ${c + 1}: pendWake(${n}, ${JSON.stringify({ ...pend, pending: pend.pending - T0 })} from T0) at ${now - T0}`)
+        const waited = row?.pending !== null && row?.pending !== undefined
+        const got = yield* step(store.pendWake(n, pend))
+        const want = modelPend(chat, n, pend, now)
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (got.value !== want) return `pendWake gave ${got.value}, the model ${want}`
+        seen.add(want ? (waited ? "a slot taken while a fire waits" : "a slot taken") : "a slot refused")
+        if (!chat.on && row !== undefined && row.stopped === null) seen.add("a slot refused while off")
+        if (want && row!.missed === MISSED_MAX) seen.add("missed at the bound")
+      } else if (kind === "fire") {
+        const read = yield* step(store.pendingWake())
+        if (!read.ok) return `a StoreError: ${read.error}`
+        // While off, the source reads none; a fire that it read before the
+        // switch still comes (fireWake does not read the switch).
+        const late = chat.rows.filter((row) => row.stopped === null && row.settled && row.pending !== null)
+        if (Option.isNone(read.value) && (chat.on || late.length === 0 || random.next() < 0.5)) {
+          steps.push(`chat ${c + 1}: pendingWake() gave none`)
+          if (!chat.on && late.length > 0) seen.add("a fire waits while off")
+          continue
+        }
+        const given = Option.isSome(read.value) ? read.value.value : random.pick(late)
+        const handed = { pending: given.pending!, missed: given.missed }
+        if (Option.isNone(read.value)) {
+          steps.push(`chat ${c + 1}: pendingWake() gave none; the source read ${given.id} ${JSON.stringify({ ...handed, pending: handed.pending - T0 })} from T0 before the switch went off`)
+          seen.add("a fire while off")
+        } else steps.push(`chat ${c + 1}: pendingWake() gave ${given.id} ${JSON.stringify({ ...handed, pending: handed.pending - T0 })} from T0`)
+        if (random.next() < 0.5) {
+          const pend = pendOf(chat.rows.find((one) => one.id === given.id))
+          steps.push(`chat ${c + 1}: between the read and the fire, pendWake(${given.id}, ${JSON.stringify({ ...pend, pending: pend.pending - T0 })} from T0)`)
+          const got = yield* step(store.pendWake(given.id, pend))
+          const want = modelPend(chat, given.id, pend, now)
+          if (!got.ok) return `a StoreError: ${got.error}`
+          if (got.value !== want) return `pendWake gave ${got.value}, the model ${want}`
+          if (want) seen.add("a newer slot between the read and the fire")
+        }
+        steps.push(`chat ${c + 1}: the offer: startTurn, fireWake(${given.id}) at ${now - T0}`)
+        const got = yield* step(store.transaction(Effect.gen(function*() {
+          const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+          yield* store.fireWake(given.id, turn.id, handed)
+          return turn.id
+        })))
+        if (!got.ok) return `a StoreError: ${got.error}`
+        chat.turns += 1
+        if (got.value !== chat.turns) return `the offer's turn is ${got.value}, the model's ${chat.turns}`
+        const row = chat.rows.find((one) => one.id === given.id)!
+        seen.add(row.cron === null ? "a reminder fired" : row.pending === handed.pending ? "a fire went" : "a fire went, a newer one waits")
+        modelFire(chat, given.id, chat.turns, handed, now)
+      } else if (kind === "settle") {
+        // Mostly a row that fired, with its last turn; else another turn
+        // (an older one, one of no fire, one not there), or a row that is
+        // not there. A row settled already is a second settle.
+        const fired = chat.rows.filter((row) => row.lastTurn !== null)
+        const row = fired.length === 0 || random.next() < 0.1 ? undefined : random.pick(fired)
+        const n = row?.id ?? 1 + Math.floor(random.next() * (chat.rows.length + 1))
+        const turn = row !== undefined && random.next() < 0.8 ? row.lastTurn! : 1 + Math.floor(random.next() * (chat.turns + 1))
+        const end = random.pick(["done", "failed", "failed", "failed", "kept"] as const)
+        const was = chat.rows.find((one) => one.id === n)
+        const before = was === undefined ? undefined : { ...was }
+        steps.push(`chat ${c + 1}: settleWake(${n}, ${turn}, ${end}) at ${now - T0}`)
+        const got = yield* step(store.settleWake(n, turn, end))
+        const want = modelSettle(chat, n, turn, end, now)
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (!Equal(got.value, want)) return `settleWake gave ${JSON.stringify(got.value)}, the model ${JSON.stringify(want)}`
+        if (!want.settled) {
+          seen.add(before !== undefined && before.lastTurn === turn && before.settled ? "a second settle refused" : "a settle refused")
+        } else {
+          seen.add(`an end counted: ${end}`)
+          if (want.stopped) seen.add(before!.pending !== null ? "a stop at two failures, a fire waiting" : "a stop at two failures")
+          if (before!.stopped !== null) seen.add(chat.stoppedFirst.has(n) ? "two failures of a stopped row, its why kept" : "an end of a stopped row counted")
+          if (!chat.on) seen.add("an end counted while off")
+        }
+      } else if (kind === "end") {
+        // A turn of the chat ends (a second end changes nothing).
+        if (chat.turns === 0) continue
+        const turn = 1 + Math.floor(random.next() * chat.turns)
+        const { status, why } = random.pick([
+          { status: "done", why: null },
+          { status: "failed", why: "the model failed" },
+          { status: "stopped", why: CEILING_WHY },
+          { status: "stopped", why: "Stopped." }
+        ] as const)
+        steps.push(`chat ${c + 1}: endTurn(${turn}, ${status}, ${why}) at ${now - T0}`)
+        const got = yield* step(store.endTurn(turn, status, why))
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (!chat.ended.has(turn)) chat.ended.set(turn, { status, why })
+        seen.add("a turn ended")
+      } else if (kind === "stop") {
+        // Half the time a row whose end is not counted (a stop between a
+        // fire and its settle), else any number.
+        const open = chat.rows.filter((row) => !row.settled && row.stopped === null)
+        const n = open.length > 0 && random.next() < 0.5 ? random.pick(open).id : 1 + Math.floor(random.next() * (chat.rows.length + 1))
+        const why = random.pick(["unwake", "person"] as const)
+        // `unwake`'s call, mostly, in a turn that runs (a call starts only
+        // in one).
+        let call: number | null = null
+        const running = Array.from({ length: chat.turns }, (_, k) => k + 1).filter((turn) => !chat.ended.has(turn))
+        if (why === "unwake" && running.length > 0 && random.next() < 0.7) {
+          const turn = random.pick(running)
+          steps.push(`chat ${c + 1}: startCall in turn ${turn}`)
+          const made = yield* step(store.startCall({ turn, vendorId: `call_${chat.calls + 1}`, fn: "run", input: "unwake" }))
+          if (!made.ok) return `a StoreError: ${made.error}`
+          chat.calls += 1
+          if (made.value !== chat.calls) return `the call is ${made.value}, the model's ${chat.calls}`
+          call = made.value
+        }
+        const was = chat.rows.find((one) => one.id === n)
+        const waited = was !== undefined && was.pending !== null
+        steps.push(`chat ${c + 1}: stopWake(${n}, ${why}, ${call}) at ${now - T0}`)
+        const got = yield* step(store.stopWake(n, why, call))
+        const want = modelStop(chat, n, why, call, now)
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (got.value !== want) return `stopWake gave ${got.value}, the model ${want}`
+        seen.add(want ? `a stop by ${why}${call === null ? "" : " with its call"}${waited ? ", a fire waiting" : ""}` : "a stop refused")
+      } else if (kind === "switch") {
+        const on = random.pick([true, false])
+        steps.push(`chat ${c + 1}: setWakeups(${on})`)
+        const got = yield* step(store.setWakeups(on))
+        const want = modelSwitch(chat, on)
+        if (!got.ok) return `a StoreError: ${got.error}`
+        if (got.value !== want) return `setWakeups gave ${got.value}, the model ${want}`
+        seen.add(want ? (on ? "on" : "off") : "a switch to the value it had")
+      } else {
+        const by = random.pick([-2 * H, -1, 1, H, 3 * H])
+        now += by
+        seen.add(by < 0 ? "the clock back" : "the clock on")
+        steps.push(`the clock moves to ${now - T0} from T0`)
+        yield* TestClock.setTime(now)
+      }
+      const broken = model.flatMap((one, m) => modelChecks(one).map((check) => `chat ${m + 1}, the model: ${check}`))
+      if (broken.length > 0) return broken.join("; ")
+      // Each chat's rows, due rows, waiting fire, rows not counted and
+      // switch, against the model.
+      for (const [m, one] of model.entries()) {
+        const s = stores[m]!
+        const got = yield* step(Effect.all({
+          wakes: s.wakes(),
+          due: s.dueWakes(now),
+          pending: s.pendingWake(),
+          unsettled: s.unsettledWakes(),
+          on: Effect.map(s.chat, (chat) => chat.wakeups)
+        }))
+        if (!got.ok) return `a StoreError: ${got.error}`
+        const want = { wakes: modelWakes(one), due: modelDue(one, now), pending: modelPending(one), unsettled: modelUnsettled(one), on: one.on }
+        if (want.due.length > 0) seen.add("rows due")
+        if (want.unsettled.some((row) => row.status !== "running")) seen.add("a row not counted, its turn ended")
+        for (const what of ["wakes", "due", "pending", "unsettled", "on"] as const) {
+          if (!Equal(got.value[what], want[what])) {
+            return `chat ${m + 1}, ${what}: the store gave ${JSON.stringify(got.value[what])}, the model ${JSON.stringify(want[what])}`
+          }
+        }
+        // The claims that hold after each step, on the store's answers: a
+        // stopped row is in no answer of dueWakes or pendingWake; a count of
+        // failures at WAKE_FAILURES is a row stopped, why failed, unless it
+        // stopped before; no row waits for a count with no last turn.
+        const pending = Option.toArray(got.value.pending)
+        if ([...got.value.due, ...pending].some((wake) => wake.stopped !== null)) return `chat ${m + 1}: a stopped row is due or waits`
+        for (const wake of got.value.wakes) {
+          if (wake.failed >= WAKE_FAILURES && (wake.stopped === null || (wake.why !== "failed" && !one.stoppedFirst.has(wake.id)))) {
+            return `chat ${m + 1}: row ${wake.id} has ${wake.failed} failures, stopped ${wake.stopped}, why ${wake.why}`
+          }
+          if (!wake.settled && wake.lastTurn === null) return `chat ${m + 1}: row ${wake.id} is not settled, with no last turn`
+          if (wake.failed >= WAKE_FAILURES) seen.add(wake.why === "failed" ? "a row stopped by two failures" : "a row at two failures that stopped before")
+        }
+      }
+    }
+    return null
+  })
+  return Effect.runPromise(run.pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.provide(chatsLayer(file)))).then((disagreement) => ({ steps, disagreement, seen }))
+}
+
+// Deep equality, as `toEqual` reads it.
+const Equal = (x: unknown, y: unknown): boolean => Bun.deepEquals(x, y)
+
+test(`the comparison: the page's states of a wake-up (a model with no SQL) and the store's members over SQLite agree after each step of ${SEEDS.length} seeded sequences of ${STEPS} steps over two chats: wakes, dueWakes, pendingWake, unsettledWakes, the chat's switch and the answers of pendWake, settleWake, stopWake and setWakeups, with no StoreError; a stopped row is never due or waiting, two failures are a stop, and no row waits for a count with no last turn`, async () => {
+  const reached = new Set<string>()
+  for (const seed of SEEDS) {
+    const { steps, disagreement, seen } = await compareSeed(seed)
+    for (const one of seen) reached.add(one)
+    expect(disagreement, `seed ${seed}, its ${steps.length} steps:\n${steps.join("\n")}`).toBeNull()
+  }
+  // The sequences reach each kind of step and each branch of the table.
+  expect([...reached].sort()).toEqual([
+    "a fire waits while off",
+    "a fire went",
+    "a fire went, a newer one waits",
+    "a fire while off",
+    "a newer slot between the read and the fire",
+    "a reminder fired",
+    "a reminder made",
+    "a routine made",
+    "a row at two failures that stopped before",
+    "a row not counted, its turn ended",
+    "a row stopped by two failures",
+    "a second settle refused",
+    "a settle refused",
+    "a slot refused",
+    "a slot refused while off",
+    "a slot taken",
+    "a slot taken while a fire waits",
+    "a stop at two failures",
+    "a stop at two failures, a fire waiting",
+    "a stop by person",
+    "a stop by person, a fire waiting",
+    "a stop by unwake",
+    "a stop by unwake with its call",
+    "a stop by unwake with its call, a fire waiting",
+    "a stop by unwake, a fire waiting",
+    "a stop refused",
+    "a switch to the value it had",
+    "a turn ended",
+    "an end counted while off",
+    "an end counted: done",
+    "an end counted: failed",
+    "an end counted: kept",
+    "an end of a stopped row counted",
+    "missed at the bound",
+    "off",
+    "on",
+    "rows due",
+    "the clock back",
+    "the clock on",
+    "two failures of a stopped row, its why kept"
+  ])
+}, BOUND)
 
 // The tag of a deployment
 // -----------------------

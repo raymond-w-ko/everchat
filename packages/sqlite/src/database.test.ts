@@ -33,7 +33,8 @@ const TABLES = [
   "everchat_turn",
   "everchat_turn_item",
   "everchat_usage",
-  "everchat_view"
+  "everchat_view",
+  "everchat_wake"
 ]
 
 const TRIGGERS = [
@@ -66,8 +67,11 @@ const TRIGGERS = [
   "everchat_tenant_no_update",
   "everchat_turn_item_no_update",
   "everchat_turn_no_move",
+  "everchat_turn_no_new_ceiling",
   "everchat_usage_no_update",
-  "everchat_view_no_move"
+  "everchat_view_no_move",
+  "everchat_wake_no_move",
+  "everchat_wake_no_new_make"
 ]
 
 const INDEXES = [
@@ -79,7 +83,8 @@ const INDEXES = [
   "everchat_event_msg",
   "everchat_launch_live",
   "everchat_msg_sender_key",
-  "everchat_turn_running"
+  "everchat_turn_running",
+  "everchat_wake_due"
 ]
 
 // The names in the file, of one type, but SQLite's own.
@@ -117,15 +122,15 @@ const oldFile = async (mark: number) => {
   return file
 }
 
-test("a new file gets the whole schema of the page, and the mark: 18 tables, 31 triggers, 9 indexes, 1 view, each table strict", async () => {
+test("a new file gets the whole schema of the page, and the mark: 19 tables, 34 triggers, 10 indexes, 1 view, each table strict", async () => {
   const file = newFile()
   await withDatabase(file, Effect.void)
   expect(names(file, "table")).toEqual(TABLES)
   expect(names(file, "trigger")).toEqual(TRIGGERS)
   expect(names(file, "index")).toEqual(INDEXES)
   expect(names(file, "view")).toEqual(["everchat_msg_read"])
-  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([18, 31, 9])
-  expect(VERSION).toBe(7)
+  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([19, 34, 10])
+  expect(VERSION).toBe(8)
   expect(rows(file, "pragma user_version")).toEqual([{ user_version: VERSION }])
   const strict = rows<{ name: string; strict: number }>(file, "select name, strict from pragma_table_list where schema = 'main' and type = 'table'")
     .filter((row) => !row.name.startsWith("sqlite_"))
@@ -144,8 +149,8 @@ test("the rule of created and updated, read from the file: each table has update
     return [table, changes, triggers.has(table + "_no_update")]
   })
   expect(seen.filter(([, changes, refuses]) => changes === refuses)).toEqual([])
-  // Twelve tables refuse an update, and six may change (the chat's row
-  // and the five tables of a chat whose rows may change).
+  // Twelve tables refuse an update, and seven may change (the chat's row
+  // and the six tables of a chat whose rows may change).
   expect(seen.filter(([, , refuses]) => refuses).length).toBe(12)
   expect(seen.filter(([, changes]) => changes).map(([table]) => table)).toEqual([
     "everchat_approval",
@@ -153,7 +158,8 @@ test("the rule of created and updated, read from the file: each table has update
     "everchat_chat",
     "everchat_launch",
     "everchat_turn",
-    "everchat_view"
+    "everchat_view",
+    "everchat_wake"
   ])
 })
 
@@ -219,15 +225,17 @@ test("a file with tables and no mark, as Effect's migrator left it, is refused, 
   expect(state(file)).toEqual(before)
 })
 
-test("a file of mark 6, the schema before the approvals, is refused, and not changed; a new file has mark 7", async () => {
-  const file = newFile()
-  await withDatabase(file, Effect.void)
-  expect(rows(file, "pragma user_version")).toEqual([{ user_version: 7 }])
-  write(file, "pragma user_version = 6")
-  const bytes = fs.readFileSync(file)
-  const refused = await refusal(file)
-  expect(refused._tag === "DatabaseVersion" ? [refused.have, refused.want] : null).toEqual([6, 7])
-  expect(fs.readFileSync(file).equals(bytes)).toBe(true)
+test("a file of mark 7, the schema before the wake-ups, and one of mark 6, before the approvals, are refused, and not changed; a new file has mark 8", async () => {
+  for (const mark of [7, 6]) {
+    const file = newFile()
+    await withDatabase(file, Effect.void)
+    expect(rows(file, "pragma user_version")).toEqual([{ user_version: 8 }])
+    write(file, `pragma user_version = ${mark}`)
+    const bytes = fs.readFileSync(file)
+    const refused = await refusal(file)
+    expect(refused._tag === "DatabaseVersion" ? [refused.have, refused.want] : null).toEqual([mark, 8])
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true)
+  }
 })
 
 test("a file with another mark is refused, and not changed", async () => {
@@ -339,6 +347,9 @@ const UUID3 = "x'3333333333333333333333333333333a'"
 // and three of its functions that wait (calls 5, 6 and 7), whose approvals
 // are 1, pending, 2, answered no, with the message that told the chat of
 // it, and 3, pending, the target of the refused changes of state only.
+// Chat 1's turn 5 runs with a ceiling. Chat 1's wake-ups: 1, a routine that
+// the program of turn 4 (call 4) made, and 2, a reminder made otherwise;
+// chat 2 has its own wake-up 1.
 const BASE = [
   `insert into everchat_pick (id, vendor, model, effort, speed, created) values (1, 'v', 'm', 'e', 's', 1)`,
   `insert into everchat_tenant (id, created) values (${TENANT}, 1)`,
@@ -376,7 +387,11 @@ const BASE = [
   `insert into everchat_head (chat, n, hash, body, created) values (2, 1, 'abc', '{}', 1)`,
   `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created) values (2, 1, 'running', 1, 1, 0, 1, 1)`,
   `insert into everchat_call (chat, n, turn, vendor_id, fn, input, status, launch, created) values (2, 1, 1, 'call_a', 'run', 'x', 'running', 1, 1)`,
-  `insert into everchat_view (chat, name, parts, created, updated) values (2, 'chat', '[[0,0]]', 1, 1)`
+  `insert into everchat_view (chat, name, parts, created, updated) values (2, 'chat', '[[0,0]]', 1, 1)`,
+  `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, steps, tokens) values (1, 5, 'running', 1, 1, 0, 1, 1, 20, 2000000)`,
+  `insert into everchat_wake (chat, n, text, cron, zone, first, turn, call, due, created, updated) values (1, 1, 'stand up', '0 9 * * *', 'Europe/Berlin', 1000, 4, 4, 1000, 1, 1)`,
+  `insert into everchat_wake (chat, n, text, at, zone, first, due, created, updated) values (1, 2, 'call back', 2000, 'UTC', 2000, 2000, 1, 1)`,
+  `insert into everchat_wake (chat, n, text, at, zone, first, due, created, updated) values (2, 1, 'hers', 3000, 'UTC', 3000, 3000, 1, 1)`
 ]
 
 // Each write that the schema must refuse, and a part of the error's text.
@@ -405,7 +420,7 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a delete of a pick", `delete from everchat_pick`, "everchat_pick is append only"],
   ["a second head with the same hash", `insert into everchat_head (chat, n, hash, body, created) values (1, 2, 'abc', '{}', 2)`, "UNIQUE"],
   ["a change of a head", `update everchat_head set body = '[]'`, "everchat_head is append only"],
-  ["a second kind with the same name", `insert into everchat_kind (id, name) values (8, 'user')`, "UNIQUE"],
+  ["a second kind with the same name", `insert into everchat_kind (id, name) values (9, 'user')`, "UNIQUE"],
   ["a change of a kind", `update everchat_kind set name = 'used'`, "everchat_kind is append only"],
   ["a delete of a kind", `delete from everchat_kind where id = 6`, "everchat_kind is append only"],
 
@@ -495,7 +510,52 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a delete of an event", `delete from everchat_event`, "everchat_event is append only"],
   ["an event of an unknown type", `insert into everchat_event (chat, n, type, created) values (1, 2, 'text', 1)`, "CHECK"],
   ["an event with a first message and no last", `insert into everchat_event (chat, n, type, msg, created) values (1, 2, 'message', 0, 1)`, "CHECK"],
-  ["an event whose last message the chat does not have", `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 3, 'accepted', 0, 1, 1)`, "FOREIGN KEY"]
+  ["an event whose last message the chat does not have", `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 3, 'accepted', 0, 1, 1)`, "FOREIGN KEY"],
+
+  ["the chat's flag of the wake-ups that is not 0 or 1", `update everchat_chat set wakeups = 2 where id = 1`, "CHECK"],
+  ["a turn with a ceiling of 0 steps", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, steps, tokens) values (1, 6, 'running', 1, 1, 0, 1, 1, 0, 100)`, "CHECK"],
+  ["a turn with a ceiling of 0 tokens", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, steps, tokens) values (1, 6, 'running', 1, 1, 0, 1, 1, 20, 0)`, "CHECK"],
+  ["a turn with a ceiling of steps and none of tokens", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, steps) values (1, 6, 'running', 1, 1, 0, 1, 1, 20)`, "CHECK"],
+  ["a turn with a ceiling of tokens and none of steps", `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, tokens) values (1, 6, 'running', 1, 1, 0, 1, 1, 100)`, "CHECK"],
+  ["a ceiling set on a turn after its insert", `update everchat_turn set steps = 20, tokens = 100 where chat = 1 and n = 1`, "everchat_turn keeps its ceiling"],
+  ["a change of a turn's steps", `update everchat_turn set steps = 21 where chat = 1 and n = 5`, "everchat_turn keeps its ceiling"],
+  ["a change of a turn's tokens", `update everchat_turn set tokens = 100 where chat = 1 and n = 5`, "everchat_turn keeps its ceiling"],
+  ["a ceiling taken off a turn", `update everchat_turn set steps = null, tokens = null where chat = 1 and n = 5`, "everchat_turn keeps its ceiling"],
+  ["a write of a turn's steps with the value that it has", `update everchat_turn set steps = steps where chat = 1 and n = 5`, "everchat_turn keeps its ceiling"],
+
+  ["a wake-up that is a routine and a reminder", `insert into everchat_wake (chat, n, text, cron, at, zone, first, created, updated) values (1, 9, 'x', '0 9 * * *', 5, 'UTC', 5, 1, 1)`, "CHECK"],
+  ["a wake-up that is neither a routine nor a reminder", `insert into everchat_wake (chat, n, text, zone, first, created, updated) values (1, 9, 'x', 'UTC', 5, 1, 1)`, "CHECK"],
+  ["a reminder whose first slot is not its time", `insert into everchat_wake (chat, n, text, at, zone, first, created, updated) values (1, 9, 'x', 5, 'UTC', 6, 1, 1)`, "CHECK"],
+  ["a wake-up with the turn that made it and no call", `insert into everchat_wake (chat, n, text, at, zone, first, turn, created, updated) values (1, 9, 'x', 5, 'UTC', 5, 4, 1, 1)`, "CHECK"],
+  ["a wake-up with the call that made it and no turn", `insert into everchat_wake (chat, n, text, at, zone, first, call, created, updated) values (1, 9, 'x', 5, 'UTC', 5, 4, 1, 1)`, "CHECK"],
+  ["a wake-up of a turn that is not there", `insert into everchat_wake (chat, n, text, at, zone, first, turn, call, created, updated) values (1, 9, 'x', 5, 'UTC', 5, 99, 4, 1, 1)`, "FOREIGN KEY"],
+  ["a wake-up stopped with no why", `update everchat_wake set stopped = 5, due = null where chat = 1 and n = 2`, "CHECK"],
+  ["a wake-up with a why and no stop", `update everchat_wake set why = 'person' where chat = 1 and n = 2`, "CHECK"],
+  ["a wake-up stopped for an unknown why", `update everchat_wake set stopped = 5, why = 'tired', due = null where chat = 1 and n = 2`, "CHECK"],
+  ["a stop's call on an active row", `update everchat_wake set stop_call = 5 where chat = 1 and n = 1`, "CHECK"],
+  ["a stop's call on a wake-up that the person stopped", `update everchat_wake set stopped = 5, why = 'person', stop_call = 5, due = null where chat = 1 and n = 2`, "CHECK"],
+  ["a stopped wake-up with a slot to come", `update everchat_wake set stopped = 5, why = 'person' where chat = 1 and n = 2`, "CHECK"],
+  ["a stopped wake-up with a fire that waits", `update everchat_wake set stopped = 5, why = 'person', due = null, pending = 2000 where chat = 1 and n = 2`, "CHECK"],
+  ["a fire that waits for the slot that fired", `update everchat_wake set slot = 1000, pending = 1000 where chat = 1 and n = 1`, "CHECK"],
+  ["a fire that waits for a slot before the one that fired", `update everchat_wake set slot = 1000, pending = 999 where chat = 1 and n = 1`, "CHECK"],
+  ["a wake-up whose last turn's end is not counted, with no last turn", `update everchat_wake set settled = 0 where chat = 1 and n = 1`, "CHECK"],
+  ["a wake-up's settled flag that is not 0 or 1", `update everchat_wake set settled = 2, last_turn = 4 where chat = 1 and n = 1`, "CHECK"],
+  ["a wake-up's missed count below 0", `update everchat_wake set missed = -1 where chat = 1 and n = 1`, "CHECK"],
+  ["a wake-up's count of fires below 0", `update everchat_wake set fired = -1 where chat = 1 and n = 1`, "CHECK"],
+  ["a wake-up's count of failures below 0", `update everchat_wake set failed = -1 where chat = 1 and n = 1`, "CHECK"],
+  ["a move of a wake-up to another tenant's chat", `update everchat_wake set chat = 2 where chat = 1 and n = 2`, "everchat_wake keeps its chat and its n"],
+  ["a move of a wake-up onto another tenant's wake-up, with or replace", `update or replace everchat_wake set chat = 2, n = 1 where chat = 1 and n = 2`, "everchat_wake keeps its chat and its n"],
+  ["a change of a wake-up's n", `update everchat_wake set n = 9 where chat = 1 and n = 2`, "everchat_wake keeps its chat and its n"],
+  ["a move of a wake-up by the do update of an upsert", `insert into everchat_wake (chat, n, text, at, zone, first, created, updated) values (1, 2, 'x', 5, 'UTC', 5, 1, 1) on conflict (chat, n) do update set chat = 3`, "everchat_wake keeps its chat and its n"],
+  ["a change of a wake-up's text", `update everchat_wake set text = 'sit down' where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a write of a wake-up's text with the value that it has", `update everchat_wake set text = text where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a change of a wake-up's cron", `update everchat_wake set cron = '0 10 * * *' where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a change of a reminder's time", `update everchat_wake set at = 2001 where chat = 1 and n = 2`, "everchat_wake keeps what its make wrote"],
+  ["a change of a wake-up's zone", `update everchat_wake set zone = 'Asia/Tokyo' where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a change of a wake-up's first slot", `update everchat_wake set first = 1001 where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a change of the turn that made a wake-up", `update everchat_wake set turn = 1 where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a change of the call that made a wake-up", `update everchat_wake set call = 1 where chat = 1 and n = 1`, "everchat_wake keeps what its make wrote"],
+  ["a turn and a call set on a wake-up made otherwise", `update everchat_wake set turn = 4, call = 4 where chat = 1 and n = 2`, "everchat_wake keeps what its make wrote"]
 ]
 
 // Writes that must stay possible.
@@ -512,7 +572,22 @@ const ALLOWED = [
   `update everchat_approval set status = 'yes', who = 'the person', answered = 3, updated = 3 where chat = 1 and n = 1`,
   `update everchat_approval set status = 'running', updated = 4 where chat = 1 and n = 1`,
   `update everchat_approval set status = 'done', output = 'sent', ended = 5, updated = 5 where chat = 1 and n = 1`,
-  `update everchat_approval set msg = 0, updated = 6 where chat = 1 and n = 1`
+  `update everchat_approval set msg = 0, updated = 6 where chat = 1 and n = 1`,
+  // The chat's wake-ups off; a turn with a ceiling, and a turn's end that
+  // keeps it.
+  `update everchat_chat set wakeups = 0, updated = 3 where tenant = ${TENANT} and id = 1`,
+  `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, steps, tokens) values (1, 6, 'running', 1, 1, 0, 1, 1, 20, 2000000)`,
+  `update everchat_turn set status = 'stopped', ended = 3, why = 'ceiling' where chat = 1 and n = 5`,
+  // A routine's way: a fire waits, it fires, a newer slot waits, the end
+  // is counted as a failure, and `unwake` stops it.
+  `update everchat_wake set pending = 1000, missed = 2, due = 4000, updated = 2 where chat = 1 and n = 1`,
+  `update everchat_wake set slot = 1000, pending = null, missed = 0, fired = 1, last_turn = 4, settled = 0, updated = 3 where chat = 1 and n = 1`,
+  `update everchat_wake set pending = 4000, due = 5000, updated = 4 where chat = 1 and n = 1`,
+  `update everchat_wake set settled = 1, failed = 1, updated = 5 where chat = 1 and n = 1`,
+  `update everchat_wake set stopped = 6, why = 'unwake', stop_call = 5, due = null, pending = null, missed = 0, updated = 6 where chat = 1 and n = 1`,
+  // A reminder's one fire stops it; a wake-up that a call made.
+  `update everchat_wake set slot = 2000, fired = 1, last_turn = 4, settled = 0, due = null, stopped = 3, why = 'fired', updated = 3 where chat = 1 and n = 2`,
+  `insert into everchat_wake (chat, n, text, cron, zone, first, turn, call, due, created, updated) values (1, 3, 'water', '30 8 * * 1-5', 'UTC', 7000, 1, 2, 7000, 4, 4)`
 ]
 
 test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves the data as it was`, async () => {
@@ -550,6 +625,18 @@ test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves t
     { chat: 1, n: 3, turn: 4, call: 7, fn: "send", input: '{"to":"w"}', status: "pending", who: null, answer: null, answered: null, output: null, ended: null, msg: null, updated: 1 }
   ])
   expect(rows(file, "select n, status from everchat_call where chat = 1 and n in (5, 6, 7) order by n")).toEqual([{ n: 5, status: "pending" }, { n: 6, status: "pending" }, { n: 7, status: "pending" }])
+  // The wake-ups: each went its way (ALLOWED), and chat 2's is as it was.
+  expect(rows(file, "select chat, n, text, cron, at, zone, first, turn, call, due, slot, pending, missed, fired, last_turn, settled, failed, stopped, why, stop_call, updated from everchat_wake order by chat, n")).toEqual([
+    { chat: 1, n: 1, text: "stand up", cron: "0 9 * * *", at: null, zone: "Europe/Berlin", first: 1000, turn: 4, call: 4, due: null, slot: 1000, pending: null, missed: 0, fired: 1, last_turn: 4, settled: 1, failed: 1, stopped: 6, why: "unwake", stop_call: 5, updated: 6 },
+    { chat: 1, n: 2, text: "call back", cron: null, at: 2000, zone: "UTC", first: 2000, turn: null, call: null, due: null, slot: 2000, pending: null, missed: 0, fired: 1, last_turn: 4, settled: 0, failed: 0, stopped: 3, why: "fired", stop_call: null, updated: 3 },
+    { chat: 1, n: 3, text: "water", cron: "30 8 * * 1-5", at: null, zone: "UTC", first: 7000, turn: 1, call: 2, due: 7000, slot: null, pending: null, missed: 0, fired: 0, last_turn: null, settled: 1, failed: 0, stopped: null, why: null, stop_call: null, updated: 4 },
+    { chat: 2, n: 1, text: "hers", cron: null, at: 3000, zone: "UTC", first: 3000, turn: null, call: null, due: 3000, slot: null, pending: null, missed: 0, fired: 0, last_turn: null, settled: 1, failed: 0, stopped: null, why: null, stop_call: null, updated: 1 }
+  ])
+  expect(rows(file, "select n, status, steps, tokens from everchat_turn where chat = 1 and n >= 5 order by n")).toEqual([
+    { n: 5, status: "stopped", steps: 20, tokens: 2000000 },
+    { n: 6, status: "running", steps: 20, tokens: 2000000 }
+  ])
+  expect(rows(file, "select id, wakeups from everchat_chat order by id")).toEqual([{ id: 1, wakeups: 0 }, { id: 2, wakeups: 1 }, { id: 3, wakeups: 1 }])
 })
 
 // The key of a message's sender (docs/schema.html, everchat_msg): unique in
@@ -625,6 +712,7 @@ const REPLACES: ReadonlyArray<{
   { name: "the schema allows it: an image that no message names moves", table: "everchat_image", where: "n = 1" },
   { name: "the schema allows it: a usage row moves", table: "everchat_usage", where: "n = 1" },
   { name: "the schema allows it: a log row moves", table: "everchat_log", where: "n = 1" },
+  { name: "the schema allows it: a wake-up that names no turn and no call moves", table: "everchat_wake", where: "n = 2" },
   { name: "the delete trigger of a message refuses it: a launch that a message names", table: "everchat_launch", where: "n = 1", refused: "everchat_msg is append only" },
   {
     name: "the delete trigger of a message refuses it: a call that a message names",
@@ -747,9 +835,9 @@ test("one rule, read from the file: each table with a column chat refuses an upd
     })
   )
   expect(failures).toEqual([])
-  // The 14 tables of a chat: chat and the rest of each key (31); the chat's id;
+  // The 15 tables of a chat: chat and the rest of each key (33); the chat's id;
   // its rowid by three names.
-  expect(updates.length).toBe(35)
+  expect(updates.length).toBe(37)
 })
 
 test("the delete of the tenant erases its chat and every row of the chat, and leaves the shared lists", async () => {
@@ -765,9 +853,50 @@ test("the delete of the tenant erases its chat and every row of the chat, and le
   for (const table of TABLES.filter((table) => table !== "everchat_kind" && table !== "everchat_pick")) {
     expect([table, rows(file, `select count(*) as n from ${table}`)]).toEqual([table, [{ n: 0 }]])
   }
-  expect(rows(file, "select count(*) as n from everchat_kind")).toEqual([{ n: 7 }])
+  expect(rows(file, "select count(*) as n from everchat_kind")).toEqual([{ n: 8 }])
   expect(rows(file, "select count(*) as n from everchat_pick")).toEqual([{ n: 1 }])
 })
+
+// The four references of a wake-up to the rows of its chat (the turn and
+// the call that made it, the turn of its last fire, the call that stopped
+// it) cascade: the delete of that turn or call takes the wake-up, and only
+// it. Each case: one wake-up that names the row, and one that does not.
+const CASCADES: ReadonlyArray<readonly [reference: string, wake: string, deleted: string]> = [
+  [
+    "turn",
+    `insert into everchat_wake (chat, n, text, turn, call, at, zone, first, created, updated) values (1, 9, 'x', 3, 2, 5, 'UTC', 5, 1, 1)`,
+    "delete from everchat_turn where chat = 1 and n = 3"
+  ],
+  [
+    "call",
+    `insert into everchat_wake (chat, n, text, turn, call, at, zone, first, created, updated) values (1, 9, 'x', 3, 2, 5, 'UTC', 5, 1, 1)`,
+    "delete from everchat_call where chat = 1 and n = 2"
+  ],
+  [
+    "last_turn",
+    `insert into everchat_wake (chat, n, text, last_turn, settled, at, zone, first, created, updated) values (1, 9, 'x', 3, 0, 5, 'UTC', 5, 1, 1)`,
+    "delete from everchat_turn where chat = 1 and n = 3"
+  ],
+  [
+    "stop_call",
+    `insert into everchat_wake (chat, n, text, stop_call, stopped, why, at, zone, first, created, updated) values (1, 9, 'x', 2, 5, 'unwake', 5, 'UTC', 5, 1, 1)`,
+    "delete from everchat_call where chat = 1 and n = 2"
+  ]
+]
+
+for (const [reference, wake, deleted] of CASCADES) {
+  test(`a wake-up's reference ${reference} cascades: the delete of the row that it names takes the wake-up, and the other wake-ups stay`, async () => {
+    const file = newFile()
+    await withDatabase(file, Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      for (const statement of BASE) yield* sql.unsafe(statement)
+      yield* sql.unsafe(wake)
+      expect(rows(file, "select n from everchat_wake where chat = 1 and n = 9")).toEqual([{ n: 9 }])
+      yield* sql.unsafe(deleted)
+    }))
+    expect(rows(file, "select chat, n from everchat_wake order by chat, n")).toEqual([{ chat: 1, n: 1 }, { chat: 1, n: 2 }, { chat: 2, n: 1 }])
+  })
+}
 
 test("the readable query shows a kind as a word and a time as text", async () => {
   const file = newFile()

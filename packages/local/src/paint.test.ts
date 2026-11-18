@@ -86,6 +86,11 @@ test("each kind has its own look, and a person's or a program's text is never re
   expect(read(message("late", "# sent **1**").render(40))).toEqual(["◃ # sent **1**"])
   expect(LOOKS.late.most).toBe(MOST)
   expect(read(new Wrapped(numbered(MOST + 1), LOOKS.late).render(40)).length).toBe(MOST)
+  // A wake-up that came due: a mark of its own, with the look of late.
+  expect(read(message("wake", "[3] due **9:00**").render(40))).toEqual(["◷ [3] due **9:00**"])
+  expect(LOOKS.wake.most).toBe(MOST)
+  expect(LOOKS.wake.ink).toBe(LOOKS.late.ink)
+  expect(read(new Wrapped(numbered(MOST + 1), LOOKS.wake).render(40)).length).toBe(MOST)
   expect(read(message("asst", "It is **bold**.").render(40)).map((row) => row.trimEnd())).toEqual(["It is bold."])
   expect(read(message("work", "[CalmOtter] `done`").render(40)).map((row) => row.trimEnd())).toEqual(["[CalmOtter] done"])
   // EverChat's words are cleaned too.
@@ -106,11 +111,12 @@ test("a message as plain text: its mark, its lines under the text, no ink, and n
   expect(written("echo", "a\n\nb")).toBe("◂ a\n  \n  b")
   expect(written("note", "Stopped.")).toBe("· Stopped.")
   expect(written("late", "sent\nto x")).toBe("◃ sent\n  to x")
+  expect(written("wake", "[3] due\nstand up")).toBe("◷ [3] due\n  stand up")
   // EverChat's words, and an agent's report, are as the model wrote them.
   expect(written("asst", "It is **bold**.\n\n- one\n- two")).toBe("It is **bold**.\n\n- one\n- two")
   expect(written("work", "[CalmOtter] `done`")).toBe("[CalmOtter] `done`")
   // Every kind is cleaned, and none is shortened.
-  for (const kind of ["user", "asst", "tool", "echo", "work", "note", "late"] as const) {
+  for (const kind of ["user", "asst", "tool", "echo", "work", "note", "late", "wake"] as const) {
     expect(written(kind, "a \u001b[31mred\u0007 word\tend")).toEndWith("a red word    end")
   }
   const long = Array.from({ length: 500 }, (_, k) => "row " + k).join("\n")

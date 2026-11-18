@@ -65,6 +65,8 @@ import {
   type LaunchInput,
   LaunchLive,
   type Keyed,
+  type MadeWake,
+  type Settled,
   type Message,
   type NewCall,
   type NewDiagnostic,
@@ -74,6 +76,7 @@ import {
   type NewNode,
   type NewTurn,
   type NewUsage,
+  type NewWake,
   NoChat,
   Node,
   type Options,
@@ -90,8 +93,20 @@ import {
   type Turn,
   type UsageFilter,
   type UsageRecord,
+  type UnsettledWake,
   type View,
-  ViewName
+  ViewName,
+  WAKE_FAILURES,
+  WAKE_TEXT_MAX,
+  type Wake,
+  type WakeEnd,
+  type WakeFilter,
+  WAKE_MISSED_MAX,
+  type WakeOf,
+  type WakePend,
+  type WakeRead,
+  type WakeStop,
+  WakeWhy
 } from "@everchat/core/store"
 
 // Does a process of this host run? A test can replace it.
@@ -136,6 +151,7 @@ const ChatRow = Schema.Struct({
   draft: Schema.NullOr(Schema.String),
   taken: Schema.Int,
   seq: Schema.Int,
+  wakeups: Schema.Literals([0, 1]),
   created: Schema.Int,
   updated: Schema.Int
 })
@@ -161,7 +177,9 @@ const TurnRow = Schema.Struct({
   launch: Schema.Int,
   created: Schema.Int,
   ended: Schema.NullOr(Schema.Int),
-  why: Schema.NullOr(Schema.String)
+  why: Schema.NullOr(Schema.String),
+  steps: Schema.NullOr(Schema.Int),
+  tokens: Schema.NullOr(Schema.Int)
 })
 
 const TurnItemRow = Schema.Struct({
@@ -201,6 +219,45 @@ const ApprovalRow = Schema.Struct({
   msg: Schema.NullOr(Schema.Int),
   created: Schema.Int,
   updated: Schema.Int
+})
+
+// A wake-up's row, with `settled` as the flag of the file.
+const WakeRow = Schema.Struct({
+  id: Schema.Int,
+  text: Schema.String,
+  cron: Schema.NullOr(Schema.String),
+  at: Schema.NullOr(Schema.Int),
+  zone: Schema.String,
+  first: Schema.Int,
+  turn: Schema.NullOr(Schema.Int),
+  call: Schema.NullOr(Schema.Int),
+  due: Schema.NullOr(Schema.Int),
+  slot: Schema.NullOr(Schema.Int),
+  pending: Schema.NullOr(Schema.Int),
+  missed: Schema.Int,
+  fired: Schema.Int,
+  lastTurn: Schema.NullOr(Schema.Int),
+  settled: Schema.Literals([0, 1]),
+  failed: Schema.Int,
+  stopped: Schema.NullOr(Schema.Int),
+  why: Schema.NullOr(WakeWhy),
+  stopCall: Schema.NullOr(Schema.Int),
+  created: Schema.Int,
+  updated: Schema.Int
+})
+
+// A wake-up whose end is not counted, with its last turn's status and why.
+const UnsettledRow = Schema.Struct({
+  ...WakeRow.fields,
+  turnStatus: Schema.Literals(["running", "done", "stopped", "failed"]),
+  turnWhy: Schema.NullOr(Schema.String)
+})
+
+// A wake-up with the call of a program that made it or stopped it.
+const WakeOfRow = Schema.Struct({
+  ...WakeRow.fields,
+  way: Schema.Literals(["made", "stopped"]),
+  byCall: Schema.Int
 })
 
 const SERVED = Schema.Literals(["turn", "compaction", "goal"])
@@ -277,6 +334,9 @@ const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow))
 const decodeTurnItems = Schema.decodeUnknownEffect(Schema.Array(TurnItemRow))
 const decodeCalls = Schema.decodeUnknownEffect(Schema.Array(CallRow))
 const decodeApprovals = Schema.decodeUnknownEffect(Schema.Array(ApprovalRow))
+const decodeWakes = Schema.decodeUnknownEffect(Schema.Array(WakeRow))
+const decodeUnsettled = Schema.decodeUnknownEffect(Schema.Array(UnsettledRow))
+const decodeWakesOf = Schema.decodeUnknownEffect(Schema.Array(WakeOfRow))
 const decodeMessages = Schema.decodeUnknownEffect(Schema.Array(MessageRow))
 const decodeNodes = Schema.decodeUnknownEffect(Schema.Array(Node))
 const decodeViews = Schema.decodeUnknownEffect(Schema.Array(ViewRow))
@@ -380,6 +440,7 @@ type Numbered =
   | "everchat_usage"
   | "everchat_log"
   | "everchat_approval"
+  | "everchat_wake"
 
 // The next `n` of the chat in `table`. Only inside the transaction of the
 // write that takes it.
@@ -396,7 +457,7 @@ const nextMessage = (sql: SqlClient.SqlClient, chat: number) =>
 // A turn with its pick and its head. `rest` goes on with ` and ...` or
 // ` order by ...`; the chat is the first parameter.
 const TURN = `select t.n as id, t.agent, t.status, p.vendor, p.model, p.effort, p.speed, h.body as head,
-                     t.first_msg as firstMsg, t.launch, t.created, t.ended, t.why
+                     t.first_msg as firstMsg, t.launch, t.created, t.ended, t.why, t.steps, t.tokens
               from everchat_turn t join everchat_pick p on p.id = t.pick
                    join everchat_head h on h.chat = t.chat and h.n = t.head
               where t.chat = ?`
@@ -419,6 +480,48 @@ const APPROVAL = `select a.n as id, a.turn, a.call, a.fn, a.input, a.status, a.w
 // The approvals of the chat `chat`; `rest` goes on as in TURN.
 const approvalRows = (sql: SqlClient.SqlClient, chat: number, rest: string, params: ReadonlyArray<string | number>) =>
   Effect.map(Effect.flatMap(sql.unsafe(APPROVAL + rest, [chat, ...params]), decodeApprovals), (rows): Array<Approval> => [...rows])
+
+// The columns of a wake-up's row (`w`), as `Wake` names them.
+const WAKE_COLUMNS = `w.n as id, w.text, w.cron, w.at, w.zone, w.first, w.turn, w.call, w.due, w.slot, w.pending, w.missed, w.fired,
+                      w.last_turn as lastTurn, w.settled, w.failed, w.stopped, w.why, w.stop_call as stopCall, w.created, w.updated`
+
+// A wake-up. `rest` goes on as in TURN; the chat is the first parameter.
+const WAKE = `select ${WAKE_COLUMNS}
+              from everchat_wake w
+              where w.chat = ?`
+
+// A row of the file as a `Wake`.
+const wakeOfRow = <A extends typeof WakeRow.Type>(row: A): Wake => ({
+  id: row.id,
+  text: row.text,
+  cron: row.cron,
+  at: row.at,
+  zone: row.zone,
+  first: row.first,
+  turn: row.turn,
+  call: row.call,
+  due: row.due,
+  slot: row.slot,
+  pending: row.pending,
+  missed: row.missed,
+  fired: row.fired,
+  lastTurn: row.lastTurn,
+  settled: row.settled === 1,
+  failed: row.failed,
+  stopped: row.stopped,
+  why: row.why,
+  stopCall: row.stopCall,
+  created: row.created,
+  updated: row.updated
+})
+
+// The wake-ups of the chat `chat`; `rest` goes on as in TURN.
+const wakeRows = (sql: SqlClient.SqlClient, chat: number, rest: string, params: ReadonlyArray<string | number>) =>
+  Effect.map(Effect.flatMap(sql.unsafe(WAKE + rest, [chat, ...params]), decodeWakes), (rows): Array<Wake> => rows.map(wakeOfRow))
+
+// The condition that the chat's wake-ups are on (`/wakeups`), for a
+// statement on `everchat_wake`: its one parameter is the chat.
+const ON = "exists (select 1 from everchat_chat where id = ? and wakeups = 1)"
 // The reads
 // ---------
 
@@ -426,12 +529,12 @@ const approvalRows = (sql: SqlClient.SqlClient, chat: number, rest: string, para
 const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading => {
   const chat = Effect.gen(function*() {
     const rows = yield* sql`
-      select c.uuid, p.vendor, p.model, p.effort, p.speed, c.goal, c.draft, c.taken, c.seq, c.created, c.updated
+      select c.uuid, p.vendor, p.model, p.effort, p.speed, c.goal, c.draft, c.taken, c.seq, c.wakeups, c.created, c.updated
       from everchat_chat c join everchat_pick p on p.id = c.pick
       where c.tenant = ${tenant} and c.id = ${id}`
     const row = yield* only(yield* decodeChats(rows))
-    const { effort, model, speed, uuid, vendor, ...rest } = row
-    return { uuid: uuidText(uuid), ...rest, pick: { vendor, model, effort, speed } }
+    const { effort, model, speed, uuid, vendor, wakeups, ...rest } = row
+    return { uuid: uuidText(uuid), ...rest, wakeups: wakeups === 1, pick: { vendor, model, effort, speed } }
   }).pipe(failed("chat"), Effect.withSpan("Store.chat"))
 
   const count = nextMessage(sql, id).pipe(failed("count"), Effect.withSpan("Store.count"))
@@ -639,6 +742,58 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     return yield* approvalRows(sql, id, ` and a.msg is null and a.status in (${TOLD.map(() => "?").join(", ")}) order by a.n`, TOLD)
   }, failed("untoldApprovals"))
 
+  // All the rows, or the active ones (`stopped` null), or the stopped ones.
+  const wakes = Effect.fn("Store.wakes")(function*(filter?: WakeFilter) {
+    const active = filter?.active
+    const where = active === undefined ? "" : active ? " and stopped is null" : " and stopped is not null"
+    return yield* wakeRows(sql, id, where + " order by n", [])
+  }, failed("wakes"))
+
+  // The chat's switch is read in the statement of the rows (`ON`), so that
+  // the rows and the switch are one state of the file.
+  const dueWakes = Effect.fn("Store.dueWakes")(function*(now: number) {
+    return yield* wakeRows(sql, id, ` and stopped is null and due <= ? and ${ON} order by due, n`, [now, id])
+  }, failed("dueWakes"))
+
+  const pendingWake = Effect.fn("Store.pendingWake")(function*() {
+    const rows = yield* wakeRows(sql, id, ` and stopped is null and settled = 1 and pending is not null and ${ON} order by pending, n limit 1`, [id])
+    return Option.fromUndefinedOr(rows[0])
+  }, failed("pendingWake"))
+
+  // A message is counted at its last page (`more` 0), so a message of many
+  // pages counts once.
+  const fires = Effect.fn("Store.fires")(function*(since: number) {
+    const [row] = yield* sql<{ n: number }>`
+      select count(*) as n from everchat_msg where chat = ${id} and kind = ${KINDS.wake} and more = 0 and created >= ${since}`
+    return row!.n
+  }, failed("fires"))
+
+  // Each join names the chat on both sides. The switch is not read: an
+  // end is counted while the chat's wake-ups are off (lead, ec-hvsq7, M13).
+  const unsettledWakes = Effect.fn("Store.unsettledWakes")(function*() {
+    const rows = yield* sql.unsafe(
+      `select ${WAKE_COLUMNS}, t.status as turnStatus, t.why as turnWhy
+       from everchat_wake w join everchat_turn t on t.chat = w.chat and t.n = w.last_turn
+       where w.chat = ? and t.chat = ? and w.settled = 0
+       order by w.n`,
+      [id, id]
+    )
+    return (yield* decodeUnsettled(rows)).map((row): UnsettledWake => ({ wake: wakeOfRow(row), status: row.turnStatus, why: row.turnWhy }))
+  }, failed("unsettledWakes"))
+
+  // The rows that a function of the program made (`call`) and those that one
+  // stopped (`stop_call`), as `approvalsOf` finds an approval's call, in one
+  // statement: one state of the file. Each join names the chat on both
+  // sides.
+  const wakesOf = Effect.fn("Store.wakesOf")(function*(program: number) {
+    const by = (column: "call" | "stop_call", what: "made" | "stopped") =>
+      `select ${WAKE_COLUMNS}, '${what}' as way, c.n as byCall
+       from everchat_wake w join everchat_call c on c.chat = w.chat and c.n = w.${column}
+       where w.chat = ? and c.chat = ? and c.parent = ?`
+    const rows = yield* sql.unsafe(`${by("call", "made")} union all ${by("stop_call", "stopped")} order by byCall, id`, [id, id, program, id, id, program])
+    return (yield* decodeWakesOf(rows)).map((row): WakeOf => ({ wake: wakeOfRow(row), by: row.way, call: row.byCall }))
+  }, failed("wakesOf"))
+
   const endedRunTags = Effect.gen(function*() {
     const rows = yield* sql<{ tag: string }>`select distinct run_tag as tag from everchat_launch where chat = ${id} and ended is not null`
     return rows.map((row) => row.tag)
@@ -761,6 +916,12 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     approvals,
     approvalsOf,
     untoldApprovals,
+    wakes,
+    dueWakes,
+    pendingWake,
+    fires,
+    unsettledWakes,
+    wakesOf,
     usage,
     usageTotals,
     launches,
@@ -916,6 +1077,19 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     yield* sql`update everchat_chat set taken = ${i}, updated = ${yield* now} where tenant = ${tenant} and id = ${chat}`
   }, failed("setTaken"))
 
+  // A write of the value that the chat has changes nothing, `updated` too.
+  // A transaction of its own, or a savepoint in a note's.
+  const setWakeups = Effect.fn("Store.setWakeups")(function*(on: boolean) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const value = on ? 1 : 0
+      const changed = yield* sql<{ id: number }>`
+        update everchat_chat set wakeups = ${value}, updated = ${yield* now}
+        where tenant = ${tenant} and id = ${chat} and wakeups <> ${value}
+        returning id`
+      return changed.length === 1
+    }))
+  }, failed("setWakeups"))
+
   // The log
   // -------
 
@@ -1067,13 +1241,21 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
   // Turns
   // -----
 
+  // The ceiling is checked before the transaction, as `answerApproval`
+  // checks its bounds; the schema's checks are the second guard.
   const startTurn = Effect.fn("Store.startTurn")(function*(turn: NewTurn) {
+    const steps = turn.steps ?? null
+    const tokens = turn.tokens ?? null
+    const whole = (value: number | null) => value !== null && Number.isSafeInteger(value) && value > 0
+    if ((steps === null) !== (tokens === null) || (steps !== null && !(whole(steps) && whole(tokens)))) {
+      return yield* Effect.fail(new Error(`a turn's ceiling is both steps and tokens, each a whole number over 0, or neither, not ${steps} steps and ${tokens} tokens`))
+    }
     return yield* sql.withTransaction(Effect.gen(function*() {
       const pick = yield* pickId(turn.pick)
       const head = yield* putHead(turn.head)
       const n = yield* next(sql, chat, "everchat_turn")
       yield* sql`insert into everchat_turn ${
-        sql.insert({ chat, n, agent: turn.agent ?? null, status: "running", pick, head, first_msg: turn.firstMsg, launch: launch.id, created: yield* now })
+        sql.insert({ chat, n, agent: turn.agent ?? null, status: "running", pick, head, first_msg: turn.firstMsg, launch: launch.id, created: yield* now, steps, tokens })
       }`
       return yield* only(yield* turnRows(sql, chat, " and t.n = ?", [n]))
     }))
@@ -1262,6 +1444,174 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     }))
   }, failed("tellApproval"))
 
+  // Wake-ups
+  // --------
+
+  // The text's bounds are checked before the transaction, as
+  // `answerApproval` checks its own: a text out of them writes nothing.
+  // The active rows are counted in the transaction of the insert. The store
+  // computes no slot: `due` is the `first` that the caller gives.
+  const makeWake = Effect.fn("Store.makeWake")(function*(wake: NewWake, limit: number) {
+    const text = wake.text.toWellFormed()
+    if (text.length < 1 || text.length > WAKE_TEXT_MAX) {
+      return yield* Effect.fail(new Error(`a wake-up's text is a text of 1 to ${WAKE_TEXT_MAX} characters, not ${text.length}`))
+    }
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const [active] = yield* sql<{ n: number }>`select count(*) as n from everchat_wake where chat = ${chat} and stopped is null`
+      if (active!.n >= limit) return { _tag: "full" } as MadeWake
+      const n = yield* next(sql, chat, "everchat_wake")
+      const at = yield* now
+      yield* sql`insert into everchat_wake ${
+        sql.insert({
+          chat,
+          n,
+          text,
+          cron: wake.cron === undefined || wake.cron === null ? null : wake.cron.toWellFormed(),
+          at: wake.at ?? null,
+          zone: wake.zone.toWellFormed(),
+          first: wake.first,
+          turn: wake.turn ?? null,
+          call: wake.call ?? null,
+          due: wake.first,
+          created: at,
+          updated: at
+        })
+      }`
+      const [made] = yield* wakeRows(sql, chat, " and n = ?", [n])
+      return { _tag: "made", wake: made! } as MadeWake
+    }))
+  }, failed("makeWake"))
+
+  // The firer's write. Each condition is in the update itself (the row
+  // active, the chat's wake-ups on, the slot after `slot` and after the
+  // waiting `pending`), so no read comes between the test and the write;
+  // a row that fails one is left as it was, and the answer is false. The
+  // row's check (`pending > slot`) stays the second guard. SQLite reads the
+  // old row in each expression of `set`, so `missed` sees the old
+  // `pending`.
+  const pendWake = Effect.fn("Store.pendWake")(function*(n: number, pend: WakePend) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const changed = yield* sql<{ n: number }>`
+        update everchat_wake
+        set missed = case when pending is null then min(${pend.missed}, ${WAKE_MISSED_MAX})
+                          else min(missed + 1 + ${pend.missed}, ${WAKE_MISSED_MAX}) end,
+            pending = ${pend.pending}, due = ${pend.due}, updated = ${yield* now}
+        where chat = ${chat} and n = ${n} and stopped is null
+          and exists (select 1 from everchat_chat where id = ${chat} and wakeups = 1)
+          and (slot is null or ${pend.pending} > slot) and (pending is null or ${pend.pending} > pending)
+        returning n`
+      return changed.length === 1
+    }))
+  }, failed("pendWake"))
+
+  // An offer's write, in its transaction (a savepoint inside it), as
+  // `tellApproval` is: the row is read and tested first, and the update
+  // names the same conditions and must change one row. It writes only the
+  // row's own columns, and no check of the table refuses them for a row
+  // that `pendingWake` gave (docs/wakeups.md, section 2; lead, ec-e75r,
+  // D1), the row read with the same lock held:
+  // - `(stopped is null) = (why is null)`: a reminder sets both.
+  // - `stop_call is null or (why is not null and why = 'unwake')`: an
+  //   active row has no `stop_call` (only `unwake` sets it, and stops the
+  //   row).
+  // - `stopped is null or (due is null and pending is null)`: a reminder
+  //   that stops clears both, and `missed`, as a stop does, also when the
+  //   firer gave it a `due` or a newer slot waits: a reminder has one slot
+  //   (lead, ec-muncvc, ruling 4a); a routine does not stop.
+  // - `pending is null or slot is null or pending > slot`: `slot` becomes
+  //   `read.pending`; the fire goes (`pending` null), or a newer slot
+  //   waits, which is after `read.pending`, since a `pendWake` takes only a
+  //   slot after the waiting one.
+  // - `last_turn is not null or settled = 1`: `last_turn` is `turn`, which
+  //   the offer wrote before (its reference to the chat's turn holds).
+  // - `missed`, `fired`, `failed` 0 or more: `fired` grows, `missed` goes no
+  //   lower than 0, `failed` is not written.
+  // - The guards: no column of the make, nor the chat or `n`, is written.
+  const fireWake = Effect.fn("Store.fireWake")(function*(n: number, turn: number, read: WakeRead) {
+    yield* sql.withTransaction(Effect.gen(function*() {
+      const [row] = yield* wakeRows(sql, chat, " and n = ?", [n])
+      if (row === undefined) return yield* Effect.fail(new Error(`the chat has no wake-up ${n}`))
+      if (row.stopped !== null) return yield* Effect.fail(new Error(`the wake-up ${n} stopped, and has no fire`))
+      if (!row.settled) return yield* Effect.fail(new Error(`the wake-up ${n}'s last fire is not settled`))
+      if (row.pending === null || row.pending < read.pending || (row.slot !== null && read.pending <= row.slot)) {
+        return yield* Effect.fail(new Error(`the wake-up ${n} has no fire of the slot ${read.pending} waiting`))
+      }
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_wake
+        set slot = ${read.pending}, fired = fired + 1, last_turn = ${turn}, settled = 0,
+            missed = case when cron is null or pending = ${read.pending} then 0
+                          when missed >= ${WAKE_MISSED_MAX} then missed
+                          else max(missed - ${read.missed} - 1, 0) end,
+            pending = case when cron is null or pending = ${read.pending} then null else pending end,
+            due = case when cron is null then null else due end,
+            stopped = case when cron is null then ${at} end,
+            why = case when cron is null then 'fired' end,
+            updated = ${at}
+        where chat = ${chat} and n = ${n} and stopped is null and settled = 1
+          and pending >= ${read.pending} and (slot is null or ${read.pending} > slot)
+        returning n`
+      yield* only(changed)
+    }))
+  }, failed("fireWake"))
+
+  // The firer's count of a wake turn's end (docs/wakeups.md, section 7): a
+  // transaction of its own, or a savepoint in a note's (the stop at
+  // `WAKE_FAILURES`), as `tellApproval` is. The update holds its tests in
+  // its own `where` (the row's `last_turn` is `turn`, its end not counted),
+  // so a late or a second settle changes nothing. The stop is in the same
+  // statement: when `end` is `failed` and the count reaches
+  // `WAKE_FAILURES`, an active row stops, why `failed`, with nothing left
+  // to fire, which the check `stopped is null or (due is null and pending
+  // is null)` asks for; a stopped row keeps its first `stopped` and `why`.
+  // SQLite reads the old row in each expression of `set`. The row's
+  // `stopped` is read first, in the same transaction, only to tell whether
+  // this call stopped it. The chat's switch is not read (lead, ec-hvsq7,
+  // M13).
+  const settleWake = Effect.fn("Store.settleWake")(function*(n: number, turn: number, end: WakeEnd) {
+    if (end !== "done" && end !== "failed" && end !== "kept") return yield* Effect.die(new Error(`a wake turn's end is done, failed or kept, not ${String(end)}`))
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const [before] = yield* sql<{ stopped: number | null }>`select stopped from everchat_wake where chat = ${chat} and n = ${n}`
+      const at = yield* now
+      const stops = sql`stopped is null and ${end} = 'failed' and failed + 1 >= ${WAKE_FAILURES}`
+      const changed = yield* sql<{ stopped: number | null }>`
+        update everchat_wake
+        set failed = case ${end} when 'done' then 0 when 'failed' then failed + 1 else failed end,
+            settled = 1,
+            due = case when ${stops} then null else due end,
+            pending = case when ${stops} then null else pending end,
+            missed = case when ${stops} then 0 else missed end,
+            why = case when ${stops} then 'failed' else why end,
+            stopped = case when ${stops} then ${at} else stopped end,
+            updated = ${at}
+        where chat = ${chat} and n = ${n} and last_turn = ${turn} and settled = 0
+        returning stopped`
+      const [row] = changed
+      if (row === undefined) return { settled: false, stopped: false } satisfies Settled
+      return { settled: true, stopped: before?.stopped === null && row.stopped !== null } satisfies Settled
+    }))
+  }, failed("settleWake"))
+
+  // A stop by the model (`unwake`, with its call) or by the person: a
+  // transaction of its own, or a savepoint in a note's. The update holds
+  // its test (the row active) in its own `where`; a row that is not active
+  // is left as it was, and the answer is false. A call goes only with
+  // `unwake` (the check `stop_call is null or (why is not null and why =
+  // 'unwake')` is the second guard).
+  const stopWake = Effect.fn("Store.stopWake")(function*(n: number, why: WakeStop, call: number | null = null) {
+    if (why !== "unwake" && why !== "person") return yield* Effect.die(new Error(`a wake-up is stopped by unwake or the person, not ${String(why)}`))
+    if (why === "person" && call !== null) return yield* Effect.fail(new Error("the person's stop of a wake-up has no call"))
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_wake
+        set stopped = ${at}, why = ${why}, stop_call = ${call}, due = null, pending = null, missed = 0, updated = ${at}
+        where chat = ${chat} and n = ${n} and stopped is null
+        returning n`
+      return changed.length === 1
+    }))
+  }, failed("stopWake"))
+
   // Events
   // ------
 
@@ -1338,6 +1688,7 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     setGoal,
     setDraft,
     setTaken,
+    setWakeups,
     append,
     putNodes,
     putView,
@@ -1357,6 +1708,11 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     endApproval,
     cutApprovals,
     tellApproval,
+    makeWake,
+    pendWake,
+    fireWake,
+    settleWake,
+    stopWake,
     addEvent,
     addDiagnostics,
     dropDiagnostics

@@ -131,7 +131,7 @@ const LIVE_PID_A2 = process.pid + 100_002
 const LIVE_PID_A3 = process.pid + 100_003
 const ALIVE = (pid: number) => pid === LIVE_PID || pid === LIVE_PID_A2 || pid === LIVE_PID_A3
 
-const KINDS: ReadonlyArray<Kind> = ["user", "asst", "tool", "echo", "work", "note", "late"]
+const KINDS: ReadonlyArray<Kind> = ["user", "asst", "tool", "echo", "work", "note", "late", "wake"]
 
 // Runs `effect` with `Chats` over `file`, its scope closed inside the test
 // clock: the launch's end has the clock's time too. The processes of the
@@ -285,10 +285,19 @@ const tried = <A>(what: string, effect: Effect.Effect<A, unknown>, otherwise: A)
 // pending, 2 no, 3 yes, 4 running, 5 done and told with the turn's first
 // message: so another chat has rows of A's numbers in A's states, and rows
 // that A has not in the other states),
-// two rows of usage and a diagnostic, and three events, each in the
-// transaction of what it reports: the turn's start, its program's call,
-// and its messages accepted. Then one more turn: its start, a reply and
-// its `message` event, and, in a chat with no more turns than A (A's and
+// two rows of usage and a diagnostic, a wake-up that the turn's program's
+// first function made (a reminder in an odd turn, a routine in an even
+// one), and three
+// events, each in the transaction of what it reports: the turn's start, its
+// program's call, and its messages accepted. Then a wake-up made otherwise,
+// and one that the last turn's second function made and the first turn's
+// stopped (`unwake`), and one more turn, a wake turn with a ceiling of
+// its own (20 steps, 2,000,000 + k tokens): its start, a reply and
+// its `message` event, the fire of the wake-up made otherwise in that turn
+// (pended, then fired with a `wake` message of two pages), and a waiting
+// fire of the routine of turn 2 (at an earlier slot in each other chat than
+// in A's, so that a read of the oldest fire that reaches another chat gives
+// that chat's) and, in each other chat, of the reminder of turn 1, and, in a chat with no more turns than A (A's and
 // B's second), its end and its `end` event, so that A's chat has each type
 // of event. Then the tree, the views and the chat's row. The other turns,
 // and every call, stay running: so does each turn of B's chat and of A's
@@ -380,13 +389,20 @@ const fill = (store: StoreService, side: Side) =>
         undefined
       )
       yield* tried(at("addDiagnostics", t), store.addDiagnostics([{ level: "info", source: tag, text: `${tag} diagnostic ${t}`, created: t }]), undefined)
+      const when = t % 2 === 1 ? { at: 60_000 * t } : { cron: `${t} 9 * * *` }
+      yield* tried(at("makeWake", t), store.makeWake({ text: `${tag} wake ${t}`, ...when, zone: "UTC", first: 60_000 * t, turn, call: child }, 20), { _tag: "full" })
     }
+    yield* tried(at("makeWake", 0), store.makeWake({ text: `${tag} wake made otherwise`, at: 7, zone: "Europe/Berlin", first: 7 }, 20), { _tag: "full" })
+    // A routine that the second function of turn k's program made, and the
+    // second function of turn 1's program stopped (`unwake`).
+    yield* tried(at("makeWake", k + 2), store.makeWake({ text: `${tag} wake stopped`, cron: "0 7 * * *", zone: "UTC", first: 60_000 * (k + 2), turn: k, call: 3 * k }, 20), { _tag: "full" })
+    yield* tried(at("stopWake", k + 2), store.stopWake(k + 2, "unwake", 3), false)
     const last = k + 1
     const firstMsg = yield* tried(at("count", last), store.count, messagesOf(side) * k)
     const turn = yield* tried(
       at("startTurn", last),
       store.transaction(Effect.gen(function*() {
-        const turn = yield* store.startTurn({ pick, head: `{"${tag}":${last}}`, firstMsg })
+        const turn = yield* store.startTurn({ pick, head: `{"${tag}":${last}}`, firstMsg, steps: 20, tokens: 2_000_000 + k })
         yield* store.addEvent({ type: "start", turn: turn.id })
         return turn.id
       })),
@@ -400,6 +416,21 @@ const fill = (store: StoreService, side: Side) =>
       })),
       undefined
     )
+    const otherwise = k + 1
+    yield* tried(at("pendWake", otherwise), store.pendWake(otherwise, { pending: 7, missed: 0, due: null }), false)
+    yield* tried(
+      at("fireWake", otherwise),
+      store.transaction(Effect.andThen(
+        store.append([{ kind: "wake", text: `${tag} fires 1`, more: true, turn }, { kind: "wake", text: `${tag} fires 2`, turn }]),
+        store.fireWake(otherwise, turn, { pending: 7, missed: 0 })
+      )),
+      undefined
+    )
+    yield* tried(at("pendWake", 2), store.pendWake(2, { pending: side === A ? 120_000 : 110_000, missed: side === A ? 2 : 3, due: 180_000 }), false)
+    // In each other chat the reminder of turn 1 waits too, at its slot,
+    // which A's reminder 1 has not reached: a fire of A's 1 that reaches
+    // another chat's row finds one there.
+    if (side !== A) yield* tried(at("pendWake", 1), store.pendWake(1, { pending: 60_000, missed: 0, due: null }), false)
     if (ends(side)) {
       yield* tried(
         at("endTurn", last),
@@ -535,6 +566,12 @@ const READS: { readonly [K in keyof Reading]: (reads: Reading) => Calls } = {
   approvals: (r) => [r.approvals(), r.approvals(["pending"]), r.approvals(["pending", "no"]), r.approvals(["done"]), r.approvals([])],
   approvalsOf: (r) => range(1, 8).map((n) => r.approvalsOf(n)),
   untoldApprovals: (r) => [r.untoldApprovals()],
+  wakes: (r) => [r.wakes(), r.wakes({ active: true }), r.wakes({ active: false })],
+  dueWakes: (r) => [r.dueWakes(0), r.dueWakes(60_000), r.dueWakes(200_000), r.dueWakes(Number.MAX_SAFE_INTEGER)],
+  pendingWake: (r) => [r.pendingWake()],
+  fires: (r) => [r.fires(-1), r.fires(0), r.fires(1)],
+  unsettledWakes: (r) => [r.unsettledWakes()],
+  wakesOf: (r) => range(1, 10).map((n) => r.wakesOf(n)),
   usage: (r) => [
     r.usage(),
     r.usage({ turn: 1 }),
@@ -599,12 +636,22 @@ const onlyOf = (file: string, other: string) => {
       file,
       `select max(n) as n from everchat_approval where chat = ${b} and status = '${status}' and n not in (select n from everchat_approval where chat = ${a})`
     )[0]?.n ?? top("everchat_approval", "n")
+  const unsettled = () => {
+    const [row] = rows<{ n: number; turn: number }>(file, `select n, last_turn as turn from everchat_wake where chat = ${b} and settled = 0`)
+    if (row === undefined) throw new Error("the other chat has no wake-up whose end is not counted")
+    return { unsettledWake: row.n, unsettledTurn: row.turn }
+  }
   return {
     turn: top("everchat_turn", "n"),
     call: top("everchat_call", "n"),
     program: top("everchat_call", "n", "and parent is null"),
     running: top("everchat_call", "n", "and parent is not null and status = 'running'"),
     approval: top("everchat_approval", "n"),
+    wake: top("everchat_wake", "n"),
+    // The other chat's active row whose number A has not, or has stopped.
+    activeWake: top("everchat_wake", "n", "and stopped is null"),
+    // The other chat's row whose end is not counted, and its last turn.
+    ...unsettled(),
     yes: approvalIn("yes"),
     runningApproval: approvalIn("running"),
     msg: top("everchat_msg", "i"),
@@ -671,6 +718,52 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
     want: "fails",
     run: (s, b) => s.addEvent({ type: "message", msg: 0, msgLast: b.msg })
   },
+  "makeWake with a turn": {
+    member: "makeWake",
+    want: "fails",
+    run: (s, b) => s.makeWake({ text: "by A", at: 1, zone: "UTC", first: 1, turn: b.turn, call: 1 }, 20)
+  },
+  "makeWake with a call": {
+    member: "makeWake",
+    want: "fails",
+    run: (s, b) => s.makeWake({ text: "by A", at: 1, zone: "UTC", first: 1, turn: 1, call: b.call }, 20)
+  },
+  "pendWake": {
+    member: "pendWake",
+    want: "nothing",
+    run: (s, b) => s.pendWake(b.wake, { pending: Number.MAX_SAFE_INTEGER, missed: 0, due: null })
+  },
+  "fireWake": {
+    member: "fireWake",
+    want: "fails",
+    run: (s, b) => s.fireWake(b.wake, 1, { pending: 1, missed: 0 })
+  },
+  // A's routine 2 waits with the slot 120,000: a fire of it in a turn of
+  // the other chat.
+  "fireWake with a turn": {
+    member: "fireWake",
+    want: "fails",
+    run: (s, b) => s.fireWake(2, b.turn, { pending: 120_000, missed: 2 })
+  },
+  // The other chat's row whose end is not counted, with its last turn,
+  // which A has not.
+  "settleWake": {
+    member: "settleWake",
+    want: "nothing",
+    run: (s, b) => s.settleWake(b.unsettledWake, b.unsettledTurn, "failed")
+  },
+  // The other chat's active row, which A has not, or has stopped.
+  "stopWake": {
+    member: "stopWake",
+    want: "nothing",
+    run: (s, b) => s.stopWake(b.activeWake, "person")
+  },
+  "stopWake with a call": {
+    member: "stopWake",
+    want: "fails",
+    run: (s, b) => s.stopWake(1, "unwake", b.call)
+  },
+  "wakesOf": { member: "wakesOf", want: "nothing", run: (s, b) => s.wakesOf(b.program) },
   "addUsage with a turn": {
     member: "addUsage",
     want: "fails",
@@ -679,8 +772,8 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
 }
 
 const nothing = (value: unknown) =>
-  value === undefined || (Array.isArray(value) && value.length === 0) || (Option.isOption(value) && Option.isNone(value)) ||
-  (typeof value === "object" && value !== null && JSON.stringify(value) === "{\"_tag\":\"none\"}")
+  value === undefined || value === false || (Array.isArray(value) && value.length === 0) || (Option.isOption(value) && Option.isNone(value)) ||
+  (typeof value === "object" && value !== null && ["{\"_tag\":\"none\"}", "{\"settled\":false,\"stopped\":false}"].includes(JSON.stringify(value)))
 
 // The other chats: B's (of another tenant), and A's second and third (of
 // A's tenant, made before A's chat and after it).
@@ -768,7 +861,9 @@ const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
     s.startTurn({ pick: A.pick, head: "{\"b\":3}", firstMsg: 6 }),
     s.startTurn({ pick: B.pick, head: "{\"b\":1}", firstMsg: 6 }),
     s.startTurn({ pick: A2.pick, head: "{\"c\":4}", firstMsg: 6 }),
-    s.startTurn({ pick: A.pick, head: "{\"c\":1}", firstMsg: 6 })
+    s.startTurn({ pick: A.pick, head: "{\"c\":1}", firstMsg: 6 }),
+    s.startTurn({ pick: A.pick, head: "{\"a\":9}", firstMsg: 6, steps: 3, tokens: 2_000_003 }),
+    s.startTurn({ pick: A.pick, head: "{\"a\":10}", firstMsg: 6, steps: 3 })
   ],
   endTurn: (s) => [s.endTurn(1, "done"), s.endTurn(2, "failed", "by A")],
   addTurnItem: (s) => [s.addTurnItem(1, "back", "a new item"), s.addTurnItem(2, "user", "a new item")],
@@ -827,6 +922,73 @@ const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
       return yield* s.cutApprovals("by A")
     })
   ],
+  // A has 3 active wake-ups, each other chat 3 to 6: after the two makes, a
+  // limit of 6 makes A's sixth row only if no other chat's rows are
+  // counted, and the next make is full.
+  makeWake: (s) => [
+    s.makeWake({ text: "a new reminder", at: 5, zone: "UTC", first: 5 }, 20),
+    s.makeWake({ text: "a new routine", cron: "0 8 * * *", zone: "Asia/Tokyo", first: 9, turn: 2, call: 4 }, 20),
+    s.makeWake({ text: "the sixth", at: 6, zone: "UTC", first: 6 }, 6),
+    s.makeWake({ text: "a seventh", at: 6, zone: "UTC", first: 6 }, 6),
+    s.makeWake({ text: "", at: 6, zone: "UTC", first: 6 }, 20),
+    s.makeWake({ text: "a call of A's turn 1 in turn 2", at: 6, zone: "UTC", first: 6, turn: 2, call: 1 }, 20)
+  ],
+  // A's wake-ups: 1, a reminder due at 60,000; 2, a routine whose fire of
+  // 120,000 waits (missed 2); 3, a reminder that fired and stopped. The
+  // other chats have rows of these numbers, and more, in other states.
+  pendWake: (s) => [
+    s.pendWake(1, { pending: 60_000, missed: 0, due: null }),
+    s.pendWake(1, { pending: 60_000, missed: 0, due: null }),
+    s.pendWake(2, { pending: 180_000, missed: 1001, due: 240_000 }),
+    s.pendWake(3, { pending: 600_000, missed: 0, due: null }),
+    s.pendWake(9, { pending: 600_000, missed: 0, due: null })
+  ],
+  // A's turn 3 is its last.
+  fireWake: (s) => [
+    s.fireWake(2, 3, { pending: 120_000, missed: 2 }),
+    s.fireWake(2, 3, { pending: 120_000, missed: 2 }),
+    s.fireWake(1, 3, { pending: 60_000, missed: 0 }),
+    Effect.andThen(s.pendWake(1, { pending: 60_000, missed: 0, due: null }), s.fireWake(1, 3, { pending: 60_000, missed: 0 })),
+    s.fireWake(3, 3, { pending: 7, missed: 0 }),
+    s.fireWake(9, 3, { pending: 7, missed: 0 })
+  ],
+  // A's 3 fired in turn 3, its end not counted; 1 never fired; A's routine
+  // 2 fires twice, each turn failed, and stops at the second; the other
+  // chats have rows of these numbers in other states (B's second, of A's
+  // numbers, in the same).
+  settleWake: (s) => [
+    s.settleWake(3, 2, "failed"),
+    s.settleWake(3, 3, "failed"),
+    s.settleWake(3, 3, "done"),
+    s.settleWake(1, 1, "done"),
+    s.settleWake(9, 3, "failed"),
+    Effect.gen(function*() {
+      const fires = []
+      for (const [slot, missed] of [[120_000, 2], [180_000, 0]] as const) {
+        if (slot !== 120_000) yield* s.pendWake(2, { pending: slot, missed, due: slot + 60_000 })
+        const turn = yield* s.transaction(Effect.gen(function*() {
+          const turn = yield* s.startTurn({ pick: A.pick, head: "{}", firstMsg: 0, steps: 20, tokens: 2_000_000 })
+          yield* s.fireWake(2, turn.id, { pending: slot, missed })
+          return turn.id
+        }))
+        yield* s.endTurn(turn, "failed", "a failed wake turn")
+        fires.push(yield* s.settleWake(2, turn, "failed"))
+      }
+      return fires
+    })
+  ],
+  // A's 1 and 2 are active, 3 fired, 4 was stopped by `unwake`.
+  stopWake: (s) => [
+    s.stopWake(1, "person", 2),
+    s.stopWake(1, "person"),
+    s.stopWake(1, "person"),
+    s.stopWake(2, "unwake", 2),
+    s.stopWake(3, "person"),
+    s.stopWake(4, "unwake", 3),
+    s.stopWake(9, "person"),
+    s.stopWake(2, "unwake", 99)
+  ],
+  setWakeups: (s) => [s.setWakeups(false), s.setWakeups(false), s.setWakeups(true), s.setWakeups(true), s.setWakeups(false)],
   tellApproval: (s) => [
     s.tellApproval(2, 0),
     s.tellApproval(2, 1),
@@ -887,6 +1049,37 @@ test("writes: answerApproval past WAIT expires A's approval and leaves B's appro
   expect([status(both.a), status(both.b)]).toEqual([[{ status: "expired" }], [{ status: "pending" }]])
   expect(notA(file, both.a)).toEqual(before)
   expect(live(file)).toEqual(LIVE())
+})
+
+// The chat's switch of its wake-ups, which no member sets yet (plain SQL
+// here): with A's off and every other chat's on, A's reads of due and
+// waiting fires give none and a slot of A's changes nothing; so a statement
+// whose test of the switch reads another chat's row shows.
+test("reads and writes: with A's wake-ups off and the other chats' on, dueWakes and pendingWake on A's store give none, pendWake changes nothing, and every row that is not A's is as it was", async () => {
+  const file = copy(both.file)
+  const off = new Sqlite(file)
+  try {
+    off.run("update everchat_chat set wakeups = 0 where id = ?", [chatId(file, both.a)])
+  } finally {
+    off.close()
+  }
+  expect(rows(file, "select count(*) as n from everchat_chat where wakeups = 1")).toEqual([{ n: 4 }])
+  const before = notA(file, both.a)
+  const wakes = () => rows(file, `select * from everchat_wake where chat = ${chatId(file, both.a)} order by n`)
+  const own = wakes()
+  const got = await run(file, Effect.gen(function*() {
+    const chats = yield* Chats
+    const store = yield* chats.store(TENANT_A, both.a, A.launch)
+    const reads = yield* chats.reads(TENANT_A, both.a)
+    return {
+      due: [yield* store.dueWakes(Number.MAX_SAFE_INTEGER), yield* reads.dueWakes(Number.MAX_SAFE_INTEGER)],
+      pending: [Option.isNone(yield* store.pendingWake()), Option.isNone(yield* reads.pendingWake())],
+      pended: [yield* store.pendWake(1, { pending: 60_000, missed: 0, due: null }), yield* store.pendWake(2, { pending: 180_000, missed: 0, due: null })]
+    }
+  }))
+  expect(got).toEqual({ due: [[], []], pending: [true, true], pended: [false, false] })
+  expect(wakes()).toEqual(own)
+  expect(notA(file, both.a)).toEqual(before)
 })
 
 // Launches
@@ -1064,8 +1257,9 @@ for (const { column, key, parent, table } of shape.references) {
       expect(theirs ?? null).not.toBeNull()
       // A row of A to copy: for a call, a function's row (it has a parent
       // and no vendor's id, so no unique key holds it).
+      // For a wake-up, one that a call made (it has a turn and a call).
       const template = db.query<Record<string, unknown>, []>(
-        `select * from ${table} where chat = ${a} ${table === "everchat_call" ? "and parent is not null" : ""} limit 1`
+        `select * from ${table} where chat = ${a} ${table === "everchat_call" ? "and parent is not null" : table === "everchat_wake" ? "and turn is not null" : ""} limit 1`
       ).get()
       expect(template).not.toBeNull()
       const insert = (value: number) => {
@@ -1089,6 +1283,9 @@ for (const { column, key, parent, table } of shape.references) {
         if (table === "everchat_approval" && column !== "call") {
           row["call"] = values(`select min(n) as v from everchat_call where chat = ${a} and n not in (select call from everchat_approval where chat = ${a})`)[0]
         }
+        // A wake-up's stop's call is set only on a row that `unwake` stopped,
+        // with nothing to fire.
+        if (table === "everchat_wake" && column === "stop_call") Object.assign(row, { stopped: 1, why: "unwake", due: null, pending: null })
         const names = Object.keys(row)
         db.run(`insert into ${table} (${names.join(", ")}) values (${names.map(() => "?").join(", ")})`, names.map((name) => row[name]) as Array<never>)
       }
@@ -1121,7 +1318,11 @@ test("the database refuses: the schema has each reference inside a chat that the
     "everchat_turn.head",
     "everchat_turn.launch",
     "everchat_turn_item.turn",
-    "everchat_usage.turn"
+    "everchat_usage.turn",
+    "everchat_wake.call",
+    "everchat_wake.last_turn",
+    "everchat_wake.stop_call",
+    "everchat_wake.turn"
   ])
 })
 
@@ -1176,7 +1377,9 @@ test("the tag: tenant A with the UUID of its second chat gets that chat and not 
   }))
   for (const side of [got.store, got.reads]) {
     expect(side.chat).toMatchObject({ uuid: both.a2, goal: "c goal", draft: "c draft", pick: A2.pick })
-    expect(side.messages).toHaveLength(messagesOf(A2) * A2.k + 1)
+    // Its turns' messages, its last turn's reply, and the two pages of its
+    // wake-up's fire.
+    expect(side.messages).toHaveLength(messagesOf(A2) * A2.k + 3)
     expect(side.messages.every((text) => text.startsWith("c "))).toBe(true)
   }
   expect(got.store.launch).toBe(A2.launches + 1)

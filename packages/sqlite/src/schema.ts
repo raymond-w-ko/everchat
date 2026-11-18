@@ -23,7 +23,7 @@
 
 // The mark of this schema, the file's `pragma user_version`. A file that
 // Effect's migrator made has none (0).
-export const VERSION = 7
+export const VERSION = 8
 
 export const schema: ReadonlyArray<string> = [
   // Each tenant: its UUIDv4, from outside. The local file has one.
@@ -54,7 +54,7 @@ export const schema: ReadonlyArray<string> = [
        id   integer primary key,
        name text    not null unique
      ) strict`,
-  `insert into everchat_kind (id, name) values (1, 'user'), (2, 'asst'), (3, 'tool'), (4, 'echo'), (5, 'work'), (6, 'note'), (7, 'late')`,
+  `insert into everchat_kind (id, name) values (1, 'user'), (2, 'asst'), (3, 'tool'), (4, 'echo'), (5, 'work'), (6, 'note'), (7, 'late'), (8, 'wake')`,
   `create trigger everchat_kind_no_update before update on everchat_kind
        begin select raise(abort, 'everchat_kind is append only'); end`,
   `create trigger everchat_kind_no_delete before delete on everchat_kind
@@ -70,6 +70,7 @@ export const schema: ReadonlyArray<string> = [
        draft   text,
        taken   integer not null default -1,
        seq     integer not null default 0,
+       wakeups integer not null default 1 check (wakeups in (0, 1)),
        created integer not null,
        updated integer not null
      ) strict`,
@@ -128,7 +129,10 @@ export const schema: ReadonlyArray<string> = [
        created   integer not null,
        ended     integer,
        why       text,
+       steps     integer check (steps > 0),
+       tokens    integer check (tokens > 0),
        check ((status = 'running') = (ended is null)),
+       check ((steps is null) = (tokens is null)),
        primary key (chat, n),
        foreign key (chat, head) references everchat_head (chat, n) on delete cascade,
        foreign key (chat, launch) references everchat_launch (chat, n) on delete cascade
@@ -136,6 +140,9 @@ export const schema: ReadonlyArray<string> = [
   `create index everchat_turn_running on everchat_turn (chat, status)`,
   `create trigger everchat_turn_no_move before update of chat, n on everchat_turn
        begin select raise(abort, 'everchat_turn keeps its chat and its n'); end`,
+  // A turn's ceiling (steps and tokens) is written with the turn, and kept.
+  `create trigger everchat_turn_no_new_ceiling before update of steps, tokens on everchat_turn
+       begin select raise(abort, 'everchat_turn keeps its ceiling'); end`,
 
   // A turn's request, step by step, as sent to the vendor.
   `create table everchat_turn_item (
@@ -375,6 +382,52 @@ export const schema: ReadonlyArray<string> = [
        begin select raise(abort, 'everchat_approval keeps its msg'); end`,
   `create trigger everchat_approval_no_delete before delete on everchat_approval when exists (select 1 from everchat_chat where id = old.chat)
        begin select raise(abort, 'everchat_approval is kept for ever'); end`,
+
+  // Each wake-up by time of the chat: a reminder (`at`) or a routine
+  // (`cron`), in a zone, and its state. What the make wrote is kept. The
+  // store deletes no row: a stopped one stays, as a call does.
+  `create table everchat_wake (
+       chat      integer not null references everchat_chat (id) on delete cascade,
+       n         integer not null,
+       text      text    not null,
+       cron      text,
+       at        integer,
+       zone      text    not null,
+       first     integer not null,
+       turn      integer,
+       call      integer,
+       due       integer,
+       slot      integer,
+       pending   integer,
+       missed    integer not null default 0 check (missed >= 0),
+       fired     integer not null default 0 check (fired >= 0),
+       last_turn integer,
+       settled   integer not null default 1 check (settled in (0, 1)),
+       failed    integer not null default 0 check (failed >= 0),
+       stopped   integer,
+       why       text    check (why in ('fired', 'unwake', 'person', 'failed')),
+       stop_call integer,
+       created   integer not null,
+       updated   integer not null,
+       check ((cron is null) <> (at is null)),
+       check (at is null or first = at),
+       check ((turn is null) = (call is null)),
+       check ((stopped is null) = (why is null)),
+       check (stop_call is null or (why is not null and why = 'unwake')),
+       check (stopped is null or (due is null and pending is null)),
+       check (pending is null or slot is null or pending > slot),
+       check (last_turn is not null or settled = 1),
+       primary key (chat, n),
+       foreign key (chat, turn) references everchat_turn (chat, n) on delete cascade,
+       foreign key (chat, call) references everchat_call (chat, n) on delete cascade,
+       foreign key (chat, last_turn) references everchat_turn (chat, n) on delete cascade,
+       foreign key (chat, stop_call) references everchat_call (chat, n) on delete cascade
+     ) strict`,
+  `create index everchat_wake_due on everchat_wake (chat, due)`,
+  `create trigger everchat_wake_no_move before update of chat, n on everchat_wake
+       begin select raise(abort, 'everchat_wake keeps its chat and its n'); end`,
+  `create trigger everchat_wake_no_new_make before update of text, cron, at, zone, first, turn, call on everchat_wake
+       begin select raise(abort, 'everchat_wake keeps what its make wrote'); end`,
 
   // For people: the log with kinds as words and times as text. A reader names the chat.
   `create view everchat_msg_read as

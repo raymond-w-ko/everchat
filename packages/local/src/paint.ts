@@ -139,7 +139,7 @@ export class Row implements Component {
 
 // The mark of each kind that is plain text. EverChat's words, and an
 // agent's report, have none.
-export const MARKS: Readonly<Record<Exclude<Kind, "asst" | "work">, string>> = { user: "› ", tool: "▸ ", echo: "◂ ", note: "· ", late: "◃ " }
+export const MARKS: Readonly<Record<Exclude<Kind, "asst" | "work">, string>> = { user: "› ", tool: "▸ ", echo: "◂ ", note: "· ", late: "◃ ", wake: "◷ " }
 
 export const LOOKS: Readonly<Record<Exclude<Kind, "asst" | "work">, Look>> = {
   user: { mark: bold(MARKS.user), ink: plain },
@@ -147,7 +147,9 @@ export const LOOKS: Readonly<Record<Exclude<Kind, "asst" | "work">, Look>> = {
   echo: { mark: dim(MARKS.echo), ink: dim, most: MOST },
   note: { mark: dim(MARKS.note), ink: (text) => dim(italic(text)) },
   // The result of a call that ran after a person's yes: a result, as echo.
-  late: { mark: dim(MARKS.late), ink: dim, most: MOST }
+  late: { mark: dim(MARKS.late), ink: dim, most: MOST },
+  // A wake-up by time that came due: a mark of its own, with the look of late.
+  wake: { mark: dim(MARKS.wake), ink: dim, most: MOST }
 }
 
 // A thought while the model thinks it: its last rows.

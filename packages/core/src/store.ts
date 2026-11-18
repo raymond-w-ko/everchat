@@ -41,7 +41,7 @@ import { Context, type Effect, type Option, Schema, type Scope } from "effect"
 // Data
 // ----
 
-export const Kind = Schema.Literals(["user", "asst", "tool", "echo", "work", "note", "late"])
+export const Kind = Schema.Literals(["user", "asst", "tool", "echo", "work", "note", "late", "wake"])
 export type Kind = typeof Kind.Type
 
 // The kinds of message. The model reads each message as `<kind>: <text>`.
@@ -53,7 +53,8 @@ export const KINDS = {
   echo: 4, // that program's result
   work: 5, // an agent's report
   note: 6, // the program itself
-  late: 7 // the result of a call that ran after a person's yes
+  late: 7, // the result of a call that ran after a person's yes
+  wake: 8 // a wake-up by time that came due
 } as const
 
 // A model choice.
@@ -139,6 +140,7 @@ export interface Chat {
   readonly draft: string | null
   readonly taken: number // the last message that a request has taken in
   readonly seq: number // the chat's last event number; 0 with no event
+  readonly wakeups: boolean // its wake-ups by time fire (`/wakeups on`); a new chat's are on
   readonly created: number
   readonly updated: number
 }
@@ -229,13 +231,22 @@ export interface Turn {
   readonly created: number
   readonly ended: number | null // null: it runs
   readonly why: string | null
+  // Its ceiling (a wake turn's): the most steps and tokens that it may use,
+  // both or neither; null: none (a person's turn). Written at its start,
+  // never changed.
+  readonly steps: number | null
+  readonly tokens: number | null
 }
 
+// `steps` and `tokens`: the turn's ceiling, both or neither, each a whole
+// number over 0; left out, the turn has none.
 export interface NewTurn {
   readonly agent?: number | null | undefined
   readonly pick: Pick
   readonly head: string
   readonly firstMsg: number
+  readonly steps?: number | null | undefined
+  readonly tokens?: number | null | undefined
 }
 
 export interface TurnItem {
@@ -341,6 +352,135 @@ export interface ApprovalEnd {
 
 // The states of an approval whose end the chat is told of (`msg`).
 export const TOLD: ReadonlyArray<ApprovalStatus> = ["no", "expired", "done", "failed", "cut"]
+
+// The text of a wake-up: 1 to `WAKE_TEXT_MAX` characters (UTF-16 units),
+// once well formed.
+export const WAKE_TEXT_MAX = 2000
+
+// Why a wake-up stopped: its one fire (a reminder), `unwake`, the person,
+// or two failed wake turns in a row.
+export const WakeWhy = Schema.Literals(["fired", "unwake", "person", "failed"])
+export type WakeWhy = typeof WakeWhy.Type
+
+// A wake-up to make (docs/wakeups.md, sections 2 and 3): its text, a
+// routine's `cron` or a reminder's `at` (one of them), its zone (an IANA
+// name), and `first`, the first slot that the caller computed (a
+// reminder's `at`; a routine's first slot after the make): the store
+// computes no slot, and the row's `due` is `first`. `turn` and `call`: the
+// turn and the function's call that made it, both or neither. The schema
+// refuses a row that breaks these.
+export interface NewWake {
+  readonly text: string
+  readonly cron?: string | null | undefined
+  readonly at?: number | null | undefined
+  readonly zone: string
+  readonly first: number
+  readonly turn?: number | null | undefined
+  readonly call?: number | null | undefined
+}
+
+// A wake-up as it is kept: each column of its row (`everchat_wake`), with
+// `id` its `n`. What the make wrote (`text` to `call`) never changes.
+// `due`: the next slot (null: none to come); `slot`: the last slot fired;
+// `pending`: the slot of a fire that waits; `missed`: the slots that the
+// waiting fire stands for beside its own; `fired`: the count of fires;
+// `lastTurn`: the turn that the last fire started; `settled`: false while
+// that turn's end is not counted; `failed`: the failed wake turns in a
+// row; `stopped`, `why` and `stopCall`: when and why it stopped (null:
+// active), and the call that stopped it (`unwake`).
+export interface Wake {
+  readonly id: number
+  readonly text: string
+  readonly cron: string | null
+  readonly at: number | null
+  readonly zone: string
+  readonly first: number
+  readonly turn: number | null
+  readonly call: number | null
+  readonly due: number | null
+  readonly slot: number | null
+  readonly pending: number | null
+  readonly missed: number
+  readonly fired: number
+  readonly lastTurn: number | null
+  readonly settled: boolean
+  readonly failed: number
+  readonly stopped: number | null
+  readonly why: WakeWhy | null
+  readonly stopCall: number | null
+  readonly created: number
+  readonly updated: number
+}
+
+// What a make did: `made`, with the whole row; or `full`, when the chat had
+// the limit of active rows, and nothing was written.
+export type MadeWake =
+  | { readonly _tag: "made"; readonly wake: Wake }
+  | { readonly _tag: "full" }
+
+// Which wake-ups to read: all; with `active: true` those that have not
+// stopped; with `active: false` those that have.
+export interface WakeFilter {
+  readonly active?: boolean | undefined
+}
+
+// The bound of a wake-up's `missed`: a count at it reads "1000 or more"
+// (docs/wakeups.md, section 4).
+export const WAKE_MISSED_MAX = 1000
+
+// The firer's write when a slot of a wake-up comes (`pendWake`): the newest
+// slot at or before now (`pending`), the count of the slots before it, from
+// `due` on, that it stands for (`missed`), and the next slot (`due`; null
+// when none is to come).
+export interface WakePend {
+  readonly pending: number
+  readonly missed: number
+  readonly due: number | null
+}
+
+// What a source read of a waiting fire (`pendingWake`), and hands to
+// `fireWake`: the row's `pending` and `missed` then.
+export interface WakeRead {
+  readonly pending: number
+  readonly missed: number
+}
+
+// How the firer counts the end of a wake turn (`settleWake`;
+// docs/wakeups.md, section 7): `done` sets the row's `failed` to 0,
+// `failed` (a failed turn, or one that its ceiling stopped) adds 1, `kept`
+// (a turn that the person stopped) keeps it.
+export type WakeEnd = "done" | "failed" | "kept"
+
+// The count of failed wake turns in a row at which a wake-up stops, why
+// `failed`.
+export const WAKE_FAILURES = 2
+
+// What a settle did: whether it counted the end (`settled`), and whether
+// this call stopped the row (`stopped`), at `WAKE_FAILURES`.
+export interface Settled {
+  readonly settled: boolean
+  readonly stopped: boolean
+}
+
+// A wake-up whose last fire's end is not counted yet (`settled` false),
+// with the status and the why of that fire's turn (`wake.lastTurn`).
+export interface UnsettledWake {
+  readonly wake: Wake
+  readonly status: Turn["status"]
+  readonly why: string | null
+}
+
+// Who stops a wake-up by `stopWake`: the model (`unwake`, with the
+// function's call) or the person (`/wakeups stop`).
+export type WakeStop = "unwake" | "person"
+
+// A wake-up that a function call of a program made (`made`: the row's
+// `call`) or stopped (`stopped`: its `stopCall`); `call` is that call.
+export interface WakeOf {
+  readonly wake: Wake
+  readonly by: "made" | "stopped"
+  readonly call: number
+}
 
 // What one request to a model used, as it is kept.
 export interface UsageRecord {
@@ -526,6 +666,28 @@ export interface Reading {
   // one of the states `TOLD`; in the order of their ids.
   untoldApprovals(): Effect.Effect<Array<Approval>, StoreError>
 
+  // The wake-ups by time, in the order of their ids (`WakeFilter`).
+  wakes(filter?: WakeFilter): Effect.Effect<Array<Wake>, StoreError>
+  // `dueWakes`: the active rows whose `due` is at or before `now`, in the
+  // order of `due`, then of their ids; none while the chat's wake-ups are
+  // off (`wakeups = 0`). `pendingWake`: the oldest waiting fire, the least
+  // `pending`, then the least id, of the active rows whose last fire's end
+  // is counted (`settled`); none while the chat's wake-ups are off. Its
+  // `pending` and `missed` are what a source hands to `fireWake`.
+  // `fires`: the count of the `wake` messages written at or after `since`
+  // (a message counts once, at its last page).
+  dueWakes(now: number): Effect.Effect<Array<Wake>, StoreError>
+  pendingWake(): Effect.Effect<Option.Option<Wake>, StoreError>
+  fires(since: number): Effect.Effect<number, StoreError>
+  // `unsettledWakes`: the rows whose last fire's end is not counted
+  // (`settled` false), in the order of their ids, each with its last
+  // turn's status and why; the chat's switch is not read. `wakesOf`: the
+  // rows that a function call of the program `program` made or stopped,
+  // in the order of those calls (then of their ids); a row that one
+  // program made and stopped is given two times, once for each call.
+  unsettledWakes(): Effect.Effect<Array<UnsettledWake>, StoreError>
+  wakesOf(program: number): Effect.Effect<Array<WakeOf>, StoreError>
+
   // The usage, newest first, and its sums for each kind of request.
   usage(filter?: UsageFilter): Effect.Effect<Array<UsageRecord>, StoreError>
   readonly usageTotals: Effect.Effect<Array<UsageTotal>, StoreError>
@@ -559,6 +721,10 @@ export class Store extends Context.Service<Store, Reading & {
   setGoal(goal: string | null): Effect.Effect<void, StoreError>
   setDraft(draft: string | null): Effect.Effect<void, StoreError>
   setTaken(i: number): Effect.Effect<void, StoreError>
+  // The chat's switch of its wake-ups (`Chat.wakeups`); it gives whether
+  // the value changed. It may be the `write` of a note (`Turns.note`), in
+  // the note's transaction.
+  setWakeups(on: boolean): Effect.Effect<boolean, StoreError>
 
   // The log. `append` gives the messages the next ids, with no gap, and
   // returns them as written. `key`: the key of the sender of the message
@@ -586,6 +752,9 @@ export class Store extends Context.Service<Store, Reading & {
   addUsage(usage: NewUsage): Effect.Effect<void, StoreError>
 
   // Turns. A turn has one pick and one head from its start to its end.
+  // `startTurn` writes its ceiling (`NewTurn`) with its row; a ceiling
+  // that is not both or neither, or not of whole numbers over 0, fails
+  // before the transaction, and writes nothing.
   // `endTurn` closes a turn that runs; a turn that has ended stays as it is.
   startTurn(turn: NewTurn): Effect.Effect<Turn, StoreError>
   endTurn(id: number, status: "done" | "stopped" | "failed", why?: string | null): Effect.Effect<void, StoreError>
@@ -634,6 +803,59 @@ export class Store extends Context.Service<Store, Reading & {
   endApproval(id: number, end: ApprovalEnd): Effect.Effect<Option.Option<Approval>, StoreError>
   cutApprovals(output: string): Effect.Effect<Array<Approval>, StoreError>
   tellApproval(id: number, msg: number): Effect.Effect<void, StoreError>
+
+  // A wake-up's row, in one transaction: `full` when the chat has `limit`
+  // active rows (`stopped` null) or more, counted in it; else the row,
+  // with the chat's next id, `due` = `first`, and the clock's time. A text
+  // out of its bounds (`WAKE_TEXT_MAX`) fails before the transaction, and
+  // writes nothing; so does a row that the schema refuses.
+  makeWake(wake: NewWake, limit: number): Effect.Effect<MadeWake, StoreError>
+
+  // A slot of the wake-up `id` came (the firer), in one transaction; it
+  // gives whether it changed the row. Only an active row of a chat whose
+  // wake-ups are on changes, and only for a slot after the row's `slot` and
+  // after its waiting `pending`: else nothing changes, with no error (a
+  // clock that moved back, a round done twice). With no fire waiting, the
+  // row takes `pending`, `missed` (at most `WAKE_MISSED_MAX`) and `due` as
+  // given. With a fire waiting, one fire still waits: `pending` moves to
+  // the given slot, `missed` becomes the old `missed` + 1 + the given
+  // count, at most `WAKE_MISSED_MAX`, and `due` is as given.
+  pendWake(id: number, pend: WakePend): Effect.Effect<boolean, StoreError>
+
+  // The fire of the wake-up `id`, which started the turn `turn`, of the
+  // slot that a source read (`read`, from `pendingWake`): an offer's
+  // `write`, in its transaction, after the turn's row. `slot` becomes
+  // `read.pending`, `fired` grows by 1, `lastTurn` is `turn`, and the
+  // row's end is not counted yet (`settled` false). When `pending` is
+  // still `read.pending`, the fire goes (`pending` null, `missed` 0); when
+  // the firer wrote a newer slot since, that one waits on, and `missed`
+  // loses `read.missed` + 1, not below 0 (a count at `WAKE_MISSED_MAX`
+  // stays). A reminder stops, why `fired`, with nothing left to fire
+  // (`due`, `pending` null, `missed` 0). It fails, and writes nothing, for
+  // a row that is not there, not active, not settled, with no fire
+  // waiting, or whose waiting fire is not `read`'s or newer, or a
+  // `read.pending` not after the row's `slot` (lead, ec-muncvc, ruling 4a
+  // for the reminder).
+  fireWake(id: number, turn: number, read: WakeRead): Effect.Effect<void, StoreError>
+
+  // The count of the end of the turn `turn`, the last fire of the wake-up
+  // `id` (`WakeEnd`), in one transaction (inside a note's, as its
+  // `write`). It changes only a row whose `lastTurn` is `turn` and whose
+  // end is not counted, else nothing (a late or a second settle): `failed`
+  // as `end` says, and `settled` true. When `failed` reaches
+  // `WAKE_FAILURES`, the same statement stops an active row, why `failed`,
+  // with nothing left to fire (`due`, `pending` null, `missed` 0); a row
+  // that stopped already keeps its first `stopped` and `why`. The chat's
+  // switch is not read: off stops fires, not the count.
+  settleWake(id: number, turn: number, end: WakeEnd): Effect.Effect<Settled, StoreError>
+
+  // The stop of the active wake-up `id` (`WakeStop`), in one transaction
+  // (inside a note's, as its `write`): `stopped` the clock's time, `why`,
+  // `stopCall` the call of `unwake` (none for the person), and nothing
+  // left to fire (`due`, `pending` null, `missed` 0). It gives whether it
+  // stopped the row: a row that is not active, or not there, changes
+  // nothing. A call with the person's stop fails, and writes nothing.
+  stopWake(id: number, why: WakeStop, call?: number | null): Effect.Effect<boolean, StoreError>
 
   // An event's row, with the chat's next event number (its `seq` plus 1),
   // which it gives back; `seq` becomes that number. An event's row belongs

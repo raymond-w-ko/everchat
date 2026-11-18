@@ -120,7 +120,7 @@ The checks that hold the states together:
 - `at is null or first = at`: a reminder's first slot is its time (M6).
 - `(turn is null) = (call is null)`.
 - `(stopped is null) = (why is null)`, and `why in ('fired', 'unwake', 'person', 'failed')`.
-- `stop_call is null or why = 'unwake'`.
+- `stop_call is null or (why is not null and why = 'unwake')`: an active row has none.
 - `stopped is null or (due is null and pending is null)`: a stopped row has nothing to fire.
 - `pending is null or slot is null or pending > slot`: a slot never fires twice, also when
   the clock moves back.
@@ -134,7 +134,7 @@ The states, and each change with the member that makes it (section 3):
 | (none) | `wake` makes it | active, `due` and `first` the first slot | `makeWake` |
 | active, no fire waits | its slot comes (the firer), the chat on | a fire waits: `pending`, `missed`, the next `due` (null for a reminder) | `pendWake` |
 | a fire waits | another slot comes before it fires | one fire still waits: `pending` the newest slot, `missed` grown | `pendWake` |
-| a fire waits, `settled = 1` | the source offers it, in the offer's transaction | fired: `slot` the slot that the source read, `fired + 1`, `last_turn`, `settled = 0`; the fire goes, or a newer slot waits on; a reminder stops, `why = 'fired'` | `fireWake` |
+| a fire waits, `settled = 1` | the source offers it, in the offer's transaction | fired: `slot` the slot that the source read, `fired + 1`, `last_turn`, `settled = 0`; the fire goes, or a newer slot waits on; a reminder stops, `why = 'fired'`, with `due`, `pending` and `missed` cleared, a newer slot dropped with the stop (lead, ec-muncvc, 4a) | `fireWake` |
 | fired, `settled = 0` | the end of `last_turn`: done | `failed = 0`, `settled = 1` | `settleWake` |
 | fired, `settled = 0` | failed, or stopped by the ceiling | `failed + 1`, `settled = 1`; at 2 it stops, `why = 'failed'`, with its note | `settleWake`, in a `Turns.note` |
 | fired, `settled = 0` | stopped by the person | `settled = 1`, the count kept | `settleWake` |
@@ -171,7 +171,7 @@ K3, with ec-ur3a5, M2 to M6; the names and the shapes below are this page's):
 | `dueWakes(now)` | `Reading` | the active rows of a chat with `wakeups = 1` whose `due <= now` |
 | `pendWake(n, { pending, missed, due })` | `Store` | the firer's write when a slot comes: the newest slot, the count of the slots before it that never fired, the next `due`. A row whose fire waits already keeps one fire: `pending` moves to the newest slot, and `missed` becomes the old `missed` + 1 + the new count, at most 1,000 (section 4). Only an active row of a chat with `wakeups = 1` changes, tested in its own statement (lead, ec-ur3a5, M2) |
 | `pendingWake()` | `Reading` | the oldest waiting fire of an active row whose last end is counted: the least `pending`, then the least `n`. A row with `settled = 0` is left out (lead, ec-ur3a5, M3); none when the chat has `wakeups = 0` |
-| `fireWake(n, turn, read: { pending, missed })` | `Store` | the offer's write, of the slot that the source read (M2): `slot = read.pending`, `fired + 1`, `last_turn = turn`, `settled = 0`. When the row's `pending` is still `read.pending`: `pending = null`, `missed = 0`. When the firer wrote a newer slot since: `pending` stays, and `missed` loses `read.missed + 1`, not below 0; a count at the bound of 1,000 stays there. A reminder also stops, `why = 'fired'`. Only updates of the row itself, which no check can refuse (lead, ec-e75r, D1) |
+| `fireWake(n, turn, read: { pending, missed })` | `Store` | the offer's write, of the slot that the source read (M2): `slot = read.pending`, `fired + 1`, `last_turn = turn`, `settled = 0`. When the row's `pending` is still `read.pending`: `pending = null`, `missed = 0`. When the firer wrote a newer slot since: `pending` stays, and `missed` loses `read.missed + 1`, not below 0; a count at the bound of 1,000 stays there. A reminder also stops, `why = 'fired'`, with `due`, `pending` and `missed` cleared as `stopWake` clears them; a newer slot of a reminder is dropped with the stop (lead, ec-muncvc, 4a). Only updates of the row itself, which no check can refuse (lead, ec-e75r, D1) |
 | `fires(since)` | `Reading` | the count of `wake` messages since a time: the pages of the kind with `more = 0` and `created >= since` |
 | `settleWake(n, turn, end: "done" \| "failed" \| "kept")` | `Store` | changes only a row with `last_turn = turn` and `settled = 0`, else nothing (lead, ec-ur3a5, M4): `failed = 0`, `failed + 1`, or the count kept; `settled = 1`. In the same statement, a count that reaches 2 stops an active row, `why = 'failed'`, with `due`, `pending` and `missed` cleared as `stopWake` clears them (the check of section 2 asks for it); a row that stopped already keeps its first `stopped` and `why` (lead, ec-ur3a5, M5). It does not read the chat's `wakeups` (lead, ec-hvsq7, M13). It gives what it did: settled or not, stopped or not |
 | `unsettledWakes()` | `Reading` | each row with `settled = 0`, with its `last_turn`, that turn's status and why, and the row's `failed` (M4): the firer's read at each round and at each `end` |
