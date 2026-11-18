@@ -10,8 +10,8 @@ import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, pending, refusals, RESERVED, RESULT, Shortened, shownInput, TYPE_MAX, visible, waits, WAITS_INPUT, ZOOM } from "./functions.ts"
-import { globalOf, head } from "./head.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, pending, refusals, RESERVED, RESERVED_WORDS, RESULT, Shortened, shownInput, TYPE_MAX, visible, waits, WAITS_INPUT, ZOOM } from "./functions.ts"
+import { globalOf, head, spreads } from "./head.ts"
 import { given, MAX } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
@@ -303,13 +303,87 @@ test("a function named as a name that the global object inherits, or that the en
     assert.deepEqual([name, refusals([schemaOf(name + ".m")]).map((one) => one.reason)], [name, [reason]])
   }
   assert.deepEqual(INHERITED.filter((name) => ENGINE_GLOBALS.includes(name)), ["__proto__", "constructor"])
-  // A member after the dot is free.
-  assert.deepEqual(refusals([schemaOf("ns.toString"), schemaOf("ns.valueOf"), schemaOf("ns.hasOwnProperty"), schemaOf("ns.toJSON")]), [])
+  // A member after the dot is free of INHERITED (of CALLED it is not: the case below).
+  assert.deepEqual(refusals([schemaOf("ns.toString"), schemaOf("ns.valueOf"), schemaOf("ns.hasOwnProperty")]), [])
   for (const name of ["toString", "then"]) {
     const exit = await Effect.runPromiseExit(Effect.provide(Effect.gen(function*() { return yield* Functions }), Layer.effect(Functions, Effect.sync(() => make([schemaOf(name)], [{ declaration: schemaOf(name), run: () => Effect.succeed(null) }])))))
     assert.equal(Exit.isFailure(exit) && Cause.hasDies(exit.cause), true)
     assert.equal(String((Cause.squash(Exit.isFailure(exit) ? exit.cause : Cause.empty) as Error).message), `The list of functions is refused: "${name}": ${name === "then" ? called(name) : inherited(name)}`)
   }
+})
+
+// The message of a build of `make` over `declarations`, each with an entry, or "it was built".
+const builds = (declarations: ReadonlyArray<unknown>): string => {
+  try {
+    make(declarations as ReadonlyArray<Declaration>, declarations.map((declaration) => ({ declaration, run: () => Effect.succeed(null) }) as Entry))
+    return "it was built"
+  } catch (error) {
+    return String((error as Error).message)
+  }
+}
+
+test("a member named as a name of CALLED is refused with that list's sentence: ns.then, docs.toJSON, a schema one and a spread one; then.then once, as a namespace; a member of INHERITED or ENGINE_GLOBALS stays free; make dies for one", () => {
+  const called = (name: string) => `"${name}" is a name that the sandbox's engine calls by itself.`
+  assert.deepEqual(refusals([schemaOf("ns.then"), schemaOf("docs.toJSON"), { name: "s.then", description: "A spread one.", signature: "(): Promise<void>" }, schemaOf("then.then")]).map((one) => ({ ...one })), [
+    { name: "ns.then", reason: called("then") },
+    { name: "docs.toJSON", reason: called("toJSON") },
+    { name: "s.then", reason: called("then") },
+    { name: "then.then", reason: called("then") }
+  ])
+  for (const name of CALLED) assert.deepEqual([name, refusals([schemaOf("ns." + name)]).map((one) => one.reason)], [name, [called(name)]])
+  // Only the exact name: a member that holds it, or another case of it, is free.
+  assert.deepEqual(refusals([schemaOf("ns.thenable"), schemaOf("ns.Then"), schemaOf("ns.toJson"), schemaOf("ns.constructor"), schemaOf("ns.JSON")]), [])
+  assert.equal(builds([schemaOf("z.other"), schemaOf("z.then")]), 'The list of functions is refused: "z.then": "then" is a name that the sandbox\'s engine calls by itself.')
+})
+
+test("a reserved word of JavaScript is refused as a global's name and as a namespace, with one sentence: the 46 words of RESERVED_WORDS, each once; a member after the dot is free: ns.delete, ns.class, ns.await pass; make dies for one", () => {
+  const word = (name: string) => `"${name}" is a reserved word of JavaScript.`
+  assert.deepEqual(RESERVED_WORDS, [
+    "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum",
+    "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new", "null", "return",
+    "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield", "implements",
+    "interface", "let", "package", "private", "protected", "public", "static"
+  ])
+  // No word is in another list, so each has this sentence alone.
+  assert.deepEqual(RESERVED_WORDS.filter((name) => [...RESERVED, ...ENGINE_GLOBALS, ...INHERITED, ...CALLED].includes(name)), [])
+  for (const name of RESERVED_WORDS) {
+    assert.deepEqual([name, refusals([schemaOf(name)]).map((one) => one.reason)], [name, [word(name)]])
+    assert.deepEqual([name, refusals([schemaOf(name + ".m")]).map((one) => one.reason)], [name, [word(name)]])
+    assert.deepEqual([name, refusals([{ name, description: "A spread one.", signature: "(): Promise<void>" }]).map((one) => one.reason)], [name, [word(name)]])
+  }
+  // A member after the dot is free; a word that is no reserved one is free as a global.
+  assert.deepEqual(refusals([schemaOf("ns.delete"), schemaOf("ns.class"), schemaOf("ns.await"), schemaOf("ns.default"), schemaOf("async"), schemaOf("of"), schemaOf("get"), schemaOf("Delete")]), [])
+  assert.equal(builds([schemaOf("delete")]), 'The list of functions is refused: "delete": ' + word("delete"))
+})
+
+test("refusals throws for no list: a name that is a number, null or an object, an entry that is a number, null or a text, and a hole of the list are each refused, with the empty text as the name and \"The name is no text.\"; the entries beside them are checked as before; make dies with those refusals", () => {
+  const none = { name: "", reason: "The name is no text." }
+  const odd: ReadonlyArray<unknown> = [
+    { name: 5, description: "A number.", inputSchema: { type: "object" } },
+    { name: null, description: "Null.", inputSchema: { type: "object" } },
+    { name: { a: 1 }, description: "An object.", inputSchema: { type: "object" } },
+    { description: "No name.", inputSchema: { type: "object" } },
+    7,
+    null,
+    "zoom"
+  ]
+  // A list with a hole, between two good entries and before a refused one.
+  const holed: ReadonlyArray<unknown> = [ZOOM, , DATE, schemaOf("store")]
+  assert.equal(holed.length, 4)
+  assert.equal(1 in holed, false)
+  assert.deepEqual(refusals(odd as ReadonlyArray<Declaration>).map((one) => ({ ...one })), odd.map(() => none))
+  assert.deepEqual(refusals(holed as ReadonlyArray<Declaration>).map((one) => ({ ...one })), [none, { name: "store", reason: '"store" is a global of the sandbox.' }])
+  // The good entries beside them are checked as before: a name after a refused entry is still a duplicate.
+  assert.deepEqual(refusals([ZOOM, null, ZOOM] as unknown as ReadonlyArray<Declaration>).map((one) => ({ ...one })), [none, { name: "zoom", reason: "Another function before it has this name." }])
+  assert.deepEqual(refusals([...HOSTED, SEARCH]), [])
+  // make dies with them, a name that is no text and an entry that is none alike.
+  assert.equal(builds([ZOOM, { name: 5, description: "A number.", inputSchema: { type: "object" } }]), 'The list of functions is refused: "": The name is no text.')
+  assert.equal(builds([ZOOM, null, schemaOf("store")]), 'The list of functions is refused: "": The name is no text. "store": "store" is a global of the sandbox.')
+})
+
+test("one rule of spread: spreads is true for a declaration with a signature and false for one with schemas, and globalOf's spread is spreads for each", () => {
+  assert.deepEqual([spreads(ZOOM), spreads(SEARCH), spreads(schemaOf("lookup"))], [true, false, false])
+  for (const one of [...HOSTED, SEARCH, schemaOf("lookup")]) assert.deepEqual([one.name, globalOf(one).spread], [one.name, spreads(one)])
 })
 
 test("make dies at the layer's build with every refusal in its message, and builds a good list", async () => {

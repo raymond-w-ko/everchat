@@ -43,17 +43,21 @@
 //
 // The check of a list (`refusals`), where the list is built: `make` dies
 // for a list with a fault, a defect of the code; the client of functions
-// from outside runs it first, and leaves a refused function out. Its rules:
+// from outside runs it first, and leaves a refused function out. It throws
+// for no list: a list from outside may hold anything. Its rules:
 //
+// - an entry is an object whose name is a text;
 // - a declaration has a `signature` or an `inputSchema`: not both, not
 //   neither, and no `outputSchema` beside a signature;
 // - a name is an identifier, or `ns.member`: one dot, each part an
-//   identifier; its first part is no reserved global of the sandbox
-//   (`RESERVED`), no global of its engine (`ENGINE_GLOBALS`), no name that
-//   its global object inherits (`INHERITED`) and no name that its engine
-//   calls by itself (`CALLED`); a namespace is no other function's name; no
-//   two names are equal after `toCodemodeIdentifier` (two entries of one
-//   name too);
+//   identifier; its first part is no reserved word of JavaScript
+//   (`RESERVED_WORDS`), no reserved global of the sandbox (`RESERVED`), no
+//   global of its engine (`ENGINE_GLOBALS`), no name that its global object
+//   inherits (`INHERITED`) and no name that its engine calls by itself
+//   (`CALLED`); its member, after the dot, is no name of `CALLED` either,
+//   and is free of the other lists; a namespace is no other function's
+//   name; no two names are equal after `toCodemodeIdentifier` (two entries
+//   of one name too);
 // - the rendered input type and the rendered output type of a declaration
 //   with schemas are each at most `TYPE_MAX` characters.
 //
@@ -141,10 +145,28 @@ export const INHERITED: ReadonlyArray<string> = [
 ]
 
 // The names that the engine calls by itself on a value that has them, which
-// no function's name or namespace may be: `then` (a value with it is taken
-// as a promise: `return globalThis` never settles) and `toJSON`
-// (`JSON.stringify` calls it).
+// no function's name, namespace or member may be: `then` (a value with it
+// is taken as a promise: `return globalThis` never settles, and `await ns`,
+// `return ns` or `Promise.race([ns])` calls a member `ns.then`) and `toJSON`
+// (`JSON.stringify` calls it). A member of the list would be a call that the
+// program never wrote, and one that needs approval would ask a person for
+// it (ec-lsny0).
 export const CALLED: ReadonlyArray<string> = ["then", "toJSON"]
+
+// The reserved words of JavaScript, which no function's name or namespace
+// may be: the head would declare `declare const delete: …`, and no program
+// can name it. The reserved words of the standard (ECMA-262, "Keywords and
+// Reserved Words") and those of strict mode, with `await` and `yield`: a
+// program is the body of an async function. Each is no name of a binding in
+// such a body on either engine (sandbox.test.ts and inline.test.ts). A
+// member after the dot is free (`ns.delete` is a property), but for
+// `CALLED`.
+export const RESERVED_WORDS: ReadonlyArray<string> = [
+  "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum",
+  "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new", "null", "return",
+  "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield", "implements",
+  "interface", "let", "package", "private", "protected", "public", "static"
+]
 
 // The most characters of a rendered input type, and of a rendered output
 // type, of a declaration with schemas: the renderer's own bound of a
@@ -169,18 +191,32 @@ const rendered = (schema: JsonSchema): string | undefined => {
   }
 }
 
+// An entry of a list with a name: an object whose `name` is a text.
+const named = (one: unknown): one is Declaration =>
+  typeof one === "object" && one !== null && typeof (one as { readonly name?: unknown }).name === "string"
+
 // The faults of a list of declarations, in the list's order: none for a good
-// list. It throws nothing.
+// list. It throws for no list: an entry that is no object, or whose name is
+// no text (a hole of the list too), is refused with the empty text as its
+// name, and no other rule is checked for it.
 export const refusals = (declarations: ReadonlyArray<Declaration>): ReadonlyArray<Refusal> => {
   const found: Array<Refusal> = []
   const refuse = (name: string, reason: string) => found.push({ name, reason })
-  const names = new Set(declarations.map((one) => one.name))
+  // `Array.from` reads a hole as undefined, which `map` would skip.
+  const entries: ReadonlyArray<unknown> = Array.from(declarations)
+  const names = new Set(entries.filter(named).map((one) => one.name))
   const identifiers = new Map<string, string>()
-  for (const one of declarations) {
+  for (const one of entries) {
+    if (!named(one)) {
+      refuse("", "The name is no text.")
+      continue
+    }
     const name = one.name
     const parts = name.split(".")
     if (parts.length > 2 || !parts.every((part) => IDENTIFIER.test(part))) {
       refuse(name, "A name is an identifier, or a namespace and a member with one dot between them.")
+    } else if (RESERVED_WORDS.includes(parts[0] as string)) {
+      refuse(name, `"${parts[0]}" is a reserved word of JavaScript.`)
     } else if (RESERVED.includes(parts[0] as string)) {
       refuse(name, `"${parts[0]}" is a global of the sandbox.`)
     } else if (ENGINE_GLOBALS.includes(parts[0] as string)) {
@@ -189,6 +225,8 @@ export const refusals = (declarations: ReadonlyArray<Declaration>): ReadonlyArra
       refuse(name, `"${parts[0]}" is a name that the sandbox's global object inherits.`)
     } else if (CALLED.includes(parts[0] as string)) {
       refuse(name, `"${parts[0]}" is a name that the sandbox's engine calls by itself.`)
+    } else if (parts.length === 2 && CALLED.includes(parts[1] as string)) {
+      refuse(name, `"${parts[1]}" is a name that the sandbox's engine calls by itself.`)
     } else if (parts.length === 2 && names.has(parts[0] as string)) {
       refuse(name, `Its namespace "${parts[0]}" is the name of another function.`)
     }
@@ -385,15 +423,16 @@ export const mismatches = (declarations: ReadonlyArray<Declaration>, entries: Re
 // The entries' declarations must be that list, in its order: another one is
 // a defect of the code, as is a list that `refusals` refuses. Then `make`
 // throws, so the layer that calls it dies at its build, with the names in
-// its message.
+// its message. The refusals come first: `mismatches` reads each
+// declaration's name, which a refused entry may not have.
 export const make = (declarations: ReadonlyArray<Declaration>, entries: ReadonlyArray<Entry>) => {
-  const differ = mismatches(declarations, entries)
-  if (differ.length > 0) {
-    throw new Error("The functions are not the list of the head: " + differ.join(" "))
-  }
   const refused = refusals(declarations)
   if (refused.length > 0) {
     throw new Error("The list of functions is refused: " + refused.map((one) => `"${one.name}": ${one.reason}`).join(" "))
+  }
+  const differ = mismatches(declarations, entries)
+  if (differ.length > 0) {
+    throw new Error("The functions are not the list of the head: " + differ.join(" "))
   }
   const names: ReadonlyArray<string> = declarations.map((one) => one.name)
   const byName = new Map(entries.map((one) => [one.declaration.name, one.run]))

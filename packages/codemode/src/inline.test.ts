@@ -8,7 +8,7 @@ import { expect, test } from "bun:test"
 import { loadQuickJSWasm } from "./pi/index.ts"
 import { Effect, Exit, Fiber, Layer } from "effect"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
-import { type Caller, type Declaration, ENGINE_GLOBALS, type Entry, FunctionError, Functions, INHERITED, make, pending, RESERVED, Shortened } from "@everchat/core/functions"
+import { type Caller, type Declaration, ENGINE_GLOBALS, type Entry, FunctionError, Functions, INHERITED, make, pending, RESERVED, RESERVED_WORDS, Shortened } from "@everchat/core/functions"
 import { given } from "@everchat/core/limit"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { storeLayer } from "@everchat/sqlite/bun"
@@ -233,7 +233,7 @@ test("inline: a function with an input schema gets the program's one object as [
 test("inline: a function with an input schema called with no argument (or undefined) is a FunctionError that names it in the program, and a failed row; the function is not run", async () => {
   const file = newFile()
   const fake = schemaFakes()
-  const none = "ns.member takes one argument, an object: it was called with none."
+  const none = "ns.member takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol)."
   await withSandbox(file, fake, (run) =>
     Effect.gen(function*() {
       expect(yield* run("try { await ns.member() } catch (error) { return 'caught: ' + error.message }")).toEqual({ output: "caught: " + none, failed: false })
@@ -274,6 +274,90 @@ test("inline: the core's list covers the engine: each own name of the global obj
   expect(names).toContain("ns")
   expect(names.length).toBeGreaterThan(60)
   expect(names.filter((name) => !ENGINE_GLOBALS.includes(name) && !RESERVED.includes(name) && name !== "ns")).toEqual([])
+})
+
+// A member named as a name of CALLED (functions.ts), with no `make`: the
+// layer of a list that the core's check no longer builds.
+const thenFakes = () => {
+  const seen: Array<{ name: string; args: ReadonlyArray<unknown> }> = []
+  const declarations: ReadonlyArray<Declaration> = [
+    { name: "z.then", description: "A schema member then.", inputSchema: { type: "object" } },
+    { name: "z.other", description: "Another member.", inputSchema: { type: "object" } },
+    { name: "s.then", description: "A spread member then.", signature: "(...args: unknown[]): Promise<unknown>" }
+  ]
+  const layer = Layer.succeed(
+    Functions,
+    Functions.of({
+      declarations,
+      names: declarations.map((one) => one.name),
+      approval: new Set(),
+      call: (name, args) => {
+        seen.push({ name, args })
+        return Effect.succeed([name, ...args])
+      }
+    })
+  )
+  return { seen, layer, declarations }
+}
+
+test("inline: a member named then is called by an await of its namespace, a call that the program never wrote: a schema one's row is failed, a spread one runs with [null,null]; Promise.race calls it too; the core's list now refuses it at the build", async () => {
+  const file = newFile()
+  const fake = thenFakes()
+  const never = "Error: The script is waiting on a promise that can never settle: no tool call is pending, and timers do not exist here."
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("await z")).toEqual({ output: never, failed: true })
+      expect(yield* run("await s")).toEqual({ output: never, failed: true })
+      expect(yield* run("return await Promise.race([z, Promise.resolve('raced')])")).toEqual({ output: "raced", failed: false })
+    }))
+  expect(fake.seen).toEqual([{ name: "s.then", args: [null, null] }])
+  const none = "z.then takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol)."
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "z.then", input: "[]", output: none, status: "failed" },
+    { parent: 3, fn: "s.then", input: "[null,null]", output: "[\"s.then\",null,null]", status: "done" },
+    { parent: 5, fn: "z.then", input: "[]", output: none, status: "failed" }
+  ])
+  // The core's check refuses both at the build.
+  const called = "\"then\" is a name that the sandbox's engine calls by itself."
+  expect(() => make(fake.declarations, fake.declarations.map((declaration) => ({ declaration, run: () => Effect.succeed(null) })))).toThrow(
+    "The list of functions is refused: \"z.then\": " + called + " \"s.then\": " + called
+  )
+})
+
+test("inline: a program calls a member named as a reserved word (ns.delete, ns.class, ns.await), which make builds; and each word of RESERVED_WORDS is no name of a binding in the body of an async function in strict mode", async () => {
+  const file = newFile()
+  const member = (name: string) => ({ declaration: { name, description: "A member.", inputSchema: { type: "object" } }, run: (args: ReadonlyArray<unknown>) => Effect.succeed([name, ...args]) })
+  const entries = ["ns.delete", "ns.class", "ns.await"].map(member)
+  const layer = Layer.succeed(Functions, make(entries.map((one) => one.declaration), entries))
+  await withSandbox(file, { layer }, (run) =>
+    Effect.gen(function*() {
+      expect((yield* run("return JSON.stringify([await ns.delete({ a: 1 }), await ns.class({ b: 2 }), await ns.await({ c: 3 })])")).output).toBe(
+        JSON.stringify([["ns.delete", { a: 1 }], ["ns.class", { b: 2 }], ["ns.await", { c: 3 }]])
+      )
+      // Each word, as a name: a SyntaxError (none is left in the list that the program gives back).
+      const bound = yield* run(
+        "const AsyncFunction = (async () => {}).constructor\n" +
+          "const left = []\n" +
+          "for (const word of " + JSON.stringify(RESERVED_WORDS) + ") { try { new AsyncFunction('\"use strict\"; var ' + word + ' = 1'); left.push(word) } catch (error) { if (!(error instanceof SyntaxError)) left.push(word + ': ' + error) } }\n" +
+          "try { new AsyncFunction('\"use strict\"; var async = 1'); left.push('async is a name') } catch (error) { left.push('async: ' + error) }\n" +
+          "return JSON.stringify(left)"
+      )
+      expect(bound).toEqual({ output: JSON.stringify(["async is a name"]), failed: false })
+    }))
+  expect(RESERVED_WORDS.length).toBe(46)
+})
+
+test("inline: a function with an input schema called with a function or a symbol gets the sentence that says so: such a value comes as none (the prelude carries JSON); the function is not run", async () => {
+  const file = newFile()
+  const fake = schemaFakes()
+  const none = "ns.member takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol)."
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("try { await ns.member(() => 1) } catch (error) { return 'caught: ' + error.message }")).toEqual({ output: "caught: " + none, failed: false })
+      expect(yield* run("try { await ns.member(Symbol('x')) } catch (error) { return 'caught: ' + error.message }")).toEqual({ output: "caught: " + none, failed: false })
+    }))
+  expect(fake.seen).toEqual([])
+  expect(functionRows(file)).toEqual([1, 3].map((parent) => ({ parent, fn: "ns.member", input: "[]", output: none, status: "failed" })))
 })
 
 test("inline: functions run at the same time", async () => {
@@ -489,7 +573,7 @@ test("inline: two gated calls of one program give two approvals, a schema functi
         failed: false
       })
       expect(yield* run("try { await send() } catch (e) { return 'caught: ' + e.message }")).toEqual({
-        output: "caught: send takes one argument, an object: it was called with none.",
+        output: "caught: send takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol).",
         failed: false
       })
     }))
@@ -497,7 +581,7 @@ test("inline: two gated calls of one program give two approvals, a schema functi
   expect(functionRows(file)).toEqual([
     { parent: 1, fn: "send", input: "[{\"to\":\"bo\"}]", output: JSON.stringify(pending(1)), status: "pending" },
     { parent: 1, fn: "post", input: "[1,[2],{\"c\":null}]", output: JSON.stringify(pending(2)), status: "pending" },
-    { parent: 4, fn: "send", input: "[]", output: "send takes one argument, an object: it was called with none.", status: "failed" }
+    { parent: 4, fn: "send", input: "[]", output: "send takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol).", status: "failed" }
   ])
   expect(approvalRows(file).map((one) => [one.n, one.call, one.fn, one.input, one.status])).toEqual([
     [1, 2, "send", "[{\"to\":\"bo\"}]", "pending"],

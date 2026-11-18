@@ -9,6 +9,7 @@
 import type { CodemodeResult } from "./pi/portable.ts"
 import { Effect, FiberSet } from "effect"
 import { FunctionError, Functions, pending, Shortened } from "@everchat/core/functions"
+import { spreads } from "@everchat/core/head"
 import { type Ran, render, STOPPED } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
 
@@ -24,10 +25,11 @@ const text = (value: unknown): string => (typeof value === "string" ? value : va
 // left, and waits until its row is closed.
 //
 // `globals`: each function's name, and how the program gives it its
-// arguments, from its declaration (the rule of `globalOf`, head.ts). A
-// function with a `signature` is `spread`: the engine gives the list of the
-// arguments. One with an `inputSchema` is not: the engine gives the one
-// argument, an object (whether it fits the schema is not checked here).
+// arguments, from its declaration by the one rule that `globalOf` uses too
+// (head.ts, `spreads`). A function with a `signature` is `spread`: the
+// engine gives the list of the arguments. One with an `inputSchema` is not:
+// the engine gives the one argument, an object (whether it fits the schema
+// is not checked here).
 // The adopted prelude gives only the first argument of such a call
 // (pi/runtime/prelude-source.ts, `caller`, `spread ? args : args[0]`), so a
 // second one is dropped, as JavaScript drops an argument that a function
@@ -37,7 +39,10 @@ const text = (value: unknown): string => (typeof value === "string" ? value : va
 // in the row's `input`: a schema function's is `[object]`. A call whose
 // arguments came in another form (a spread function's that is no list, a
 // schema function's with no argument) is a `FunctionError` that names the
-// function, and its row is `failed` with it, with `input` `[]`.
+// function, and its row is `failed` with it, with `input` `[]`. The prelude
+// carries the arguments as JSON, so a schema function's one argument that
+// JSON cannot carry (a function, a symbol) comes as none: the sentence says
+// both.
 //
 // The gate: a function whose name is in `functions.approval` needs a
 // person's yes before each run, so a program's call of it does not run.
@@ -58,14 +63,14 @@ export const functionCalls = (at: { readonly turn: number; readonly call: number
     const working = new Map<number, string>()
     const broken = (op: string) => new FunctionError({ message: "EverChat's database failed (" + op + ")." })
 
-    const globals = functions.declarations.map((one) => ({ name: one.name, spread: one.signature !== undefined }))
+    const globals = functions.declarations.map((one) => ({ name: one.name, spread: spreads(one) }))
     const spread = new Map(globals.map((one) => [one.name, one.spread]))
 
     // The call's arguments as a list, or the error of a call whose
     // arguments came in another form.
     const listOf = (name: string, given: unknown): ReadonlyArray<unknown> | FunctionError => {
       if (spread.get(name) === false) {
-        return given === undefined ? new FunctionError({ message: name + " takes one argument, an object: it was called with none." }) : [given]
+        return given === undefined ? new FunctionError({ message: name + " takes one argument, an object: it was called with none, or with a value that JSON cannot carry (a function, a symbol)." }) : [given]
       }
       return Array.isArray(given) ? given : new FunctionError({ message: "The arguments of " + name + " came in no list." })
     }

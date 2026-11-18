@@ -61,18 +61,27 @@ export interface Declaration {
   readonly outputSchema?: JsonSchema
 }
 
+// Whether a program gives the function the list of its arguments
+// (`spread`): with a signature it does, with schemas it gives the one
+// object. The one rule of `spread`: `globalOf` and the engines
+// (packages/codemode/src/calls.ts, `globals`) both take it from here.
+export const spreads = (declaration: Declaration): boolean => declaration.signature !== undefined
+
 // A declaration as the sandbox's global: with a signature its arguments come
 // as a list (`spread`), with schemas as the one object.
-export const globalOf = (declaration: Declaration): Omit<CodemodeTool, "execute"> =>
-  declaration.signature !== undefined
-    ? { name: declaration.name, description: declaration.description, signature: declaration.signature, spread: true }
+export const globalOf = (declaration: Declaration): Omit<CodemodeTool, "execute"> => {
+  const spread = spreads(declaration)
+  const { name, description, signature, inputSchema, outputSchema } = declaration
+  return spread
+    ? { name, description, ...(signature === undefined ? {} : { signature }), spread }
     : {
-      name: declaration.name,
-      description: declaration.description,
-      ...(declaration.inputSchema === undefined ? {} : { inputSchema: declaration.inputSchema }),
-      ...(declaration.outputSchema === undefined ? {} : { outputSchema: declaration.outputSchema }),
-      spread: false
+      name,
+      description,
+      ...(inputSchema === undefined ? {} : { inputSchema }),
+      ...(outputSchema === undefined ? {} : { outputSchema }),
+      spread
     }
+}
 
 const describe = (declarations: ReadonlyArray<Declaration>) =>
   `Runs a JavaScript program that you write, and returns its result.
