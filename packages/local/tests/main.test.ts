@@ -347,6 +347,146 @@ test("a read of the terminal's input that fails with EIO, with no signal, is the
   expect(pty.raw).not.toContain("everchat:")
 })
 
+// An error of the terminal's input after a stop that a signal asked. A file
+// that the program loads first (`--preload`) arms when the person types
+// MARK; the test waits for MARK on the screen and then sends the real
+// signal. The give-back of the screen (`setRawMode(false)`, in the close of
+// the parts) then emits each of `errors` on the input's stream, in order,
+// one time. `HEARD`: the file where it notes each SIGTERM that the process
+// hears; `SIGNAL`, when set: the give-back sends that real signal to its own
+// process before it emits, so that it comes while the parts close.
+const GIVING_BACK = (errors: ReadonlyArray<string>) => `import * as fs from "node:fs"
+let armed = false
+process.stdin.on("data", (data) => { if (String(data).includes(${JSON.stringify(MARK)})) armed = true })
+process.on("SIGTERM", () => fs.appendFileSync(process.env.HEARD!, "SIGTERM\\n"))
+const setRawMode = process.stdin.setRawMode
+process.stdin.setRawMode = function(mode) {
+  const done = setRawMode.call(this, mode)
+  if (armed && !mode) {
+    armed = false
+    if (process.env.SIGNAL) process.kill(process.pid, process.env.SIGNAL)
+    for (const message of ${JSON.stringify(errors)}) process.stdin.emit("error", new Error(message))
+  }
+  return done
+}`
+
+// The close of the parts, held: the same file, with this added, wraps the
+// terminal's layer in one more finalizer. It runs first in the close, before
+// the screen is given back: it writes the file `GATE`, and it waits until the
+// file `RELEASE` is there. Both the program and this file take Effect and
+// terminal.ts by the same path, so they share one instance of each.
+const GATED = `import { Effect, Layer } from ${JSON.stringify(Bun.resolveSync("effect", path.join(import.meta.dir, "..", "src")))}
+import { Terminal } from ${JSON.stringify(path.join(import.meta.dir, "..", "src", "terminal.ts"))}
+const terminalLayer = Terminal.layer
+Object.defineProperty(Terminal, "layer", {
+  value: (options) => Layer.tap(terminalLayer(options), () => Effect.addFinalizer(() => Effect.promise(async () => {
+    fs.writeFileSync(process.env.GATE!, "waiting")
+    while (!fs.existsSync(process.env.RELEASE!)) await Bun.sleep(5)
+  })))
+})`
+
+// Waits until `file` is there.
+const appears = async (file: string) => {
+  for (let k = 0; k < 1500 && !fs.existsSync(file); k++) {
+    await Bun.sleep(10)
+  }
+  expect(fs.existsSync(file), "the file " + file + " never came").toBe(true)
+}
+
+// `gate` (with `first`): the close of the parts is held (GATED); the test
+// waits until it waits, sends the real SIGTERM, waits until the program has
+// heard it while the close still waits, and then lets the close go on.
+const giveBackFails = async (errors: ReadonlyArray<string>, given: { readonly signal?: "SIGTERM"; readonly first?: string; readonly gate?: boolean } = {}) => {
+  const at = place()
+  const server = fake(() => text("Hello."))
+  const preload = path.join(at.root, "giving-back.ts")
+  // `first`: an error of the read that the program gets when MARK is typed, before any signal.
+  fs.writeFileSync(preload, GIVING_BACK(errors) + (given.first === undefined ? "" : "\n" + failing(given.first)) + (given.gate === true ? "\n" + GATED : ""))
+  const heard = path.join(at.root, "heard")
+  const gate = path.join(at.root, "gate")
+  const release = path.join(at.root, "release")
+  const pty = new Pty(
+    [process.execPath, "--preload", preload, path.join(import.meta.dir, "..", "src", "main.ts"), "--model", "gpt-test"],
+    { ...env(at, server.address), HEARD: heard, GATE: gate, RELEASE: release, ...(given.signal === undefined ? {} : { SIGNAL: given.signal }) },
+    at.work
+  )
+  open.push(async () => {
+    fs.writeFileSync(release, "go")
+    if (pty.code === null) {
+      pty.kill("SIGKILL")
+      await pty.ends()
+    }
+  })
+  await pty.sees(IDLE)
+  pty.type(MARK)
+  if (given.first === undefined) {
+    await pty.sees(MARK)
+    pty.kill("SIGTERM")
+  }
+  if (given.gate === true) {
+    await appears(gate)
+    pty.kill("SIGTERM")
+    await appears(heard)
+    // Heard while the close waits: the process has not ended.
+    expect([fs.readFileSync(heard, "utf8"), pty.code]).toEqual(["SIGTERM\n", null])
+    fs.writeFileSync(release, "go")
+  }
+  await pty.ends()
+  const got = launches(at.file).map((one) => [one.ended !== null, one.why])
+  const heardOf = fs.existsSync(heard) ? fs.readFileSync(heard, "utf8") : ""
+  return { pty, launches: got, heard: heardOf, seen: JSON.stringify({ code: pty.code, launches: got, heard: heardOf, raw: pty.raw.slice(-1500) }) }
+}
+
+// How often `line` is in `raw`.
+const count = (raw: string, line: string) => raw.split(line).length - 1
+
+test("SIGTERM, and then an error of the input that is no loss (the give-back's errno 9): the program ends as the signal asked, with 130, and tells the first such error in one line after the screen is given back", async () => {
+  const { pty, launches: got, heard, seen } = await giveBackFails(["setRawMode failed with errno: 9", "setRawMode failed with errno: 25"])
+  expect(heard, seen).toBe("SIGTERM\n")
+  expect(pty.code, seen).toBe(130)
+  // The parts closed in full: the launch ended, by the signal.
+  expect(got, seen).toEqual([[true, "signal"]])
+  const line = "everchat: the read of the terminal failed: setRawMode failed with errno: 9"
+  expect(count(pty.raw, line), seen).toBe(1)
+  // One line for one stop: a later error is not told.
+  expect(pty.raw, seen).not.toContain("errno: 25")
+  expect(count(pty.raw, "everchat:"), seen).toBe(1)
+  // Never into the screen: after the sequences that give it back.
+  for (const sequence of RESTORED) expect(pty.raw.lastIndexOf(sequence), seen).toBeLessThan(pty.raw.indexOf(line))
+})
+
+test("SIGTERM, and then the give-back's errno 5 (the terminal is lost): 130, the launch ended by the signal, and no line", async () => {
+  const { pty, launches: got, heard, seen } = await giveBackFails(["setRawMode failed with errno: 5"])
+  expect(heard, seen).toBe("SIGTERM\n")
+  expect(pty.code, seen).toBe(130)
+  expect(got, seen).toEqual([[true, "signal"]])
+  expect(pty.raw, seen).not.toContain("everchat:")
+  for (const sequence of RESTORED) expect(pty.raw, seen).toContain(sequence)
+})
+
+// The signal here is sent inside the give-back, which is synchronous: the
+// close then runs to the exit with no turn of the event loop, so its handler
+// is never heard, and the code stays 1. It does not reach a signal that is
+// heard while the close waits: the case after it holds that one.
+test("an error of the input that is no loss (EBADF), with no stop asked, and then SIGTERM while the parts close: the code 1, the launch ended with an error, its line once", async () => {
+  const { pty, launches: got, seen } = await giveBackFails([], { signal: "SIGTERM", first: "EBADF" })
+  expect(pty.code, seen).toBe(1)
+  expect(got, seen).toEqual([[true, "error"]])
+  expect(count(pty.raw, "everchat: the read of the terminal failed: EBADF: read failed"), seen).toBe(1)
+  expect(count(pty.raw, "everchat:"), seen).toBe(1)
+  for (const sequence of RESTORED) expect(pty.raw.lastIndexOf(sequence), seen).toBeLessThan(pty.raw.indexOf("everchat:"))
+})
+
+test("an error of the input that is no loss (EBADF) starts the close, and SIGTERM is heard while the close waits: the code 130, the launch ended with an error, its line once after the screen is given back", async () => {
+  const { pty, launches: got, seen } = await giveBackFails([], { first: "EBADF", gate: true })
+  expect(pty.code, seen).toBe(130)
+  expect(got, seen).toEqual([[true, "error"]])
+  const line = "everchat: the read of the terminal failed: EBADF: read failed"
+  expect(count(pty.raw, line), seen).toBe(1)
+  expect(count(pty.raw, "everchat:"), seen).toBe(1)
+  for (const sequence of RESTORED) expect(pty.raw.lastIndexOf(sequence), seen).toBeLessThan(pty.raw.indexOf(line))
+})
+
 test("the loss of the terminal is the error of a terminal that is gone: EIO, or the give-back's errno 5, and no other", () => {
   expect(terminalLost(Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }))).toBe(true)
   expect(terminalLost(new Error("setRawMode failed with errno: 5"))).toBe(true)

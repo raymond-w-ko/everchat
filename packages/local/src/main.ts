@@ -72,7 +72,14 @@
 // - Only the error of a terminal that is gone is its loss (`terminalLost`).
 //   Any other error of the terminal's input is a failure of the program
 //   (`InputFailed`): the parts close, the launch ends with an error, the
-//   reason is on the standard error, and the code is 1.
+//   reason is on the standard error, and the code is 1. Such an error
+//   after a stop was asked (a signal, or the loss) does not change the
+//   end: the parts close in full, the launch ends by a signal, the code is
+//   130, and it never counts as a signal. A signal heard while the parts
+//   close after such an error is the first signal: the close goes on, the
+//   launch ends with the error, and the code is 130. In every order the
+//   first such error is told on the standard error, in one line, after the
+//   screen is given back, and no later one.
 //
 // Effect's own runner for Bun (`BunRuntime.runMain`) is not used, for
 // those rules: it does not hear SIGHUP, it has no second signal, and after
@@ -398,6 +405,14 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
     // first one ends it as a failure of its own effect does, so the parts
     // close and the launch ends with an error; one that comes while the
     // parts close after a quit fails the program when they have closed.
+    // One that comes after a stop was asked (a signal, or the loss) does not
+    // change the end: the stop interrupts the race, so the check after it
+    // never runs, and the program ends as the stop asked.
+    // The first such error is told here, in every order, and only here:
+    // when the parts have closed (the screen is given back by then), however
+    // the race and the close ended. A signal heard while the parts close
+    // after the error replaces the error in the end's cause, so `main`
+    // could not tell it; `main` tells no `InputFailed` (`told`).
     const failed = yield* Deferred.make<never, InputFailed>()
     yield* Effect.sync(() =>
       process.stdin.on("error", (error: unknown) => {
@@ -406,7 +421,13 @@ const launch = Effect.fnUntraced(function*(given: { readonly model: Option.Optio
       })
     )
     yield* Effect.raceFirst(Terminal.use((terminal) => terminal.quit), Deferred.await(failed)).pipe(
-      Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts)))
+      Effect.provide(Terminal.layer({ cwd }).pipe(Layer.provideMerge(parts))),
+      // The check after it reads `failed` in the same run of the fiber, so
+      // what this tells is what the launch fails with: no error is told
+      // twice, and none is left.
+      Effect.onExit(() =>
+        Effect.flatMap(Deferred.isDone(failed), (done) => done ? Effect.flatMap(Effect.flip(Deferred.await(failed)), (error) => Console.error("everchat: " + error.message)) : Effect.void)
+      )
     )
     if (yield* Deferred.isDone(failed)) return yield* Deferred.await(failed)
     return
@@ -539,10 +560,11 @@ const teardown: Runtime.Teardown = (exit, onExit) =>
     ? onExit(2)
     : Runtime.defaultTeardown(exit, onExit)
 
-// What `effect/cli` or pipe mode has told the person already.
+// What `effect/cli`, pipe mode or the terminal's launch has told the person
+// already: the launch tells an `InputFailed` itself, in every order.
 const told = (cause: Cause.Cause<unknown>): boolean => {
   const error = Cause.squash(cause)
-  return Cause.hasInterruptsOnly(cause) || CliError.isCliError(error) || error instanceof TurnFailed
+  return Cause.hasInterruptsOnly(cause) || CliError.isCliError(error) || error instanceof TurnFailed || error instanceof InputFailed
 }
 
 const main = () => {
