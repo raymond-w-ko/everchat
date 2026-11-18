@@ -217,6 +217,13 @@ A function may need a person's yes before each run. The whole path:
   exactly when its note is in the log, and a note that fails (a
   diagnostic) is given by the next load. The input is shown as `waits`
   shows it.
+- Each note of an approval (`waits`, a no's, an expiry's, the first line
+  of a run's end) shows the arguments through `visible` (`functions.ts`,
+  by `shownInput`, after its cut): each code point of the General_Category
+  `Cc`, `Cf`, `Cs`, `Co`, `Cn`, `Zl` or `Zp`, or with the property
+  `Default_Ignorable_Code_Point`, is an escape, `\xNN` below U+0100 and
+  else `\u{<hex>}` (small letters, no leading zero, as `\u{202e}`); the
+  call's row keeps its `input` exact.
 - The 7 days (`WAIT`) are checked at a load and at each answer: nothing
   waits in memory, so an unload, a crash or an upgrade loses no approval.
   An answer after them is `expired`, and is told as an expiry.

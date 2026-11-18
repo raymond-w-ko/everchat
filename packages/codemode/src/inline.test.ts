@@ -6,7 +6,7 @@
 
 import { expect, test } from "bun:test"
 import { loadQuickJSWasm } from "./pi/index.ts"
-import { Effect, Exit, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
 import { type Caller, type Declaration, ENGINE_GLOBALS, type Entry, FunctionError, Functions, INHERITED, make, pending, RESERVED, RESERVED_WORDS, Shortened } from "@everchat/core/functions"
 import { given } from "@everchat/core/limit"
@@ -601,4 +601,98 @@ test("inline: a pendCall that fails gives the program the database's error, and 
     }), true)
   expect(fake.ran).toEqual([])
   expect(approvalRows(file)).toEqual([])
+})
+
+// The sweep's case (ec-jdqf6, 2; the review ec-azcoj, note 2): a stop that
+// comes while a gated call's `pendCall` writes. That step is one that
+// nothing interrupts, so the stop waits for it: the call's row is pending
+// and whole, its approval is made, and the function does not run. The
+// store's `pendCall` waits for `open`; `reached` is done, with the call's
+// fiber, when the call is there.
+const heldPend = (file: string) => {
+  const open = Deferred.makeUnsafe<void>()
+  const reached = Deferred.makeUnsafe<Fiber.Fiber<unknown, unknown>>()
+  const layer = Layer.effect(Store, Effect.gen(function*() {
+    const one = yield* Store
+    return Store.of({
+      ...one,
+      pendCall: (id, textOf) => Effect.withFiber((fiber) => Effect.andThen(Deferred.succeed(reached, fiber), Effect.andThen(Deferred.await(open), one.pendCall(id, textOf))))
+    })
+  })).pipe(Layer.provide(storeLayer(file, options())))
+  return { open, reached, layer }
+}
+
+// The stop has reached a fiber: Effect's fiber notes an interruption that
+// it cannot take yet (or it has ended by it).
+const stopNoted = (fiber: Fiber.Fiber<unknown, unknown>) => (fiber as unknown as { readonly _interruptedCause: unknown })._interruptedCause !== undefined
+
+test("inline: a stop while a gated call's pendCall writes waits for that write: the call's row is pending with its text, its approval is made, and the function does not run", async () => {
+  const file = newFile()
+  const fake = gated()
+  const held = heldPend(file)
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      const program = yield* Effect.forkChild(run("await send({ to: 'dee' }); return 'never'"))
+      const call = yield* Deferred.await(held.reached)
+      const stopping = yield* Effect.forkChild(Fiber.interrupt(program))
+      // The mark: the stop has reached the call's fiber.
+      for (let k = 0; k < 2_000 && !stopNoted(call); k++) yield* Effect.sleep("1 millis")
+      expect(stopNoted(call)).toBe(true)
+      yield* Deferred.succeed(held.open, undefined)
+      yield* Fiber.join(stopping)
+    }), {}, held.layer)
+  expect(fake.ran).toEqual([])
+  expect(functionRows(file)).toEqual([{ parent: 1, fn: "send", input: "[{\"to\":\"dee\"}]", output: JSON.stringify(pending(1)), status: "pending" }])
+  expect(rows(file, "select n, status, ended is not null as ended from everchat_call where n = 2")).toEqual([{ n: 2, status: "pending", ended: 1 }])
+  expect(approvalRows(file).map((one) => [one.n, one.call, one.fn, one.input, one.status])).toEqual([[1, 2, "send", "[{\"to\":\"dee\"}]", "pending"]])
+})
+
+// The sweep's case (ec-jdqf6, 7; the review ec-3koeu, note 2): the engine
+// calls a member named toJSON by itself, at a `JSON.stringify` of its
+// namespace, a call that the program never wrote; the core's list refuses
+// it at the build, with its sentence.
+const toJsonFakes = () => {
+  const seen: Array<{ name: string; args: ReadonlyArray<unknown> }> = []
+  const declarations: ReadonlyArray<Declaration> = [
+    { name: "docs.toJSON", description: "A schema member toJSON.", inputSchema: { type: "object" } },
+    { name: "docs.other", description: "Another member.", inputSchema: { type: "object" } },
+    { name: "s.toJSON", description: "A spread member toJSON.", signature: "(...args: unknown[]): Promise<unknown>" }
+  ]
+  const layer = Layer.succeed(
+    Functions,
+    Functions.of({
+      declarations,
+      names: declarations.map((one) => one.name),
+      approval: new Set(),
+      call: (name, args) => {
+        seen.push({ name, args })
+        return Effect.succeed([name, ...args])
+      }
+    })
+  )
+  return { seen, layer, declarations }
+}
+
+test("inline: a member named toJSON is called by a JSON.stringify of its namespace, a call that the program never wrote; the core's list refuses it at the build, with its sentence", async () => {
+  const file = newFile()
+  const fake = toJsonFakes()
+  await withSandbox(file, fake, (run) =>
+    Effect.gen(function*() {
+      // The engine calls toJSON with the key "", and writes its promise as {}.
+      expect(yield* run("return JSON.stringify(docs)")).toEqual({ output: "{}", failed: false })
+      expect(yield* run("return JSON.stringify(s)")).toEqual({ output: "{}", failed: false })
+    }))
+  expect(fake.seen).toEqual([{ name: "docs.toJSON", args: [""] }, { name: "s.toJSON", args: [""] }])
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "docs.toJSON", input: "[\"\"]", output: "[\"docs.toJSON\",\"\"]", status: "done" },
+    { parent: 3, fn: "s.toJSON", input: "[\"\"]", output: "[\"s.toJSON\",\"\"]", status: "done" }
+  ])
+  // The core's check refuses both at the build, and not the other member.
+  const called = "\"toJSON\" is a name that the sandbox's engine calls by itself."
+  const entries = (declarations: ReadonlyArray<Declaration>) => declarations.map((declaration) => ({ declaration, run: () => Effect.succeed(null) }))
+  expect(() => make(fake.declarations, entries(fake.declarations))).toThrow(
+    "The list of functions is refused: \"docs.toJSON\": " + called + " \"s.toJSON\": " + called
+  )
+  const other = fake.declarations.filter((one) => one.name === "docs.other")
+  expect(make(other, entries(other)).names).toEqual(["docs.other"])
 })

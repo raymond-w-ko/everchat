@@ -513,6 +513,22 @@ test("a marked server: the _meta key io.everchat/approval with true, \"yes\" or 
   expect(flags(asked)).toEqual([["s.f", true]])
 })
 
+// The sweep's case (ec-jdqf6, 1; the review ec-azcoj, note 1): any value
+// but `false` marks the tool, those that read as false in JavaScript, or
+// as text, too.
+test("a marked server: the mark's values 0, \"\", \"0\" and \"false\" gate the tool as well; only false does not", async () => {
+  const definitions = served([[
+    tool("zero", { _meta: { [MARK]: 0 } }),
+    tool("empty", { _meta: { [MARK]: "" } }),
+    tool("digit", { _meta: { [MARK]: "0" } }),
+    tool("word", { _meta: { [MARK]: "false" } }),
+    tool("f", { _meta: { [MARK]: false } })
+  ]])
+  const marked = await loaded([server("s", definitions, { marked: true })])
+  expect(flags(marked)).toEqual([["s.digit", true], ["s.empty", true], ["s.f", "none"], ["s.word", true], ["s.zero", true]])
+  expect(marked.refused).toEqual([])
+})
+
 // The bounds
 // ----------
 

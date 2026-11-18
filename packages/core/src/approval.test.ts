@@ -7,7 +7,7 @@
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Clock, Deferred, Effect, Exit, Layer, Logger } from "effect"
+import { Clock, Deferred, Effect, Exit, Fiber, Layer, Logger, Option } from "effect"
 import { compactor, fakeWire, newFile, options, reply, rows, write } from "@everchat/local/testing"
 import { storeLayer } from "@everchat/sqlite/bun"
 import { Approvals, CUT_RUN } from "./approval.ts"
@@ -970,5 +970,135 @@ test("waiting leaves out a pending row past its 7 days, by the store's test at t
     assert.deepStrictEqual(approvals(file).map((row) => row.status), ["pending", "pending"])
   }))
   assert.deepStrictEqual(endNotes(file), [])
+  assert.equal(fn.state.runs.length, 0)
+})
+
+// The sweep's cases (ec-jdqf6, 5 and 8)
+// -------------------------------------
+
+test("an answer whose record fails fails with the store's error: no step after it runs (no expiry, no note, no wake), the row stays pending, nothing runs, and no diagnostic is logged", async () => {
+  const file = newFile()
+  const fn = gated()
+  const fault = new StoreError({ op: "answerApproval", cause: new Error("the record is refused") })
+  let expiries = 0
+  const refusing = Layer.effect(
+    Store,
+    Effect.gen(function*() {
+      const store = yield* Store
+      return Store.of({
+        ...store,
+        answerApproval: () => Effect.fail(fault),
+        expireApprovals: () =>
+          Effect.suspend(() => {
+            expiries += 1
+            return store.expireApprovals()
+          })
+      })
+    })
+  )
+  const logs: Array<{ readonly level: string; readonly message: unknown }> = []
+  await launch(file, wireOf("send"), fn, Effect.gen(function*() {
+    yield* pendOne
+    const got = yield* Effect.result((yield* Approvals).answer(1, YES))
+    assert.equal(got._tag, "Failure")
+    if (got._tag === "Failure") assert.equal(got.failure, fault)
+    // The load's expiry only.
+    assert.equal(expiries, 1)
+    assert.deepStrictEqual(approvals(file).map((one) => [one.status, one.msg]), [["pending", null]])
+  }), { store: refusing, logs })
+  assert.equal(fn.state.runs.length, 0)
+  assert.deepStrictEqual(endNotes(file), [])
+  assert.deepStrictEqual(errors(logs), [])
+})
+
+test("a yes wakes the worker before the expiry of the others: with an expiry at the answer that never ends, the recorded yes still runs, and its run is told", async () => {
+  const file = newFile()
+  const wire = wireOf("send")
+  const fn = gated()
+  // The second call of expireApprovals (the first is the load's) never
+  // ends; `reached` is done when it starts.
+  const reached = Deferred.makeUnsafe<void>()
+  let calls = 0
+  const hanging = Layer.effect(
+    Store,
+    Effect.gen(function*() {
+      const store = yield* Store
+      return Store.of({
+        ...store,
+        expireApprovals: () => Effect.suspend(() => ++calls === 2 ? Effect.andThen(Deferred.succeed(reached, undefined), Effect.never) : store.expireApprovals())
+      })
+    })
+  )
+  await launch(file, wire, fn, Effect.gen(function*() {
+    yield* pendOne
+    const answering = yield* Effect.forkChild((yield* Approvals).answer(1, YES))
+    yield* Deferred.await(reached)
+    // The mark is the run's start. The bound only turns a run that never
+    // comes into a failed assertion: the code does not wait on it.
+    const started = yield* Effect.timeoutOption(Deferred.await(fn.state.started), "2 seconds")
+    assert.equal(Option.isSome(started), true, "the recorded yes did not run while the expiry at its answer hangs")
+    yield* Deferred.await(wire.late)
+    yield* (yield* Turns).idle
+    assert.equal(answering.pollUnsafe(), undefined)
+    yield* Fiber.interrupt(answering)
+  }), { store: hanging })
+  assert.deepStrictEqual(fn.state.runs.map((one) => one.caller.call), callsOf(file, [1]))
+  assert.deepStrictEqual(approvals(file).map((one) => one.status), ["done"])
+  assert.ok(messages(file).some((one) => one.kind === "late"))
+})
+
+// A comparison (`everturn help comparison`): `waiting` (approval.ts, its
+// test at Effect's `Clock`) against the store's two tests of the 7 days,
+// `expireApprovals` and `answerApproval`, on seeded pairs of a row's
+// `created` and a time `now`. The relation: approval 1 is listed by
+// `waiting` exactly when `expireApprovals` expires nothing and
+// `answerApproval` records the answer (not `expired`). The store's writes
+// run in a transaction that is rolled back, and the row is set again before
+// each pair. Seeds 0x9a08e and 0x5eed7; 64 pairs each, of which the first
+// 32 take each offset of OFFSETS in turn and the rest a random one; about
+// 1 s. A failure names the seed, the pair and its numbers.
+const OFFSETS = [-WAIT - 1, -WAIT, -1, 0, 1, WAIT - 1, WAIT, WAIT + 1]
+
+test("comparison: waiting agrees with the store's expireApprovals and answerApproval on the 7 days, on seeded created and now times, future created times among them, at WAIT - 1, WAIT and WAIT + 1", async () => {
+  const file = newFile()
+  const fn = gated()
+  await launch(file, wireOf("send"), fn, Effect.gen(function*() {
+    yield* pendOne
+    const service = yield* Approvals
+    const store = yield* Store
+    const base = yield* Clock.currentTimeMillis
+    for (const seed of [0x9a08e, 0x5eed7]) {
+      let state = seed
+      const random = () => {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+        return state
+      }
+      for (let k = 0; k < 64; k++) {
+        // A created time from 2 WAIT before the base to 2 WAIT after it.
+        const created = base - 2 * WAIT + random() % (4 * WAIT)
+        const offset = k < 32 ? OFFSETS[k % OFFSETS.length]! : random() % (4 * WAIT) - 2 * WAIT
+        const now = created + offset
+        const named = `seed 0x${seed.toString(16)} pair ${k}: created ${created}, now ${now} (now - created = ${offset}, WAIT ${WAIT})`
+        write(file, "update everchat_approval set status = 'pending', created = ?, answered = null, who = null, answer = null, updated = ? where n = 1", [created, created])
+        const before = approvals(file)
+        const listed = (yield* at(now)(service.waiting)).some((one) => one.id === 1)
+        assert.deepStrictEqual(approvals(file), before, "waiting wrote, " + named)
+        const expired = yield* Effect.result(store.transaction(Effect.gen(function*() {
+          const rows = yield* at(now)(store.expireApprovals())
+          return yield* Effect.fail({ rolledBack: rows.map((one) => one.id) })
+        })))
+        const answered = yield* Effect.result(store.transaction(Effect.gen(function*() {
+          const got = yield* at(now)(store.answerApproval(1, NO))
+          return yield* Effect.fail({ rolledBack: got._tag })
+        })))
+        assert.deepStrictEqual(
+          { listed, expired: expired._tag === "Failure" ? expired.failure : expired, answered: answered._tag === "Failure" ? answered.failure : answered },
+          { listed, expired: { rolledBack: listed ? [] : [1] }, answered: { rolledBack: listed ? "answered" : "expired" } },
+          named
+        )
+        assert.deepStrictEqual(approvals(file), before, "a write was not rolled back, " + named)
+      }
+    }
+  }))
   assert.equal(fn.state.runs.length, 0)
 })

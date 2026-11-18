@@ -32,7 +32,9 @@ text of `pending(n)` and makes the approval's row, with the row's exact
 (`packages/core/src/functions.ts`) at once and goes on, and its other
 calls run. The step is in the part that nothing interrupts, and the name
 never joins `working`. A failure of `pendCall` gives the program the
-database's `FunctionError`, as one of `startCall` does. The gate is before
+database's `FunctionError`, as one of `startCall` does; the call's row then
+stays `running`, as after a failed `endCall` (the next launch closes as
+`cut` the running calls of a turn that still runs). The gate is before
 `Functions.call`, never inside it: the run after a yes calls it with
 `JSON.parse(input)`.
 

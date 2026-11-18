@@ -1061,3 +1061,55 @@ test("at a turn's end, one line when calls wait: 1 approval waits, 2 approvals w
     expect(text).toContain("  1 approval waits: /approvals\n\n  2 approvals wait: /approvals")
   }), approvals)
 })
+
+// A comparison (`everturn help comparison`; the sweep's case, ec-jdqf6, 6):
+// the terminal's test of an answer's length (terminal.ts, after its trim)
+// against the store's (`answerApproval`): both refuse a text whose
+// well-formed form has more than ANSWER_MAX UTF-16 units. The texts are
+// built of tokens that stress that count: characters of 1, 2 and 3 bytes,
+// pairs of surrogates (an emoji, a variation selector of plane 14), a lone
+// high and a lone low surrogate (two of them side by side make a pair), and
+// characters that draw as nothing; each is cut at a length from ANSWER_MAX
+// - 2 to ANSWER_MAX + 2 units, or at ANSWER_MAX + 2 code points, so that a
+// count of code points on one side fails. Seeds 0x1776 and 0xc0ffee, 20
+// texts each; about 3 s. A failure names the seed, the text's number and
+// its counts.
+const ANSWER_TOKENS = ["a", "é", "日本語", "😀", "\u{e0100}", "\ud800", "\udc00", "\ud83d", "​", "‮", "x́"]
+
+test("comparison: the terminal refuses an answer's text exactly when the store does, on seeded texts at and beside ANSWER_MAX, with pairs and lone surrogates", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 40)
+  const approvals = fakeApprovals()
+  const count = (text: string, part: string) => text.split(part).length - 1
+  const REFUSED = "Nothing was answered."
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    const store = yield* Store
+    for (const seed of [0x1776, 0xc0ffee]) {
+      let state = seed
+      const random = () => {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+        return state
+      }
+      for (let k = 0; k < 20; k++) {
+        let text = ""
+        const byPoints = k % 5 === 4
+        const target = byPoints ? ANSWER_MAX + 2 : ANSWER_MAX - 2 + k % 5
+        while ((byPoints ? [...text].length : text.length) < target) text += ANSWER_TOKENS[random() % ANSWER_TOKENS.length]
+        text = byPoints ? [...text].slice(0, target).join("") : text.slice(0, target)
+        const named = `seed 0x${seed.toString(16)} text ${k}: ${text.length} units, ${text.toWellFormed().length} well-formed, ${[...text].length} code points`
+        const asked = approvals.asked.length
+        const refused = count(yield* Effect.promise(() => screen.text()), REFUSED)
+        send(screen, "/approve 2 " + text)
+        yield* until(screen, "the answer of " + named, (shown) => approvals.asked.length > asked || count(shown, REFUSED) > refused)
+        const terminal = approvals.asked.length > asked ? "asked" : "refused"
+        if (terminal === "asked") expect(approvals.asked[asked]!.answer.text === text ? "the same text" : "another text").toBe("the same text")
+        const stored = yield* Effect.result(store.answerApproval(2, { yes: true, who: WHO, text }))
+        // The store's refusal is a StoreError whose cause says why.
+        const why = stored._tag === "Success" ? "" : String(stored.failure.cause)
+        const kept = stored._tag === "Success" ? "asked" : why.includes("an answer's text has at most") ? "refused" : why
+        expect({ named, terminal }).toEqual({ named, terminal: kept })
+      }
+    }
+  }), approvals)
+})
