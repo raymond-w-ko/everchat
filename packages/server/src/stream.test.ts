@@ -913,6 +913,55 @@ test("a stream that nothing pulls is ended by abandon at the gate's deadline, an
   )
 })
 
+// The sweep's case (ec-eutgw, 3; draft ec-usk8k, 2; the review's probe M22,
+// ec-03djn): `admit` is one uninterruptible step. The test holds the
+// channel's give lock, so `addClient` waits for it after the hold; the gate's
+// deadline passes then, and its interruption of the work is the mark; then
+// the lock is let go.
+test("admit is one step: the gate's deadline passes while addClient waits for the give lock; the answer is 503, and the channel has the test's one holder and no client", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build()
+      const chat = yield* b.real.make(TENANT_A, PICK)
+      const channel = yield* b.host.registry.hold(TENANT_A, chat)
+      // The fiber of the work: the one that takes the request's hold.
+      const registry = b.host.registry as { hold: typeof b.host.registry.hold }
+      const hold = registry.hold
+      let work: Fiber.Fiber<unknown, unknown> | undefined
+      registry.hold = (tenant, uuid) =>
+        Effect.andThen(
+          Effect.withFiber((fiber) =>
+            Effect.sync(() => {
+              work = fiber
+            })
+          ),
+          hold(tenant, uuid)
+        )
+      yield* Semaphore.take(channel.giveLock, 1)
+      const getting = yield* Effect.forkChild(b.get(chat, "?after=0"))
+      yield* until(() => channel.holders === 2)
+      expect(channel.clients.length).toBe(0)
+      yield* TestClock.adjust(b.host.limits.request)
+      // The mark: the gate has asked the work to stop (Effect's fiber notes
+      // an interruption that it cannot take yet).
+      yield* until(() => (work as unknown as { readonly _interruptedCause: unknown } | undefined)?._interruptedCause !== undefined)
+      yield* Semaphore.release(channel.giveLock, 1)
+      const response = yield* Fiber.join(getting)
+      expect(response.status).toBe(503)
+      expect({ holders: channel.holders, clients: channel.clients.length, inFlight: b.gate.inFlight(), timers: b.timers.pending }).toEqual({
+        holders: 1,
+        clients: 0,
+        inFlight: 0,
+        timers: 0
+      })
+      registry.hold = hold
+      yield* b.host.registry.letGo(channel)
+      nothingLeft(b)
+      yield* b.close
+    })
+  )
+})
+
 // The two tenants
 // ---------------
 

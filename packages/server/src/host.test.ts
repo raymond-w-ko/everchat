@@ -1106,6 +1106,35 @@ test("a clock that steps back before the asked pair's start gives a new window f
   )
 })
 
+// The sweep's case (ec-eutgw, 4; draft ec-wgtoi, A6 and A9): after the clock
+// steps back, the sweep goes past a live window to drop one whose start is
+// after now. Y counted at 0 is first in the map; X, full at 59 s, follows.
+// The clock steps back to 10 s, below X's start, and Y is counted (Y is live
+// then); at 60 s, inside X's old window, X counts from 1.
+test("the clock stepped back: the sweep goes past a live window and drops a later one that starts after now, so in its old window that pair counts from 1", async () => {
+  await run(() =>
+    Effect.gen(function*() {
+      const b = yield* build(world())
+      const x = "11111111-1111-4111-8111-111111111111"
+      const y = "22222222-2222-4222-8222-222222222222"
+      yield* TestClock.setTime(0)
+      yield* b.host.count(TENANT_A, y)
+      yield* TestClock.setTime(59_000)
+      for (let k = 0; k < 30; k++) yield* b.host.count(TENANT_A, x)
+      expect(yield* Effect.flip(b.host.count(TENANT_A, x))).toEqual(new TooMany({ seconds: 60 }))
+      yield* TestClock.setTime(10_000)
+      yield* b.host.count(TENANT_A, y)
+      yield* TestClock.setTime(60_000)
+      // X's window from 60 s: 30 pass, then the refusal of a whole window.
+      const counted: Array<string> = []
+      for (let k = 0; k < 30; k++) counted.push((yield* Effect.exit(b.host.count(TENANT_A, x)))._tag)
+      expect(counted).toEqual(Array.from({ length: 30 }, () => "Success"))
+      expect(yield* Effect.flip(b.host.count(TENANT_A, x))).toEqual(new TooMany({ seconds: 60 }))
+      yield* b.close
+    })
+  )
+})
+
 test("two chats of one tenant have two windows: 30 of each pass", async () => {
   await run(() =>
     Effect.gen(function*() {

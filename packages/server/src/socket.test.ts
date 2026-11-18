@@ -504,6 +504,39 @@ test("a frame of `early` + 1 bytes before `ready` closes with 1009, before its f
   )
 })
 
+// The sweep's case (ec-eutgw, 1; draft ec-geivc, 1): a frame's size is its
+// UTF-8 bytes, not its length in UTF-16 units. Each frame below has 1,000
+// characters of 2 bytes ("é"), so its length is at most the bound and its
+// bytes are the bound + 1.
+test("a frame's size is its bytes of UTF-8: a frame of 2-byte characters whose length is at most `early` and whose bytes are `early` + 1 closes with 1009 before `ready`; the same against `body` after `ready`", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const rig = yield* rigOf(file)
+      const { early, body } = rig.host.limits
+      const token = yield* tokenOf(rig)
+      const wide = "é".repeat(1_000)
+      const before = padded({ type: "auth", token: token + wide, after: 0 }, early + 1)
+      expect([before.length <= early, new TextEncoder().encode(before).length]).toEqual([true, early + 1])
+      const opened = yield* open(rig, rig.a1)
+      yield* opened.fake.send(before)
+      yield* closedWith(opened, "too_large")
+      expect(opened.fake.sent).toEqual([])
+      expect(rig.w.lookups).toEqual([])
+      yield* nothingLeft(rig, opened)
+      const after = padded({ type: "say", id: "wide", text: wide }, body + 1)
+      expect([after.length <= body, new TextEncoder().encode(after).length]).toEqual([true, body + 1])
+      const joined = yield* ready(rig)
+      yield* joined.fake.send(after)
+      // The mark: the socket's close, or the `say`'s answer when the frame
+      // passed.
+      yield* until(() => joined.fake.closed !== undefined || joined.types().includes("said") || joined.types().includes("error"))
+      expect(joined.types()).toEqual(["ready"])
+      yield* closedWith(joined, "too_large")
+      yield* nothingLeft(rig, joined)
+    })
+  )
+})
+
 // The token
 // ---------
 
@@ -589,6 +622,42 @@ test("an origin off the list gets 403 before the upgrade; past `waiting` a socke
       expect(rig.gate.waiting()).toBe(0)
       expect(rig.host.registry.size()).toEqual({ channels: 1, clients: 1 })
       // The waiting place is free again: a third socket waits.
+      const third = yield* open(rig, rig.a1)
+      yield* until(() => third.fake.upgrades.count === 1)
+      expect(rig.gate.waiting()).toBe(1)
+      yield* first.fake.hangUp
+      yield* third.fake.hangUp
+      yield* nothingLeft(rig, first)
+      yield* nothingLeft(rig, third)
+    })
+  )
+})
+
+// The sweep's case (ec-eutgw, 2; draft ec-geivc, 2): the waiting place goes
+// back only after the token's check, so a socket whose `auth` is checked
+// still holds it.
+test("while an `auth` is checked (its lookup held), the socket keeps its waiting place: past `waiting` a new socket gets 503 busy before the upgrade; after `ready` the place is back", async () => {
+  await run((file) =>
+    Effect.gen(function*() {
+      const w = world()
+      const rig = yield* rigOf(file, { waiting: 1 }, w)
+      const hold = yield* Deferred.make<void>()
+      w.hold = hold
+      const first = yield* open(rig, rig.a1)
+      yield* until(() => first.fake.upgrades.count === 1)
+      yield* first.fake.sendJson({ type: "auth", token: yield* tokenOf(rig), after: 0 })
+      // The mark: the token's lookup has started, and waits for `hold`.
+      yield* until(() => w.lookups.length === 1)
+      expect(rig.gate.waiting()).toBe(1)
+      const second = yield* open(rig, rig.a1)
+      const busy = yield* Fiber.join(second.fiber)
+      expect(busy.status).toBe(503)
+      expect(second.fake.upgrades.count).toBe(0)
+      expect(first.types()).toEqual([])
+      yield* Deferred.succeed(hold, undefined)
+      w.hold = undefined
+      yield* until(() => first.types().includes("ready"))
+      expect(rig.gate.waiting()).toBe(0)
       const third = yield* open(rig, rig.a1)
       yield* until(() => third.fake.upgrades.count === 1)
       expect(rig.gate.waiting()).toBe(1)
