@@ -21,9 +21,10 @@ test *args:
 # packages openai, sqlite, codemode and local, their tests too, with the Bun
 # types; the server alone, with no Bun and no Node types (its guard), and the
 # server's tests, with the Bun types; the same two for mcp, the client of
-# functions from outside; the tools, but tools/golden.ts, with the Bun types
-# (tools/tsconfig.json). Then the boundaries of the packages, which
-# the types do not see: their imports and their manifests (tools/graph.ts).
+# functions from outside, and for wakeups, the wake-ups by time; the tools,
+# but tools/golden.ts, with the Bun types (tools/tsconfig.json). Then the
+# boundaries of the packages, which the types do not see: their imports and
+# their manifests (tools/graph.ts).
 # Last, that no file of the tree holds a word of the owner's list, which lives
 # outside the repository; with no list on this machine it checks nothing
 # (tools/words.ts).
@@ -38,6 +39,8 @@ check:
     bunx tsc --noEmit -p packages/server/tsconfig.test.json
     bunx tsc --noEmit -p packages/mcp
     bunx tsc --noEmit -p packages/mcp/tsconfig.test.json
+    bunx tsc --noEmit -p packages/wakeups
+    bunx tsc --noEmit -p packages/wakeups/tsconfig.test.json
     bunx tsc --noEmit -p tools
     bun tools/graph.ts
     bun tools/words.ts

@@ -102,6 +102,7 @@ export const BUILTINS: Builtins = {
   "@everchat/sqlite": { src: [], tests: "any" },
   "@everchat/server": { src: [], tests: "any" },
   "@everchat/mcp": { src: [], tests: "any" },
+  "@everchat/wakeups": { src: [], tests: "any" },
   "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
 }
 type Rule = "any" | ReadonlyArray<string>
@@ -124,12 +125,13 @@ export type Budget = {
 } & ({ readonly forbid: ReadonlyArray<string>; readonly only?: ReadonlyArray<string> } | { readonly forbid?: ReadonlyArray<string>; readonly only: ReadonlyArray<string> })
 
 export const BUDGETS: ReadonlyArray<Budget> = [
-  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
+  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
   { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
-  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/"] },
-  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
-  { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/"] }
+  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/"] },
+  { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/"] },
+  { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] }
 ]
 
 export interface Tables {

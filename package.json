@@ -1,7 +1,9 @@
 {
   "name": "everchat",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "devDependencies": {
     "@everchat/codemode": "workspace:*",
     "@everchat/core": "workspace:*",
@@ -10,6 +12,7 @@
     "@everchat/openai": "workspace:*",
     "@everchat/server": "workspace:*",
     "@everchat/sqlite": "workspace:*",
+    "@everchat/wakeups": "workspace:*",
     "@modelcontextprotocol/server": "2.4.0",
     "@types/bun": "1.4.4",
     "effect": "4.1.2",

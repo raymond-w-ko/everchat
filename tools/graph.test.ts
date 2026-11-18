@@ -772,6 +772,10 @@ test("manifest: a file that is not a test imports no test's file, relative or by
 //   built-in module, and must not reach local, openai, sqlite, codemode or
 //   server; its tests may import any. The core must not reach it, nor the
 //   server: the core's row forbids both.
+// - wakeups: `packages/wakeups/AGENTS.md`, "Its imports": its files import
+//   no built-in module, and must not reach local, openai, sqlite, codemode,
+//   server or mcp; its tests may import any. Only local imports it: the
+//   rows of the core, sqlite, codemode, server and mcp forbid it.
 // - openai, sqlite, codemode: the root `AGENTS.md`, "Be modular" (openai
 //   may import the core's requests; sqlite and codemode the core, so none
 //   reaches the others, the server and mcp among them). Their lists of
@@ -786,15 +790,17 @@ test("the real tables are the documents' rows: each package's built-ins, for its
     "@everchat/sqlite": { src: [], tests: "any" },
     "@everchat/server": { src: [], tests: "any" },
     "@everchat/mcp": { src: [], tests: "any" },
+    "@everchat/wakeups": { src: [], tests: "any" },
     "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
   })
   expect(BUDGETS).toEqual([
-    { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
+    { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
     { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/"] },
-    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/"] },
-    { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/"] },
-    { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/"] }
+    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+    { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/"] },
+    { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/"] },
+    { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] }
   ])
 })
 
