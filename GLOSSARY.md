@@ -270,6 +270,14 @@ instead.
 | reminder | noun | A wake-up with one time. It ends when it fires. |
 | routine | noun | A wake-up with a schedule. It fires again and again, one time each hour at most. |
 | fire | verb | Said of a wake-up: to log its `wake` message and start its turn. A wake-up that was missed while EverChat did not run fires one time at the next start. Also the noun. |
+| slot | noun | One time that the schedule of a wake-up gives. A reminder has one slot. A routine has a slot each time that its schedule comes. |
+| missed | adjective | Said of a slot that passed with no fire: EverChat did not run, the wake-ups were off, or a fire of the same wake-up waited already. The next fire gives the count of the missed slots. |
+| firer | noun | The part of the terminal that finds the wake-ups that are due and makes their fires wait. It also counts the end of each wake turn. It sleeps for 60 seconds at most. |
+| wake turn | noun | A turn that a fire started. It has a ceiling. |
+| ceiling | noun | The most steps and tokens that a wake turn may use: 20 steps and 2,000,000 tokens. At its ceiling the turn is stopped. |
+| budget of fires | noun | The most fires of a chat: 6 in any 60 minutes, and 24 in any 24 hours. A fire past the budget waits. It is not the compute budget. |
+| settled | adjective | Said of a wake-up when the end of its last wake turn is counted. A wake-up that is not settled does not fire. Two wake turns in a row that failed or reached the ceiling stop the wake-up. |
+| sources in order | noun | The one source that asks each source of the seam in turn, and gives the first message that one of them has. |
 
 ## Words we do not use
 
