@@ -268,12 +268,23 @@ const clientOf = (b: Built, tenant: string, chat: string): Client => {
 // The waiters on a client's signal (a wait for its end among them).
 const waitersOf = (client: Client) => (client as unknown as { readonly changed: { readonly size: number } }).changed.size
 
-// A message in through the host, and the end of its turn.
+// A message in through the host, the end of its turn, and the listener's
+// give of the turn's last event. The turn's end does not wait for the
+// listener: until it has given that event, a piece of the turn may still
+// come to a client that joins, after the turn's end that the client read
+// from the store (docs/host.md, "The order and the numbers", 4). The
+// listener takes in the hub's order, so each piece of the turn is given by
+// then.
 const said = (b: Built, tenant: string, chat: string, text: string) =>
   Effect.gen(function*() {
     const sent = yield* Effect.orDie(b.host.say(tenant, chat, text, null))
-    const loaded = b.host.registry.find(tenant, chat)?.loaded
-    if (loaded !== undefined) yield* loaded.turns.idle
+    const channel = b.host.registry.find(tenant, chat)
+    const loaded = channel?.loaded
+    if (channel !== undefined && loaded !== undefined) {
+      yield* loaded.turns.idle
+      const last = (yield* stored(b, tenant, chat)).at(-1)?.n ?? null
+      yield* until(() => channel.last === last)
+    }
     return sent
   })
 
@@ -332,8 +343,10 @@ test("the frames, byte for byte: the first ping, the events after `after` from t
         expect(value.n).toBeUndefined()
         expect(piece).toBe(`event: text\ndata: ${JSON.stringify(value)}\n\n`)
       }
-      // The piece comes between the turn's start and its end.
+      // The piece comes between the turn's start and its end, and is that turn's.
       const at = (match: (frame: string) => boolean) => frames.findIndex(match)
+      const started = live.find((event): event is Extract<Event, { type: "start" }> => event.type === "start")!
+      for (const piece of pieces) expect(JSON.parse(piece.slice(piece.indexOf("data: ") + 6)).turn).toBe(started.turn)
       expect(at((frame) => frame.startsWith("event: text"))).toBeGreaterThan(at((frame) => frame.includes("event: start")))
       expect(at((frame) => frame.startsWith("event: text"))).toBeLessThan(at((frame) => frame.includes("event: end")))
       yield* Effect.promise(() => read.cancel())
