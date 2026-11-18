@@ -63,3 +63,20 @@ What the two checks do not hold, each an accepted risk:
   it: a graph that follows a library's own imports by its `exports`
   conditions and refuses a built-in module there, or a list of the
   entries of a library that each row refuses.
+- An attribute that names a code loader (ec-z0fwbr). An import of a file
+  of a kind that `tools/graph.ts` takes as no code (`NOT_CODE`: `.html`,
+  `.txt`, `.md`) with an attribute whose type is a code loader (`with {
+  type: "ts" }`, or `js`, `tsx`, `jsx`), in an import statement (a side
+  effect or a default import) or in a dynamic import (`await import("./c.html",
+  { with: { type: "ts" } })`), makes Bun 1.4.4 run that file as code. The
+  script decides on Bun's list of imports (`scanImports`), which holds no
+  attribute, so it follows the file as a leaf, and the file's own imports
+  (a built-in, another package's file) pass `just check`. It is rare: only
+  code that is written to go around the check has such an attribute. The
+  tree's imports with an attribute are three, and each names a loader that
+  gives no code: `type: "text"` in `packages/local/src/inspector.ts:37` and
+  `packages/server/src/page.ts:67`, and `type: "file"` in
+  `packages/codemode/src/thread.ts:72`. The review of a change looks for a
+  `with {` (or `with:`) whose type is not `text` or `file`. To recover,
+  remove the attribute: no record is lost. What would fix it: an import
+  list that holds each import's attributes, from another parser.

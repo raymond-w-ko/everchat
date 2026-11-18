@@ -1,0 +1,14 @@
+// The program of the package `mariadb`: its sources and its tests, with the
+// Bun types (lead, ec-l56gmn, F3). The driver's declarations (`mysql2`) need
+// Node's types, and the store will send an id as a `Buffer`, so the package
+// has no guard with no types: what refuses a module of Bun or of Node in its
+// files is the list of built-ins of `tools/graph.ts` (`BUILTINS`), which
+// gives them none. The core's files that it imports are checked here too,
+// with those types.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src", "tests"]
+}

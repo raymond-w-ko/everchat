@@ -72,7 +72,10 @@
 // "text" }`), so the script does not see the type of an import. An import
 // of an `.html` file is a leaf to it whatever its type; but to Bun an HTML
 // import with no `type: "text"` is a bundle, whose scripts the walk does
-// not read. The tree imports its page as text.
+// not read. The tree imports its page as text. An attribute that names a
+// code loader (`ts`, `js`, `tsx` or `jsx`) runs a file of any kind as code,
+// in an import statement and in a dynamic import, and the script follows
+// it as the file's kind: an accepted risk (docs/boundaries.md).
 //
 // The line of a fault is a hint, not a verdict: the first line of the file
 // where the specifier stands in quotes, else 1. A decoy in a comment, a
@@ -100,6 +103,7 @@ export const BUILTINS: Builtins = {
   "@everchat/local": { src: "any", tests: "any" },
   "@everchat/openai": { src: [], tests: "any" },
   "@everchat/sqlite": { src: [], tests: "any" },
+  "@everchat/mariadb": { src: [], tests: "any" },
   "@everchat/server": { src: [], tests: "any" },
   "@everchat/mcp": { src: [], tests: "any" },
   "@everchat/wakeups": { src: [], tests: "any" },
@@ -125,13 +129,14 @@ export type Budget = {
 } & ({ readonly forbid: ReadonlyArray<string>; readonly only?: ReadonlyArray<string> } | { readonly forbid?: ReadonlyArray<string>; readonly only: ReadonlyArray<string> })
 
 export const BUDGETS: ReadonlyArray<Budget> = [
-  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+  { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
   { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
-  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
-  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/"] },
-  { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/"] },
-  { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] }
+  { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
+  { package: "@everchat/mariadb", from: "files", only: ["packages/core/", "packages/sqlite/src/sql.ts"] },
+  { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
+  { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/", "packages/mariadb/"] },
+  { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/", "packages/mariadb/"] },
+  { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/mariadb/"] }
 ]
 
 export interface Tables {

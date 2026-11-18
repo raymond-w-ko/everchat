@@ -1,4 +1,4 @@
-// Tests of the private MariaDB of the checks (mariadb.ts): for each server
+// Tests of the private MariaDB of the checks (server.ts): for each server
 // path that `EVERCHAT_MARIADB` gives (`just test-mariadb` gives 10.11 and
 // 11.8), a start, its version, no network, the socket in the directory
 // given, two servers at one time, the stop, and the server's end when the
@@ -15,7 +15,7 @@ import { describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { alive, type Server, SOCKET_MAX, serverPaths, socketOf, start, VARIABLE, WAIT_MAX } from "./mariadb.ts"
+import { alive, type Server, SOCKET_MAX, serverPaths, socketOf, start, VARIABLE, WAIT_MAX } from "./server.ts"
 
 // What the environment gives for the cases with a server (lead, ec-ndpgjk,
 // B7): the variable not there (they skip), there with no path in it, empty
@@ -120,7 +120,7 @@ const stoppedState = async (pid: number, bound: number) => {
 // first on its `PATH`.
 const caller = (starts: ReadonlyArray<readonly [string, string]>, bin?: string) => {
   const code = [
-    `import { start } from ${JSON.stringify(path.join(import.meta.dir, "mariadb.ts"))}`,
+    `import { start } from ${JSON.stringify(path.join(import.meta.dir, "server.ts"))}`,
     `await Promise.all(${JSON.stringify(starts)}.map(([server, under]) => start(server, under)))`,
     `await new Promise(() => {})`
   ].join("\n")
@@ -490,7 +490,7 @@ test("a socket's path over 107 bytes is refused before a start, with an error th
 if (GIVEN.kind === "unset") {
   const why = `the cases with a server: skipped, ${VARIABLE} is not set (just test-mariadb sets it)`
   // `bun test` prints no skipped case's name: the output says it too.
-  console.log("tools/mariadb.test.ts: " + why)
+  console.log("packages/mariadb/tests/server.test.ts: " + why)
   test.skip(why, () => {})
 }
 
@@ -629,7 +629,7 @@ for (const server of PATHS) {
     test("a child process that starts a server and is then killed with SIGKILL leaves no mariadbd", async () => {
       const under = place()
       const code = [
-        `import { start } from ${JSON.stringify(path.join(import.meta.dir, "mariadb.ts"))}`,
+        `import { start } from ${JSON.stringify(path.join(import.meta.dir, "server.ts"))}`,
         `const one = await start(${JSON.stringify(server)}, ${JSON.stringify(under)})`,
         `console.log(JSON.stringify({ pid: one.pid, version: one.version }))`,
         `await new Promise(() => {})`

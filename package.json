@@ -4,10 +4,14 @@
   "workspaces": [
     "packages/*"
   ],
+  "overrides": {
+    "sql-escaper": "1.5.2"
+  },
   "devDependencies": {
     "@everchat/codemode": "workspace:*",
     "@everchat/core": "workspace:*",
     "@everchat/local": "workspace:*",
+    "@everchat/mariadb": "workspace:*",
     "@everchat/mcp": "workspace:*",
     "@everchat/openai": "workspace:*",
     "@everchat/server": "workspace:*",

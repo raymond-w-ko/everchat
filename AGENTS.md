@@ -46,13 +46,14 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 ## Layout
 
 The new code is a Bun workspace (`"workspaces"` in the root `package.json`)
-with eight packages, each in `packages/<name>/` with its own `package.json`.
+with nine packages, each in `packages/<name>/` with its own `package.json`.
 A package's entries are the keys of its `exports` (see "Be modular").
 Each package's own matter, its entries too, is in its `AGENTS.md`:
 
 - `packages/core/AGENTS.md`: `@everchat/core`, the core.
 - `packages/openai/AGENTS.md`: `@everchat/openai`, the wire for OpenAI.
 - `packages/sqlite/AGENTS.md`: `@everchat/sqlite`, the store on SQLite.
+- `packages/mariadb/AGENTS.md`: `@everchat/mariadb`, the store on MariaDB.
 - `packages/codemode/AGENTS.md`: `@everchat/codemode`, the engines of the sandbox.
 - `packages/local/AGENTS.md`: `@everchat/local`, the rest, the local build.
 - `packages/server/AGENTS.md`: `@everchat/server`, the host of many chats over HTTP and WebSocket.
@@ -61,10 +62,10 @@ Each package's own matter, its entries too, is in its `AGENTS.md`:
 - `packages/<name>/src/x.test.ts`: the tests of one module sit next to it
   (`x.ts`), in its package. A test goes with the code that it tests.
 
-Today eight of them exist: `@everchat/core`, `@everchat/openai`,
-`@everchat/sqlite`, `@everchat/codemode`, `@everchat/local`,
-`@everchat/server`, `@everchat/mcp` and `@everchat/wakeups` ("Be modular"
-has all ten).
+Today nine of them exist: `@everchat/core`, `@everchat/openai`,
+`@everchat/sqlite`, `@everchat/mariadb`, `@everchat/codemode`,
+`@everchat/local`, `@everchat/server`, `@everchat/mcp` and
+`@everchat/wakeups` ("Be modular" has all ten).
 Each of the three cut out of `local` holds less than its row says:
 `openai` has the wire for OpenAI and none for Anthropic, `sqlite` an
 entry for Bun only (`./bun`), and `codemode` two engines, `./thread`
@@ -73,8 +74,9 @@ caller's own thread), but none in a separate Worker. So do the two new
 ones: `server` is the host with no lease and no provider, and `mcp` has
 only the version of the protocol, with no client yet. And `wakeups` has
 only its first module, `./time`: the check of a zone and the parse of a
-wake-up's time.
-`mariadb` and `cloudflare` do not exist yet.
+wake-up's time. `mariadb` has only the driver's client (`./client`), with
+no store yet.
+`cloudflare` does not exist yet.
 
 Run the full check (see "Checks") before you say that a change is done.
 
@@ -91,7 +93,7 @@ The rest:
 - `docs/notes.md`: facts about the tools that cost time to find. Read it
   before you work on the store, the inspector, or their tests.
 - `tools/`: scripts outside the packages, which import them by their names
-  (the root `package.json` names all eight); `just check` checks the types of
+  (the root `package.json` names all nine); `just check` checks the types of
   all but `golden.ts` (`tools/tsconfig.json`). `tools/graph.ts` is a step of
   `just check` (see "Be modular"), and `tools/graph.test.ts` its tests.
   `tools/golden.ts` makes `packages/local/tests/golden.json` from the old
@@ -119,6 +121,12 @@ The rest:
 - Full check: `just full`, about 500 s (the whole run at the landing of
   `48bcf8b`: 2,037 tests in 432.37 s, then 60 tests in 62.23 s, with the
   fleet at work; at a load over 40 the unit tier took 837 s at `2b6fb45`).
+- MariaDB check: `just test-mariadb`, every test of `packages/mariadb` (the
+  helper `packages/mariadb/tests/server.ts` and the driver's client) on two
+  private MariaDB servers, 10.11 and 11.8, each on a socket in the test's
+  temporary directory, with no TCP port. It needs `nix` (on x86_64-linux),
+  which fetches the two pinned servers from the binary cache; with no
+  `nix` it fails. `just full` ends with it.
 - Scoped check: `just scoped <test files>`, for the files of one change,
   with their paths from the root (for example
   `just scoped packages/core/src/memory.test.ts` or
@@ -214,7 +222,7 @@ may import:
 | `@everchat/core` | the memory, the turn loop, requests, the cache, the head, the tags of the seams | `effect` |
 | `@everchat/openai` | the wire for OpenAI; Anthropic's comes next to it | `core` (its requests) |
 | `@everchat/sqlite` | the store on SQLite: an entry each for Bun, Node and a Durable Object | `core` |
-| `@everchat/mariadb` | the store on MariaDB | `core`, `@effect/sql-mysql2` |
+| `@everchat/mariadb` | the store on MariaDB | `core`, `sqlite` (its entry `./sql` only), `@effect/sql-mysql2` |
 | `@everchat/codemode` | the engine: in a worker thread, or in a separate Worker | `core`, `quickjs-wasi` |
 | `@everchat/mcp` | the client of functions from outside (MCP): the load of a server's definitions, the checks, a call | `core`, `@modelcontextprotocol/client`, `@earendil-works/pi-schema` |
 | `@everchat/local` | the terminal, the shell, the files, the inspector, the executable | `core`, `openai`, `sqlite`, `codemode`, `mcp`, `wakeups`, `@modelcontextprotocol/client` (its stdio entry), `pi-tui`, `@effect/platform-bun` |
@@ -234,6 +242,11 @@ The rules that keep the boundaries:
   tests use is one of its `devDependencies`. Another package of the
   workspace is `"workspace:*"`. After a change of a manifest, run
   `bun install`, so that `bun.lock` and `node_modules` fit it.
+- A package enters `bun.lock` only at a version that the registry has had
+  for 14 days or more. Where a dependency's range would take a younger
+  version, the root `package.json` pins the newest older one in
+  `overrides` (today `sql-escaper`: `packages/mariadb/AGENTS.md`, "Its
+  imports").
 - When `tools/graph.ts` fails, fix the import that its line names: declare the
   dependency, import by the package's name and an entry, or keep the code
   that needs a module out of the core.

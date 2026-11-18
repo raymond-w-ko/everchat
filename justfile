@@ -18,13 +18,13 @@ test *args:
 
 # Check the types, one program for each package: the core alone, with no Bun
 # and no Node types (its guard); the core's tests, with the Bun types; the
-# packages openai, sqlite, codemode and local, their tests too, with the Bun
-# types; the server alone, with no Bun and no Node types (its guard), and the
-# server's tests, with the Bun types; the same two for mcp, the client of
-# functions from outside, and for wakeups, the wake-ups by time; the tools,
-# but tools/golden.ts, with the Bun types (tools/tsconfig.json). Then the
-# boundaries of the packages, which the types do not see: their imports and
-# their manifests (tools/graph.ts).
+# packages openai, sqlite, mariadb, codemode and local, their tests too, with
+# the Bun types; the server alone, with no Bun and no Node types (its guard),
+# and the server's tests, with the Bun types; the same two for mcp, the
+# client of functions from outside, and for wakeups, the wake-ups by time;
+# the tools, but tools/golden.ts, with the Bun types (tools/tsconfig.json).
+# Then the boundaries of the packages, which the types do not see: their
+# imports and their manifests (tools/graph.ts).
 # Last, that no file of the tree holds a word of the owner's list, which lives
 # outside the repository; with no list on this machine it checks nothing
 # (tools/words.ts).
@@ -41,6 +41,7 @@ check:
     bunx tsc --noEmit -p packages/mcp/tsconfig.test.json
     bunx tsc --noEmit -p packages/wakeups
     bunx tsc --noEmit -p packages/wakeups/tsconfig.test.json
+    bunx tsc --noEmit -p packages/mariadb
     bunx tsc --noEmit -p tools
     bun tools/graph.ts
     bun tools/words.ts
@@ -85,14 +86,14 @@ mariadb_118 := "/nix/store/dzxs9nkr6zyqi580gbcivncpz2n7bixl-mariadb-server-11.8.
 
 # With no `nix`, on another system than x86_64-linux, or when a path cannot
 # be fetched, it fails with a line that says which: the full check never
-# passes with the servers left out. tools/mariadb.ts starts each server on a
-# socket in the test's temporary directory, and stops it.
+# passes with the servers left out. packages/mariadb/tests/server.ts starts
+# each server on a socket in the test's temporary directory, and stops it.
 # The tests on private MariaDB servers, of 10.11 and of 11.8.
 test-mariadb:
     @command -v nix > /dev/null || { echo "test-mariadb: nix is not on the PATH: the MariaDB servers of the checks come from Nix." >&2; exit 1; }
     @[ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ] || { echo "test-mariadb: the pinned MariaDB servers are for x86_64-linux, and this system is $(uname -m)-$(uname -s)." >&2; exit 1; }
     @nix --extra-experimental-features nix-command build --no-link {{mariadb_1011}} {{mariadb_118}} || { echo "test-mariadb: nix could not fetch the pinned MariaDB servers from the binary cache." >&2; exit 1; }
-    EVERCHAT_MARIADB="{{mariadb_1011}} {{mariadb_118}}" bun test --isolate --timeout {{test_timeout}} tools/mariadb.test.ts
+    EVERCHAT_MARIADB="{{mariadb_1011}} {{mariadb_118}}" bun test --isolate --timeout {{test_timeout}} packages/mariadb
 
 # The full check: the types, the tests from source, the tests of the whole
 # program on the executable, and the tests on MariaDB.

@@ -776,6 +776,12 @@ test("manifest: a file that is not a test imports no test's file, relative or by
 //   no built-in module, and must not reach local, openai, sqlite, codemode,
 //   server or mcp; its tests may import any. Only local imports it: the
 //   rows of the core, sqlite, codemode, server and mcp forbid it.
+// - mariadb: `packages/mariadb/AGENTS.md`, "Its imports": its files import
+//   no built-in module, and may reach only the core and the shared store's
+//   file, `packages/sqlite/src/sql.ts` (sqlite's entry `./sql`): no other
+//   file of sqlite, and nothing of local, openai, codemode, server, mcp or
+//   wakeups; its tests may import any. Only local imports it: the rows of
+//   the core, sqlite, codemode, server, mcp and wakeups forbid it.
 // - openai, sqlite, codemode: the root `AGENTS.md`, "Be modular" (openai
 //   may import the core's requests; sqlite and codemode the core, so none
 //   reaches the others, the server and mcp among them). Their lists of
@@ -788,19 +794,21 @@ test("the real tables are the documents' rows: each package's built-ins, for its
     "@everchat/local": { src: "any", tests: "any" },
     "@everchat/openai": { src: [], tests: "any" },
     "@everchat/sqlite": { src: [], tests: "any" },
+    "@everchat/mariadb": { src: [], tests: "any" },
     "@everchat/server": { src: [], tests: "any" },
     "@everchat/mcp": { src: [], tests: "any" },
     "@everchat/wakeups": { src: [], tests: "any" },
     "@everchat/codemode": { src: ["node:fs/promises", "node:module", "node:worker_threads"], tests: "any" }
   })
   expect(BUDGETS).toEqual([
-    { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
+    { package: "@everchat/core", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
     { package: "@everchat/openai", from: [".", "./gateway"], only: ["packages/core/src/request.ts"] },
-    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
-    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/"] },
-    { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/"] },
-    { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/"] },
-    { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/"] }
+    { package: "@everchat/sqlite", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
+    { package: "@everchat/mariadb", from: "files", only: ["packages/core/", "packages/sqlite/src/sql.ts"] },
+    { package: "@everchat/codemode", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/server/", "packages/mcp/", "packages/wakeups/", "packages/mariadb/"] },
+    { package: "@everchat/server", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/wakeups/", "packages/mariadb/"] },
+    { package: "@everchat/mcp", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/wakeups/", "packages/mariadb/"] },
+    { package: "@everchat/wakeups", from: "files", forbid: ["packages/local/", "packages/openai/", "packages/sqlite/", "packages/codemode/", "packages/server/", "packages/mcp/", "packages/mariadb/"] }
   ])
 })
 
@@ -836,13 +844,29 @@ const stubs = (reach = false): Record<string, string> => {
 }
 
 // A tree with a stub of each real row's package, where `from` (a package
-// of the real rows) declares `to` in its manifest and its file imports it:
-// the real tables decide.
+// of the real rows, or the fixture's core or local) declares the package of
+// `to` in its manifest and its file imports `to`: the real tables decide.
+// `to` may name an entry that is not "." (`@everchat/sqlite/sql`): a stub's
+// package gains it in its exports, as `./src/<its name>.ts`, a file that
+// the tree gets when it has none. The fixture's packages keep their own
+// entries.
 const importing = (from: string, to: string) => {
   const files = stubs()
-  const dir = "packages/" + from.split("/").pop()
-  const manifest = JSON.parse(files[dir + "/package.json"]!) as Record<string, unknown>
-  files[dir + "/package.json"] = JSON.stringify({ ...manifest, dependencies: { [to]: "workspace:*" } })
+  const dirOf = (name: string) => "packages/" + name.split("/").pop()
+  const name = to.split("/").slice(0, 2).join("/")
+  const entry = "." + to.slice(name.length)
+  const target = files[dirOf(name) + "/package.json"]
+  if (target !== undefined && entry !== ".") {
+    const manifest = JSON.parse(target) as { readonly exports: Record<string, string> }
+    const file = "src/" + entry.split("/").pop() + ".ts"
+    files[dirOf(name) + "/package.json"] = JSON.stringify({ ...manifest, exports: { ...manifest.exports, [entry]: "./" + file } })
+    files[dirOf(name) + "/" + file] ??= `export const stub = 1\n`
+  }
+  const dir = dirOf(from)
+  // The fixture's core and local have their manifests in `workspace`'s tree.
+  const own = files[dir + "/package.json"] ?? fs.readFileSync(path.join(workspace(), dir, "package.json"), "utf8")
+  const manifest = JSON.parse(own) as { readonly dependencies?: Record<string, string> }
+  files[dir + "/package.json"] = JSON.stringify({ ...manifest, dependencies: { ...manifest.dependencies, [name]: "workspace:*" } })
   files[dir + "/src/stub.ts"] = `import { stub } from "${to}"\nexport const own = stub\n`
   return { root: workspace(files), file: dir + "/src/stub.ts" }
 }
@@ -858,6 +882,82 @@ for (const from of ["@everchat/sqlite", "@everchat/codemode"]) {
     expect(check(importing(from, "@everchat/core").root)).toEqual([])
   })
 }
+
+test("budget: a source file of @everchat/mariadb may reach the core and the shared store's file; another file of sqlite, local or the server is a fault of the real row", () => {
+  const row = BUDGETS.find((one) => one.package === "@everchat/mariadb")!
+  // The shared store, by sqlite's entry ./sql, and the core: no fault.
+  expect(check(importing("@everchat/mariadb", "@everchat/sqlite/sql").root)).toEqual([])
+  expect(check(importing("@everchat/mariadb", "@everchat/core").root)).toEqual([])
+  // Sqlite's other files (an entry such as ./bun, and its "."), local's
+  // and the server's.
+  for (const [to, reached] of [
+    ["@everchat/sqlite/bun", "packages/sqlite/src/bun.ts"],
+    ["@everchat/sqlite", "packages/sqlite/src/stub.ts"],
+    ["@everchat/local/x", "packages/local/src/x.ts"],
+    ["@everchat/server", "packages/server/src/stub.ts"]
+  ] as const) {
+    const { root, file } = importing("@everchat/mariadb", to)
+    expect(check(root)).toEqual([file + ":1: budget, @everchat/mariadb may reach only " + row.only!.join(", ") + ", and reaches " + reached + ": " + to])
+  }
+})
+
+for (const from of ["@everchat/core", "@everchat/sqlite", "@everchat/codemode", "@everchat/server", "@everchat/mcp", "@everchat/wakeups"]) {
+  test(`budget: a source file of ${from} that imports @everchat/mariadb, declared in its manifest, is a fault of the real row`, () => {
+    const row = BUDGETS.find((one) => one.package === from)!
+    const { root, file } = importing(from, "@everchat/mariadb/client")
+    expect(check(root)).toEqual([file + ":1: budget, " + from + " must not reach " + row.forbid!.join(", ") + ": @everchat/mariadb/client"])
+  })
+}
+
+test("budget: local, with no row, may import @everchat/mariadb", () => {
+  expect(check(importing("@everchat/local", "@everchat/mariadb/client").root)).toEqual([])
+})
+
+// No `.sql` file is under a package (lead, ec-z0fwbr, K1: the schema's
+// files are under `schema/mariadb/`, at the root). Bun runs one as code by
+// more than one way, so the script has no rule for the kind: a `.sql` file
+// under a package is a file that no rule can read, a fault at its line 1,
+// whatever names it.
+// The first review's tree (ec-yxmyh6): a file of @everchat/mariadb requires
+// a .sql file, which would require a built-in and sqlite's driver.
+test("a file of @everchat/mariadb that requires a .sql file is a fault of the real tables: the .sql file at its line 1, the require a way out", () => {
+  const way = "packages/mariadb/src/zz_way.ts"
+  const sql = "packages/mariadb/src/zz_schema.sql"
+  const root = workspace({
+    ...stubs(),
+    "packages/sqlite/src/sqlite.ts": `export const sqlite = 1\n`,
+    [way]: `export const loaded: unknown = require("./zz_schema.sql")\n`,
+    [sql]: `require("node:child_process")\nrequire("../../sqlite/src/sqlite.ts")\n`
+  })
+  expect(check(root)).toEqual([
+    UNCHECKED(sql),
+    way + ":1: way out, " + NO_FILE + ": ./zz_schema.sql",
+    way + ":1: budget, @everchat/mariadb cannot follow it: it " + NO_FILE + ": ./zz_schema.sql"
+  ])
+})
+
+// The re-review's finding 2 (ec-4mqgtl): a directory whose manifest's
+// `main` names a .sql file, with an index.ts beside it. The script follows
+// index.ts; Bun runs the .sql file. The .sql file is the fault.
+test("a .sql file that a directory's main names, beside its index.ts, is a fault of the real tables at the .sql file's line 1", () => {
+  const sql = "packages/mariadb/src/zz_dir/x.sql"
+  const root = workspace({
+    ...stubs(),
+    "packages/mariadb/src/zz_dir/package.json": JSON.stringify({ main: "x.sql" }),
+    [sql]: `require("node:child_process")\n`,
+    "packages/mariadb/src/zz_dir/index.ts": `export const i = 1\n`,
+    "packages/mariadb/src/zz_load.ts": `export const loaded: unknown = require("./zz_dir")\n`
+  })
+  expect(check(root)).toEqual([UNCHECKED(sql)])
+  // The same tree with no .sql file has no fault: the fault is the file's.
+  const clean = workspace({
+    ...stubs(),
+    "packages/mariadb/src/zz_dir/package.json": JSON.stringify({ main: "index.ts" }),
+    "packages/mariadb/src/zz_dir/index.ts": `export const i = 1\n`,
+    "packages/mariadb/src/zz_load.ts": `export const loaded: unknown = require("./zz_dir")\n`
+  })
+  expect(check(clean)).toEqual([])
+})
 
 test("the script prints the faults and fails, and passes a clean workspace", () => {
   // The command uses the real tables: what it prints is what `check` gives
