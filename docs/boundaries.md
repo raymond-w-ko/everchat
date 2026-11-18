@@ -67,16 +67,48 @@ What the two checks do not hold, each an accepted risk:
   of a kind that `tools/graph.ts` takes as no code (`NOT_CODE`: `.html`,
   `.txt`, `.md`) with an attribute whose type is a code loader (`with {
   type: "ts" }`, or `js`, `tsx`, `jsx`), in an import statement (a side
-  effect or a default import) or in a dynamic import (`await import("./c.html",
-  { with: { type: "ts" } })`), makes Bun 1.4.4 run that file as code. The
-  script decides on Bun's list of imports (`scanImports`), which holds no
-  attribute, so it follows the file as a leaf, and the file's own imports
-  (a built-in, another package's file) pass `just check`. It is rare: only
-  code that is written to go around the check has such an attribute. The
-  tree's imports with an attribute are three, and each names a loader that
-  gives no code: `type: "text"` in `packages/local/src/inspector.ts:37` and
+  effect, a default or a named import) or in a dynamic import (`await
+  import("./c.html", { with: { type: "ts" } })`), makes Bun 1.4.4 run that
+  file as code; a re-export (`export * from "./c.html" with { type: "ts"
+  }`) does not. The script decides on Bun's list of imports
+  (`scanImports`), which holds no attribute, so it follows the file as a
+  leaf, and the file's own imports (a built-in, another package's file)
+  pass `just check`. It is rare: only code that is written to go around
+  the check has such an attribute. The tree's imports with an attribute
+  are three, and each names a loader that gives no code: `type: "text"` in
+  `packages/local/src/inspector.ts:37` and
   `packages/server/src/page.ts:67`, and `type: "file"` in
   `packages/codemode/src/thread.ts:72`. The review of a change looks for a
   `with {` (or `with:`) whose type is not `text` or `file`. To recover,
   remove the attribute: no record is lost. What would fix it: an import
   list that holds each import's attributes, from another parser.
+- A call that Bun's parser does not list (ec-4413qr).
+  `import.meta.require("x")`, `new Worker("x")` (also `new Worker(new
+  URL("x", import.meta.url))`) and a computed
+  `require(require.resolve("x"))` are not on the list of `scanImports`,
+  and Bun 1.4.4 runs the file or the module that each names. So a file of
+  a package can load a built-in module, or another package's file, and
+  `tools/graph.ts` passes: like reflection, a module is reached by a way
+  that the parser does not list. A guard with no types of Bun or Node (the
+  core's, the server's, `mcp`'s, `wakeups`') refuses each of the three
+  (TS2339 for `import.meta.require`, TS2304 for `Worker`, TS2591 for
+  `require`); a program with Bun's types (the packages `local`, `mariadb`,
+  `openai`, `sqlite`, `codemode`, and each package's tests) passes them,
+  so both checks pass. A specifier that names a directory is near it: the
+  script follows the directory's `index.ts` (`resolve` in
+  `tools/graph.ts`), and Bun's `require` or import of that directory takes
+  the file that the directory's `package.json` names as `main`. A `main`
+  that is a `.ts` file of the package is still read by the script as a
+  file of the package (its built-ins, its imports), so only the edge is
+  another; a `main` of a kind that is no code (a `.sql` file) is a fault
+  at that file itself. It is rare: only code that is written to go around
+  the check makes such a call. The tree has one, the sandbox's worker of
+  `codemode` (`packages/codemode/src/pi/runtime/host.ts:33`), on its own
+  `pi/runtime/worker.ts` or on the URL that the caller gives
+  (`packages/local/src/main.ts:236`, local's `worker.ts`): each a `.ts`
+  file of a package, which the script reads. The review of a change looks
+  for `import.meta.require`, `Worker(`, `require.resolve`, and a
+  `package.json` under a package's source. To recover, remove the call: no
+  record is lost. The script gets no scan of a file's text: it decides on
+  `scanImports`' list only. What would fix it: a lint rule that forbids
+  those calls, or a run of the package where the API is absent.
