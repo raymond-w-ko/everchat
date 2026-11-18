@@ -26,6 +26,16 @@
 // - If a turn runs, the message steers it: the turn takes it in after the
 //   results of its present step. A message that comes too late for the turn
 //   starts the next turn.
+// - While a stopped turn's end is not yet written (the stop's finalizer in
+//   `drive`, after the turn's fiber is cut), it is as a message just after
+//   that end: it waits for the end (written or failed), then is logged and
+//   starts its turn, so its pages, their `accepted` and the turn's `start`
+//   come after the stopped turn's note and `end`, and two turns never run.
+//   A `say` cut while it waits writes nothing. A key that the chat has
+//   answers before the wait, and a key of another form is refused before
+//   it. With no turn running, a lost end (below) is written first, as
+//   `ready` does: if that fails, `say` fails with its error and writes
+//   nothing.
 //
 // A message from outside a turn (`Source`, the seam)
 //
@@ -117,6 +127,12 @@
 // the turn loop's `lock` (the person's message, the next turn of a waiting
 // message), then `order`, then the memory's own (inside `pushWith`). No one
 // holds a later one and waits for an earlier one, so they cannot deadlock.
+// A `say` waits for a stopped turn's end while it holds the loop's `lock`:
+// that end (the stop's finalizer, on the turn's own fiber, after the
+// fiber's wait for `lock`, if any, was cut and let it go) takes `order`
+// and the memory's lock, never the loop's `lock`; no holder of `order` or
+// of the memory's lock waits for `lock`, and the end waits for no fiber
+// that does, so it ends, and the signal comes in its `ensuring`.
 // Each wait for a lock can be interrupted, the memory's too (but in a part
 // that cannot be, as a stopped turn's end in its handler): a write through
 // the memory (a message's log, the person's message) waits for it under
@@ -143,7 +159,7 @@
 //
 // Not here yet: agents, hooks, and images.
 
-import { Clock, Context, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Semaphore, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
 import { waits } from "./functions.ts"
 import { TOOL } from "./head.ts"
@@ -301,6 +317,8 @@ export class Source extends Context.Service<Source, {
 
 export class Turns extends Context.Service<Turns, {
   // The person says something. It returns when the message is in the log.
+  // While a stopped turn's end is not yet written, it waits for that end
+  // first, then starts its turn after it (the head comment).
   // `key`: its sender's key (the head comment). `told`: run with the `Sent`
   // that `say` gives. For a new message it runs in the step that nothing
   // interrupts, after the commit, the publish and the launch of the turn,
@@ -328,9 +346,11 @@ export class Turns extends Context.Service<Turns, {
   // fails, `ready` fails with its error and asks no source (the head
   // comment).
   readonly ready: Effect.Effect<void, StoreError>
-  // Waits until no turn runs.
+  // Waits until no turn runs: until `busy` is false, a stopped turn's end
+  // written too.
   readonly idle: Effect.Effect<void>
-  // True while a turn runs (a request, a call, its end), with no wait.
+  // True while a turn runs (a request, a call, its end, a stopped turn's
+  // end not yet written), with no wait.
   readonly busy: Effect.Effect<boolean>
   // When the loop was last busy, in milliseconds of Effect's `Clock`: now
   // while a turn runs, else when the last one ended, else when the layer
@@ -371,8 +391,10 @@ export class Turns extends Context.Service<Turns, {
         // The turn that runs, its fiber, and why the person stopped it.
         let running: { turn: number; fiber: Fiber.Fiber<void> | null; stop: string | null } | null = null
         // True while a stopped turn's end is written, after `running` is
-        // null.
+        // null; and the signal of that end, done when it is written or has
+        // failed (the stop's `ensuring`): `say` and `idle` wait for it.
         let ending = false
+        let ends: Deferred.Deferred<void> | null = null
         // The reason of a stop whose end could not be written: `ready`
         // writes it before it asks the source (the head comment).
         let lost: string | null = null
@@ -768,6 +790,7 @@ export class Turns extends Context.Service<Turns, {
               Effect.gen(function*() {
                 const stopped = running
                 ending = true
+                ends = Deferred.makeUnsafe<void>()
                 rest()
                 // The program's own stop leaves the turn running, for the next launch.
                 if (stopped === null || stopped.stop === null) {
@@ -790,6 +813,10 @@ export class Turns extends Context.Service<Turns, {
                 Effect.ensuring(Effect.sync(() => {
                   ending = false
                   rested = clock.currentTimeMillisUnsafe()
+                  if (ends !== null) {
+                    Deferred.doneUnsafe(ends, Exit.void)
+                    ends = null
+                  }
                 }))
               )
             ),
@@ -800,6 +827,23 @@ export class Turns extends Context.Service<Turns, {
               })
             )
           )
+
+        // A lost end (the head comment), written as the stop would have: the
+        // running turn read again, ended as stopped with the kept reason; a
+        // read that finds none forgets it. If the read or the write fails,
+        // the error is the caller's, and the lost end stays. Under the loop's
+        // `lock`, with no turn running and no end pending.
+        const writeLost = Effect.gen(function*() {
+          if (lost === null) {
+            return
+          }
+          const why = lost
+          const [turn] = yield* store.runningTurns(null)
+          if (turn !== undefined) {
+            yield* end(turn, "stopped", why)
+          }
+          lost = null
+        })
 
         const launch = (turn: Turn) =>
           Effect.gen(function*() {
@@ -826,6 +870,17 @@ export class Turns extends Context.Service<Turns, {
                 yield* told(sent)
                 return sent
               }
+            }
+            // A stopped turn whose end is not yet written: the message waits
+            // for that end, as if it came just after it (the head comment),
+            // then goes on as here. A cut wait writes nothing.
+            while (ends !== null) {
+              yield* Deferred.await(ends)
+            }
+            // With no turn running, a lost end first: if it fails, `say`
+            // fails with its error and writes nothing.
+            if (running === null) {
+              yield* writeLost
             }
             const idle = running === null
             // Its pages with its key, their `accepted`, and, when no turn
@@ -903,20 +958,19 @@ export class Turns extends Context.Service<Turns, {
             return Effect.void
           }
           return Effect.gen(function*() {
-            if (lost !== null) {
-              const why = lost
-              const [turn] = yield* store.runningTurns(null)
-              if (turn !== undefined) {
-                yield* end(turn, "stopped", why)
-              }
-              lost = null
-            }
+            yield* writeLost
             yield* offer(launch)
           })
         }))
 
+        // It waits for a turn's fiber, then for a stopped turn's end, until
+        // `busy` is false.
         const idle: Effect.Effect<void> = Effect.suspend(() =>
-          running === null || running.fiber === null ? Effect.void : Effect.andThen(Fiber.await(running.fiber), idle)
+          running !== null && running.fiber !== null
+            ? Effect.andThen(Fiber.await(running.fiber), idle)
+            : ends !== null
+            ? Effect.andThen(Deferred.await(ends), idle)
+            : Effect.void
         )
 
         const busy = Effect.sync(() => running !== null || ending)

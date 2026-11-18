@@ -117,7 +117,9 @@ timer, no table and no approval.
   a failure); and in `Turns.ready`, which the source's owner calls when it
   has something: with no turn running the offer starts its turn at once;
   while one runs it does nothing, and that turn's end asks. Not after a
-  stop: the offer waits for the next end or the next `ready`.
+  stop: the offer waits for the next end or the next `ready`. A person's
+  message (`say`), and `idle`, that come before a stopped turn's end is
+  written wait for that end: the message's turn starts after it.
 - One transaction holds the offer's message (its pages and their `message`
   events), the new turn and its `start`, and the source's `write` with the
   message's first page and that turn. A failed write fails it all, and

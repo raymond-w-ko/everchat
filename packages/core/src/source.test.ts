@@ -574,3 +574,146 @@ test("no source: ready does nothing, before and after a turn", async () => {
   assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "done", first_msg: 0 }])
   assert.equal(wire.sent.length, 1)
 })
+
+// A person's message and `idle` in the gap of a stopped turn's end (turn.ts,
+// `say`, `idle`): they wait for that end.
+
+// A store that pushes "endTurn <status>" to `marks` when a turn's end is
+// written.
+const markedEnds = (marks: Array<string>): Layer.Layer<Store, never, Store> =>
+  Layer.effect(
+    Store,
+    Effect.gen(function*() {
+      const real = yield* Store
+      return Store.of({ ...real, endTurn: (id, status, why) => Effect.tap(real.endTurn(id, status, why), () => Effect.sync(() => marks.push("endTurn " + status))) })
+    })
+  )
+
+test("say while a stopped turn's end is held: nothing of it is written and busy is true; when the end is let go, the stop's note and end come, then the message's accepted and the new turn's start; one turn runs, and told ran once", async () => {
+  const file = newFile()
+  const sandbox = gatedSandbox()
+  const held = heldEnd()
+  const second = heldSecond()
+  const told: Array<number> = []
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "t1", "the program") : says(asked, "Seen.")))
+  await withSource(file, wire, sandbox.run, null, Effect.gen(function*() {
+    const turns = yield* Turns
+    yield* turns.say("go")
+    yield* Deferred.await(sandbox.started)
+    held.state.armed = true
+    const stopping = yield* Effect.forkChild(turns.stop())
+    yield* Deferred.await(held.held)
+    const before = { messages: messages(file), turns: turnRows(file), events: events(file) }
+    assert.deepStrictEqual(before.turns, [{ id: 1, status: "running", first_msg: 0 }])
+    // It runs at once, until it waits.
+    const saying = yield* Effect.forkChild(turns.say("next", null, (sent) => Effect.sync(() => told.push(sent.accepted))), { startImmediately: true })
+    assert.deepStrictEqual({ messages: messages(file), turns: turnRows(file), events: events(file) }, before)
+    assert.equal(yield* turns.busy, true)
+    assert.deepStrictEqual(told, [])
+    yield* Deferred.succeed(held.release, undefined)
+    yield* Fiber.join(stopping)
+    const sent = yield* Fiber.join(saying)
+    yield* Deferred.await(second.reached)
+    assert.deepStrictEqual(events(file).slice(before.events.length), ["message 3", "end", "accepted 4", "start"])
+    assert.deepStrictEqual(messages(file), ["0 user -", "1 tool 1", "2 echo 1", "3 note 1", "4 user -"])
+    assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }, { id: 2, status: "running", first_msg: 4 }])
+    assert.deepStrictEqual(told, [sent.accepted])
+    yield* Deferred.succeed(second.gate, undefined)
+    yield* turns.idle
+  }).pipe(Effect.ensuring(Effect.andThen(Deferred.succeed(held.release, undefined), Deferred.succeed(second.gate, undefined)))), { store: held.layer, ask: second.ask })
+  assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }, { id: 2, status: "done", first_msg: 4 }])
+  assert.deepStrictEqual(told.length, 1)
+})
+
+test("idle asked while a stopped turn's end is held ends after that end is written", async () => {
+  const file = newFile()
+  const sandbox = gatedSandbox()
+  const held = heldEnd()
+  const marks: Array<string> = []
+  const wire = fakeWire((asked) => runs(asked, "t1", "the program"))
+  await withSource(file, wire, sandbox.run, null, Effect.gen(function*() {
+    const turns = yield* Turns
+    yield* turns.say("go")
+    yield* Deferred.await(sandbox.started)
+    held.state.armed = true
+    const stopping = yield* Effect.forkChild(turns.stop())
+    yield* Deferred.await(held.held)
+    // It runs at once, until it waits.
+    const idling = yield* Effect.forkChild(Effect.andThen(turns.idle, Effect.sync(() => marks.push("idle"))), { startImmediately: true })
+    marks.push("release")
+    yield* Deferred.succeed(held.release, undefined)
+    yield* Fiber.join(stopping)
+    yield* Fiber.join(idling)
+    assert.equal(yield* turns.busy, false)
+  }).pipe(Effect.ensuring(Deferred.succeed(held.release, undefined))), { store: markedEnds(marks).pipe(Layer.provide(held.layer)) })
+  assert.deepStrictEqual(marks, ["release", "endTurn stopped", "idle"])
+  assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }])
+})
+
+test("a say cut while it waits for a stopped turn's end writes nothing, and told does not run; a later say starts one turn", async () => {
+  const file = newFile()
+  const sandbox = gatedSandbox()
+  const held = heldEnd()
+  let told = 0
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "t1", "the program") : says(asked, "Seen.")))
+  await withSource(file, wire, sandbox.run, null, Effect.gen(function*() {
+    const turns = yield* Turns
+    yield* turns.say("go")
+    yield* Deferred.await(sandbox.started)
+    held.state.armed = true
+    const stopping = yield* Effect.forkChild(turns.stop())
+    yield* Deferred.await(held.held)
+    const before = events(file)
+    // It runs at once, until it waits; then it is cut.
+    const saying = yield* Effect.forkChild(turns.say("cut", null, () => Effect.sync(() => (told += 1))), { startImmediately: true })
+    const cut = yield* Fiber.interrupt(saying).pipe(Effect.andThen(Fiber.await(saying)))
+    assert.ok(Exit.hasInterrupts(cut))
+    yield* Deferred.succeed(held.release, undefined)
+    yield* Fiber.join(stopping)
+    assert.deepStrictEqual(events(file).slice(before.length), ["message 3", "end"])
+    assert.deepStrictEqual(messages(file), ["0 user -", "1 tool 1", "2 echo 1", "3 note 1"])
+    yield* turns.say("again")
+    yield* turns.idle
+  }).pipe(Effect.ensuring(Deferred.succeed(held.release, undefined))), { store: held.layer })
+  assert.equal(told, 0)
+  assert.deepStrictEqual(messages(file), ["0 user -", "1 tool 1", "2 echo 1", "3 note 1", "4 user -", "5 asst 2"])
+  assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }, { id: 2, status: "done", first_msg: 4 }])
+  assert.deepStrictEqual(events(file), ["accepted 0", "start", "call", "message 1", "message 2", "message 3", "end", "accepted 4", "start", "message 5", "end"])
+})
+
+test("the stop's read of the running turn fails: a say whose read fails again fails with the StoreError and writes nothing; a say whose read passes writes turn 1's stop note and end, then the message's accepted and start: one turn running", async () => {
+  const file = newFile()
+  const sandbox = gatedSandbox()
+  const store = failing()
+  const second = heldSecond()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "t1", "the program") : says(asked, "Seen.")))
+  await withSource(file, wire, sandbox.run, null, Effect.gen(function*() {
+    const turns = yield* Turns
+    yield* turns.say("go")
+    yield* Deferred.await(sandbox.started)
+    store.state.reads = 1
+    yield* turns.stop("Stopped by the test.")
+    assert.equal(store.state.reads, 0)
+    const before = { messages: messages(file), turns: turnRows(file), events: events(file) }
+    assert.deepStrictEqual(before.turns, [{ id: 1, status: "running", first_msg: 0 }])
+    assert.deepStrictEqual(before.events, ["accepted 0", "start", "call", "message 1", "message 2"])
+    // The read fails again: `say` fails, and nothing is written.
+    store.state.reads = 1
+    const failed = yield* Effect.exit(turns.say("not yet"))
+    assert.ok(Exit.isFailure(failed))
+    const error = Cause.squash(failed.cause)
+    assert.ok(error instanceof StoreError)
+    assert.equal(error.op, "runningTurns")
+    assert.deepStrictEqual({ messages: messages(file), turns: turnRows(file), events: events(file) }, before)
+    // The read passes: the end, then the message and its turn.
+    yield* turns.say("next")
+    yield* Deferred.await(second.reached)
+    assert.deepStrictEqual(events(file), ["accepted 0", "start", "call", "message 1", "message 2", "message 3", "end", "accepted 4", "start"])
+    assert.deepStrictEqual(messages(file), ["0 user -", "1 tool 1", "2 echo 1", "3 note 1", "4 user -"])
+    assert.equal(rows<{ text: string }>(file, "select text from everchat_msg_read where i = 3")[0]!.text, "Stopped by the test.")
+    assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }, { id: 2, status: "running", first_msg: 4 }])
+    yield* Deferred.succeed(second.gate, undefined)
+    yield* turns.idle
+  }).pipe(Effect.ensuring(Deferred.succeed(second.gate, undefined))), { store: store.layer, ask: second.ask })
+  assert.deepStrictEqual(turnRows(file), [{ id: 1, status: "stopped", first_msg: 0 }, { id: 2, status: "done", first_msg: 4 }])
+})
