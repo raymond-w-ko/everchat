@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./firer": "./src/firer.ts",
+    "./source": "./src/source.ts",
     "./time": "./src/time.ts"
   },
   "dependencies": {
@@ -11,6 +13,8 @@
     "effect": "4.1.2"
   },
   "devDependencies": {
+    "@everchat/local": "workspace:*",
+    "@everchat/sqlite": "workspace:*",
     "@types/bun": "1.4.4"
   }
 }

@@ -6,20 +6,35 @@ the rules for every file.
 
 - `packages/wakeups/` (`@everchat/wakeups`): a chat's wake-ups by time, an
   optional package of the local build (`docs/design.md`, "Packages": its
-  runtime is "none"). Today it has its first module only. Its entry:
-  `./time` (`packages/wakeups/src/time.ts`): `zone`, `machineZone`,
+  runtime is "none"). Its entries:
+- `./time` (`packages/wakeups/src/time.ts`): `zone`, `machineZone`,
   `parse`, their types (`When`, `Wall`) and errors (`ZoneError`,
   `WhenError`); and when a wake-up is due: `reminderAt`, `isPast`,
   `nextSlot`, `missedOf` (`Missed`), `slotText`, `lateText`, `missedText`,
   `HORIZON_YEARS`, `MISSED_MAX`, `WHEN_MAX`, `ZONE_MAX` (see "Time").
+- `./source` (`packages/wakeups/src/source.ts`): `source`, the layer of the
+  core's `Source` over `Store`; `next`, its ask over a store; `fireText`;
+  the ceiling of a wake turn `WAKE_CEILING`; and the budget, `HOUR_FIRES`
+  in `HOUR` and `DAY_FIRES` in `DAY` (see "The source").
+- `./firer` (`packages/wakeups/src/firer.ts`): `firer`, the layer that
+  forks the firer's one fiber and its listener over `Store` and `Turns`;
+  `pendOf`, what a round writes for a due row; `endOf`, how the settle
+  counts a wake turn's end; `stoppedText`, the note of a row stopped at two
+  failures; and `SLEEP`, the longest sleep between two rounds (see "The
+  firer").
 - The tests of one module sit next to it, in `packages/wakeups/src/`.
 
 ## What it is not
 
-- No store: the rows of the wake-ups are the store's, and their members
-  the core's; this package reads and writes none yet.
-- No clock and no config: `time.ts` reads neither. A caller gives the zone,
-  the text and now.
+- No store of its own: the rows of the wake-ups are the store's, and their
+  members the core's (`Store`); `source.ts` reads them through those
+  members, and writes only `fireWake`, in the offer's transaction;
+  `firer.ts` writes only `pendWake` and `settleWake` (alone, or as the
+  `write` of the note of a stop at two failures), and starts no turn
+  itself.
+- No config: `time.ts` reads no clock either; a caller gives the zone, the
+  text and now. `source.ts` and `firer.ts` read now from `effect`'s
+  `Clock`, and the firer sleeps on it.
 - No part of the core: the core does not know this package, and a chat
   with no wake-up runs with no line of it. Only `packages/local` imports it.
 
@@ -119,8 +134,99 @@ machine's zone, and nothing more).
   have one text); `lateText` how late, `3 min late`, `2 h late` (whole
   hours under two days), `4 d late`, and nothing under one minute.
 
+## The source
+
+`source.ts` (docs/wakeups.md, sections 5 and 6). The turn loop asks
+`next` under its lock, with no turn running, and it decides in this
+order:
+
+- **Off**: the chat's `wakeups` is false: null. The rows are not read.
+- **Nothing waits**: `pendingWake()` gives none: null. The store gives
+  only a row whose last end is counted (`settled`), so the end of a wake
+  turn is counted before its row fires again; the source does not test it.
+- **The budget**: `fires(now - HOUR)` at `HOUR_FIRES` (6), or
+  `fires(now - DAY)` at `DAY_FIRES` (24): null, and the fire waits. Both
+  windows are counted back from now (a fire at `now - HOUR` still counts),
+  never from the last fire; the firer asks again at each round.
+- **The offer**: the kind `wake`, `fireText`, the ceiling `WAKE_CEILING`
+  (20 steps, 2,000,000 tokens), and the `write`
+  `fireWake(id, turn.id, read)`, with the `pending` and `missed` that this
+  `next` read, never read again in the write: a newer slot that the firer
+  wrote in between waits on with its own count. A row that changed since
+  the read fails `fireWake` with a `StoreError`: the offer writes nothing,
+  and the memory stops for the launch. The source does not catch it.
+
+**The fire's text** (`fireText`): `[<id>] due <slot>[, <late>][, <missed>]:
+<text>`, the slot on the row's wall clock (the core's `wallClock`: a zone
+that the engine does not know reads as UTC, with no throw), `lateText` and
+`missedText` each only when not zero; a count at `WAKE_MISSED_MAX` reads
+`1000 or more missed`. One fire is one line: the row's text goes in through
+the core's `visible`, so each line end and each hidden code point of it is
+its escape (`\x0a`, `\u{2028}`), as in a note of an approval, and a text
+with line ends never reads as a second fire. The row keeps its text exact;
+a text with none of those code points is in the fire byte for byte, and
+each of its characters is at most 8 there. The zone is `wallClock`'s, with
+no line end.
+
+**Two sources**: a host with the approvals joins them first,
+`Source.inOrder(Approvals.source, source)`.
+
+The tests (`source.test.ts`) run on a file's store
+(`@everchat/sqlite`), the fakes of `@everchat/local/testing` and the turn
+loop, on a `TestClock`; the two packages are devDependencies only.
+
+## The firer
+
+`firer.ts` (docs/wakeups.md, section 5): one fiber above `Turns`, forked in
+the scope of its layer, `firer`; it ends with that scope. Its first round
+runs at once, at the build; then a round after each sleep. A round:
+
+- **The settle** (section 7), first, with no read of the switch: off stops
+  fires, not the count. For each row of `unsettledWakes()` whose last turn
+  has ended, `settleWake(id, turn, endOf(status, why))`: `done` is
+  `"done"`; `failed`, and `stopped` with the core's why `CEILING`, are
+  `"failed"`; `stopped` with another why (the person) is `"kept"`. A turn
+  that has not ended (its end not yet written) holds its row for a later
+  round. When the end counts as failed and the row read is active with
+  `WAKE_FAILURES - 1` failures, the settle is the `write` of a
+  `Turns.note`, `stoppedText`: the row's stop and its note are one
+  transaction, so a fault leaves neither, and the next launch writes both.
+  A row read as stopped already is settled with no note. The rows of a
+  round settled first can fire in it.
+- **Off**: the chat's `wakeups` is false: the rows are not read, and
+  nothing is pended.
+- **On**: for each row of `dueWakes(now)`, `pendOf` gives what to write
+  with `pendWake`: a reminder's time, with no count and no next slot; a
+  routine's newest slot at or before now, the count of its slots before
+  it, and its next slot (`missedOf`, walked from the row's `due`, never
+  found from now: a clock set back finds nothing due, and fires no slot
+  twice). The store keeps one waiting fire, and grows its `missed`.
+- **`Turns.ready`**, at each round, on or off, with new rows or none: a
+  fire held by the budget, by a fault or from before a start is asked for
+  again within `SLEEP`.
+- **The sleep**: until the next `due` of an active row that is after now,
+  and `SLEEP` (60 s) when that is later or there is none. An `end` event of
+  the turn loop ends it sooner: a listener, subscribed (`Turns.subscribe`)
+  at the build before the first round, tells the firer's fiber, and settles
+  nothing itself. The settles run in the firer's one fiber, one at a time;
+  an event that the hub dropped, ends that came during a round and an end
+  from before the listener are the next round's.
+
+A round that fails (a member, a settle's note, `Turns.ready`) is one
+diagnostic of the
+source `wakeups`, and the next round runs after `SLEEP`: the fiber never
+ends on a `StoreError`. A row whose `cron` or zone no longer parses (a row
+is data) is a diagnostic for that row, one time in a launch, and the
+round's other rows are still written.
+
+The tests (`firer.test.ts`) build the firer by its layer over the turn
+loop of `source.test.ts`, on a `TestClock`: the firer's clock tells each
+sleep, which ends a round, and a case moves the clock only then. A case
+may hold the listener back (its events wait behind a gate), so that only
+the clock's round settles.
+
 ## Its check
 
 The scoped check of the package (the root `AGENTS.md`, "Checks"):
-`just scoped packages/wakeups/src/time.test.ts`. `just check` checks the
-types of its two programs.
+`just scoped packages/wakeups/src/firer.test.ts packages/wakeups/src/source.test.ts packages/wakeups/src/time.test.ts`.
+`just check` checks the types of its two programs.
