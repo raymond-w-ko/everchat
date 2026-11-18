@@ -75,9 +75,28 @@ build:
 test-build: build
     EVERCHAT_BIN=./everchat bun test --isolate --timeout {{test_timeout}} packages/local/tests/main.test.ts packages/local/tests/pipe.test.ts packages/local/tests/inspect.test.ts packages/local/tests/serve.test.ts
 
-# The full check: the types, the tests from source, and the tests of the
-# whole program on the executable.
-full: check test test-build
+# The servers of the MariaDB checks: the output paths of `mariadb_1011.server`
+# (10.11.18) and `mariadb_118.server` (11.8.9) at nixpkgs
+# d5cc6833999746cffdfe0598f7bc801a57b887a9, for x86_64-linux. `test-mariadb`
+# fetches them from the binary cache by these paths, with no evaluation of
+# nixpkgs and no flake.
+mariadb_1011 := "/nix/store/cz7csf2phhwnc2nwh9x54zkb3zncj6q0-mariadb-server-10.11.18"
+mariadb_118 := "/nix/store/dzxs9nkr6zyqi580gbcivncpz2n7bixl-mariadb-server-11.8.9"
+
+# With no `nix`, on another system than x86_64-linux, or when a path cannot
+# be fetched, it fails with a line that says which: the full check never
+# passes with the servers left out. tools/mariadb.ts starts each server on a
+# socket in the test's temporary directory, and stops it.
+# The tests on private MariaDB servers, of 10.11 and of 11.8.
+test-mariadb:
+    @command -v nix > /dev/null || { echo "test-mariadb: nix is not on the PATH: the MariaDB servers of the checks come from Nix." >&2; exit 1; }
+    @[ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ] || { echo "test-mariadb: the pinned MariaDB servers are for x86_64-linux, and this system is $(uname -m)-$(uname -s)." >&2; exit 1; }
+    @nix --extra-experimental-features nix-command build --no-link {{mariadb_1011}} {{mariadb_118}} || { echo "test-mariadb: nix could not fetch the pinned MariaDB servers from the binary cache." >&2; exit 1; }
+    EVERCHAT_MARIADB="{{mariadb_1011}} {{mariadb_118}}" bun test --isolate --timeout {{test_timeout}} tools/mariadb.test.ts
+
+# The full check: the types, the tests from source, the tests of the whole
+# program on the executable, and the tests on MariaDB.
+full: check test test-build test-mariadb
 
 # The scoped check, for the files of one change: the types, and the test
 # files given.
