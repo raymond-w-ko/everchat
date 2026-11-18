@@ -8,7 +8,7 @@
 
 import type { CodemodeResult } from "./pi/portable.ts"
 import { Effect, FiberSet } from "effect"
-import { FunctionError, Functions, Shortened } from "@everchat/core/functions"
+import { FunctionError, Functions, pending, Shortened } from "@everchat/core/functions"
 import { type Ran, render, STOPPED } from "@everchat/core/sandbox"
 import { Store } from "@everchat/core/store"
 
@@ -38,6 +38,17 @@ const text = (value: unknown): string => (typeof value === "string" ? value : va
 // arguments came in another form (a spread function's that is no list, a
 // schema function's with no argument) is a `FunctionError` that names the
 // function, and its row is `failed` with it, with `input` `[]`.
+//
+// The gate: a function whose name is in `functions.approval` needs a
+// person's yes before each run, so a program's call of it does not run.
+// After its row is written and its arguments are a list, the store's
+// `pendCall` closes the row as `pending` and makes the approval in one
+// transaction, and the program gets `pending(n)` (functions.ts) at once and
+// goes on. The row's `input` is the exact list that a later run after a
+// yes gives `Functions.call`. The step is in the part that nothing
+// interrupts, and the name never joins `working`. A failure of `pendCall`
+// is the database's `FunctionError`, as one of `startCall` is: the
+// function never runs from here.
 export const functionCalls = (at: { readonly turn: number; readonly call: number }) =>
   Effect.gen(function*() {
     const functions = yield* Functions
@@ -70,6 +81,10 @@ export const functionCalls = (at: { readonly turn: number; readonly call: number
           if (args instanceof FunctionError) {
             yield* Effect.mapError(store.endCall(id, { status: "failed", output: args.message }), () => broken("endCall"))
             return yield* Effect.fail(args)
+          }
+          if (functions.approval.has(name)) {
+            const n = yield* Effect.mapError(store.pendCall(id, (approval) => text(pending(approval))), () => broken("pendCall"))
+            return pending(n)
           }
           working.set(id, name)
           const work = restore(functions.call(name, args, { turn: at.turn, program: at.call, call: id })).pipe(

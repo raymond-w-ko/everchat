@@ -108,7 +108,7 @@ for (const engine of engines) {
 // Runs `programs` one after the other on the sandbox of `layer`, each in a
 // new call of one turn, in a new store, with no functions.
 const runs = (layer: Layered, programs: ReadonlyArray<string>): Promise<Array<Ran>> => {
-  const none = Layer.succeed(Functions, Functions.of({ declarations: [], names: [], call: () => Effect.die("no function") }))
+  const none = Layer.succeed(Functions, Functions.of({ declarations: [], names: [], approval: new Set(), call: () => Effect.die("no function") }))
   return withStore(
     newFile(),
     Effect.gen(function*() {

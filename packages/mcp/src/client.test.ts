@@ -15,7 +15,7 @@ import { InMemoryTransport, type Transport } from "@modelcontextprotocol/client"
 import { McpServer, ProtocolError, ProtocolErrorCode, Server as Low } from "@modelcontextprotocol/server"
 import { serveStdio } from "@modelcontextprotocol/server/stdio"
 import { Effect, Exit, Fiber, Logger, Scope } from "effect"
-import { type Checked, checkOf, DEFAULTS, DEPTH, FORM, FORM_SIZE, formOf, HEAD_RENDER, load, type Loaded, type Options, type Outside, PAGES, PAIRS, RENDER, resultOf, type Server, sizeOf, TAG, VERSION, WORK } from "./client.ts"
+import { type Checked, checkOf, DEFAULTS, DEPTH, FORM, FORM_SIZE, formOf, HEAD_RENDER, load, type Loaded, MARK, type Options, type Outside, PAGES, PAIRS, RENDER, resultOf, type Server, sizeOf, TAG, VERSION, WORK } from "./client.ts"
 
 // Fakes
 // -----
@@ -444,13 +444,47 @@ test("deny is left out with no refusal; the tool's own setting wins over its ser
   expect(all.refused).toEqual([])
 })
 
-test("ask is left out, with its refusal", async () => {
-  const got = await loaded([server("s", served([[tool("send"), tool("read")]]), { tools: { send: "ask" } })])
-  expect(names(got)).toEqual(["s.read"])
-  expect(got.refused).toEqual([{ server: "s", tool: "send", reason: "It needs a yes before each call, and approval is not built yet." }])
+// Each entry's name and its flag of approval (`Entry.approval`; absent
+// is "none").
+const flags = (got: Loaded) => got.entries.map((one) => [one.declaration.name, "approval" in one ? one.approval : "none"])
+
+test("ask is in the list with approval: true and no refusal; deny is left out; auto has no flag; the declaration is the same with any setting", async () => {
+  const got = await loaded([server("s", served([[tool("send"), tool("read"), tool("drop")]]), { tools: { send: "ask", drop: "deny" } })])
+  expect(flags(got)).toEqual([["s.read", "none"], ["s.send", true]])
+  expect(got.refused).toEqual([])
   const all = await loaded([server("s", served([[tool("send"), tool("read")]]), { approval: "ask" })])
-  expect(names(all)).toEqual([])
-  expect(all.refused.map((one) => one.tool)).toEqual(["read", "send"])
+  expect(flags(all)).toEqual([["s.read", true], ["s.send", true]])
+  expect(all.refused).toEqual([])
+  const auto = await loaded([server("s", served([[tool("send"), tool("read")]]))])
+  expect(flags(auto)).toEqual([["s.read", "none"], ["s.send", "none"]])
+  expect(JSON.stringify(all.declarations)).toBe(JSON.stringify(auto.declarations))
+})
+
+test("a marked server: the _meta key io.everchat/approval with true, \"yes\" or 1 (or null) gates the tool, with false or with no key it does not, and deny leaves it out; without marked the key changes nothing", async () => {
+  expect(MARK).toBe("io.everchat/approval")
+  const definitions = () =>
+    served([[
+      tool("t", { _meta: { [MARK]: true } }),
+      tool("y", { _meta: { [MARK]: "yes" } }),
+      tool("one", { _meta: { [MARK]: 1 } }),
+      tool("nil", { _meta: { [MARK]: null } }),
+      tool("f", { _meta: { [MARK]: false } }),
+      tool("other", { _meta: { other: true } }),
+      tool("plain"),
+      tool("gone", { _meta: { [MARK]: true } })
+    ]])
+  const marked = await loaded([server("s", definitions(), { marked: true, tools: { gone: "deny" } })])
+  expect(flags(marked)).toEqual([["s.f", "none"], ["s.nil", true], ["s.one", true], ["s.other", "none"], ["s.plain", "none"], ["s.t", true], ["s.y", true]])
+  expect(marked.refused).toEqual([])
+  // Without marked, the same definitions: no tool is gated.
+  const unmarked = await loaded([server("s", definitions(), { tools: { gone: "deny" } })])
+  expect(flags(unmarked)).toEqual([["s.f", "none"], ["s.nil", "none"], ["s.one", "none"], ["s.other", "none"], ["s.plain", "none"], ["s.t", "none"], ["s.y", "none"]])
+  expect(unmarked.refused).toEqual([])
+  const off = await loaded([server("s", definitions(), { marked: false })])
+  expect(flags(off).filter(([, flag]) => flag !== "none")).toEqual([])
+  // ask with a mark of false: the setting still gates it.
+  const asked = await loaded([server("s", served([[tool("f", { _meta: { [MARK]: false } })]]), { marked: true, approval: "ask" })])
+  expect(flags(asked)).toEqual([["s.f", true]])
 })
 
 // The bounds

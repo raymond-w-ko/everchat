@@ -66,7 +66,7 @@ import { toCodemodeIdentifier } from "./codemode/identifier.ts"
 import type { Declaration, JsonSchema } from "./head.ts"
 import { part } from "./limit.ts"
 import { Memory } from "./memory.ts"
-import { Store, type StoreError } from "./store.ts"
+import { type Approval, Store, type StoreError } from "./store.ts"
 
 // Declarations
 // ------------
@@ -243,9 +243,74 @@ export class Shortened {
 // what the program gave, one with an `inputSchema` gets `[object]`. So a
 // later run of a recorded call is `call(name, JSON.parse(input), caller)`
 // for every function.
+//
+// `approval`: true for a function that needs a person's yes before each
+// run. A program's call of it does not run: the sandbox records the call
+// and gives the program `pending(n)` (packages/codemode/src/calls.ts,
+// `invoke`). It is not in the declaration, so the head and its bytes do not
+// change with a setting.
 export interface Entry {
   readonly declaration: Declaration
   readonly run: (args: ReadonlyArray<unknown>, caller: Caller) => Effect.Effect<unknown, FunctionError>
+  readonly approval?: boolean
+}
+
+// What a program gets for a call that waits for a person's yes or no, as
+// the approval `approval` (the store's `pendCall`): the call did not run.
+export const pending = (approval: number) => ({
+  pending: approval,
+  note: "This call did not run. It waits for a person's yes or no, as approval " + approval +
+    ". Go on without its result: it comes in a later turn if the person says yes."
+})
+
+// The most characters of a call's input in the note of its approval.
+export const WAITS_INPUT = 500
+
+// The note that the log keeps of a call that waits, after its program
+// (turn.ts): its approval's number, its function and its input as
+// `shownInput` gives it (no outer brackets, at most WAITS_INPUT characters,
+// then each hidden code point as its escape, `visible`).
+export const waits = (approval: Approval): string =>
+  "Approval " + approval.id + " waits for a person's yes or no: " + approval.fn + "(" + shownInput(approval.input) + "). The call did not run."
+
+// A text of a model or a server as a person reads it (the terminal's
+// lines of an approval, and the notes of an approval through `shownInput`),
+// so that the person sees every character of it and its order. Each code point that
+// draws as nothing, or that can move the cursor, change the order on the
+// screen or hide a part, is an escape: those of the General_Category Cc
+// (C0, DEL, C1), Cf (the bidi controls, the zero-width ones, U+FEFF, the
+// soft hyphen, the tags), Cs (a surrogate with no pair), Co (private use),
+// Cn (unassigned), Zl and Zp (U+2028, U+2029), and each one with the
+// property Default_Ignorable_Code_Point (the variation selectors, the
+// fillers such as U+3164 and U+115F, U+034F). The match is by code point.
+// The escape: below U+0100 `\x1b`, else `\u{202e}` (small letters, no
+// leading zero). A line end is one too: such a text is on one line.
+//
+// Shown as they are: the spaces of Zs, a mark that joins a letter, and the
+// letters of a script written from right to left (their order on the
+// screen is the terminal's). An emoji that needs U+FE0F or U+200D is shown
+// in parts, with the escapes between: the text is exact before it is
+// pretty.
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu
+
+export const visible = (text: string): string =>
+  text.replace(HIDDEN, (one) => {
+    const code = one.codePointAt(0)!
+    return code < 0x100 ? "\\x" + code.toString(16).padStart(2, "0") : "\\u{" + code.toString(16) + "}"
+  })
+
+// A call's input as the notes of its approval show it (`waits`, and the
+// messages of approval.ts): with no outer brackets, at most WAITS_INPUT
+// characters (a cut ends with "…", and never parts a pair of surrogates),
+// then through `visible`: the cut first, then the escapes, so each note
+// has the arguments with the escapes for every reader (the terminal, a
+// page, the model). The call's row keeps its `input` exact.
+export const shownInput = (input: string): string => {
+  const open = input[0]
+  const bare = input.length >= 2 && ((open === "{" && input.endsWith("}")) || (open === "[" && input.endsWith("]"))) ? input.slice(1, -1) : input
+  // A well-formed text has a high surrogate only before its low one.
+  const code = bare.charCodeAt(WAITS_INPUT - 1)
+  return bare.length <= WAITS_INPUT ? visible(bare) : visible(bare.slice(0, code >= 0xd800 && code <= 0xdbff ? WAITS_INPUT - 1 : WAITS_INPUT)) + "…"
 }
 
 // Arguments
@@ -279,6 +344,11 @@ export class Functions extends Context.Service<Functions, {
   readonly declarations: ReadonlyArray<Declaration>
   // The functions that a program can call.
   readonly names: ReadonlyArray<string>
+  // The names of the functions that need a person's yes before each run
+  // (`Entry.approval`): a program's call of one does not run, and waits
+  // (packages/codemode/src/calls.ts, `invoke`). `call` runs them as any
+  // other: the run after a yes uses it.
+  readonly approval: ReadonlySet<string>
   // Runs one function with the list of its arguments (`Entry`). A result
   // must be a JSON value, or a `Shortened`: its row keeps `whole`, and the
   // program gets `given`.
@@ -327,9 +397,11 @@ export const make = (declarations: ReadonlyArray<Declaration>, entries: Readonly
   }
   const names: ReadonlyArray<string> = declarations.map((one) => one.name)
   const byName = new Map(entries.map((one) => [one.declaration.name, one.run]))
+  const approval: ReadonlySet<string> = new Set(entries.filter((one) => one.approval === true).map((one) => one.declaration.name))
   return Functions.of({
     declarations,
     names,
+    approval,
     call: (name, args, caller) => {
       const found = byName.get(name)
       return found === undefined ? Effect.fail(new FunctionError({ message: "No function " + name + "." })) : found(args, caller)
@@ -377,7 +449,28 @@ export const core = Effect.gen(function*() {
 
   // A call's output, from the store: the whole, or the part from `from` to
   // before `to` (`part`, limit.ts). It reads and writes no file: `read`
-  // gives the whole text too, for a layer that keeps a copy of it.
+  // gives the whole text too, for a layer that keeps a copy of it. A call
+  // that waited for approval (`pending`) has the output of its run after a
+  // yes, which its approval's row keeps (approval.ts); before the run's
+  // end, or after a no or an expiry, it has none.
+  // The output of a pending call's run, or why it has none.
+  const approved = Effect.fnUntraced(function*(id: number) {
+    const found = yield* stored(store.approvalOf(id))
+    if (found._tag === "None") {
+      return yield* new FunctionError({ message: "Call " + id + " waits for approval: it has no result yet." })
+    }
+    const approval = found.value
+    if (approval.status === "no") {
+      return yield* new FunctionError({ message: "Call " + id + " did not run: the person said no to approval " + approval.id + "." })
+    }
+    if (approval.status === "expired") {
+      return yield* new FunctionError({ message: "Call " + id + " did not run: approval " + approval.id + " expired with no answer." })
+    }
+    if (approval.ended === null || approval.output === null) {
+      return yield* new FunctionError({ message: "Call " + id + " waits for approval " + approval.id + ": it has no result yet." })
+    }
+    return approval.output
+  })
   const read = Effect.fnUntraced(function*(args: ReadonlyArray<unknown>) {
     const [id, from, to] = yield* resultArgs(args)
     if (from != null && to != null && from > to) {
@@ -387,7 +480,7 @@ export const core = Effect.gen(function*() {
     if (call._tag === "None") {
       return yield* new FunctionError({ message: "No call " + id + "." })
     }
-    const whole = call.value.output
+    const whole = call.value.status === "pending" ? yield* approved(id) : call.value.output
     if (whole === null) {
       return yield* new FunctionError({ message: "Call " + id + " still runs: it has no result yet." })
     }

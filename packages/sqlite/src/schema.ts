@@ -23,7 +23,7 @@
 
 // The mark of this schema, the file's `pragma user_version`. A file that
 // Effect's migrator made has none (0).
-export const VERSION = 6
+export const VERSION = 7
 
 export const schema: ReadonlyArray<string> = [
   // Each tenant: its UUIDv4, from outside. The local file has one.
@@ -54,7 +54,7 @@ export const schema: ReadonlyArray<string> = [
        id   integer primary key,
        name text    not null unique
      ) strict`,
-  `insert into everchat_kind (id, name) values (1, 'user'), (2, 'asst'), (3, 'tool'), (4, 'echo'), (5, 'work'), (6, 'note')`,
+  `insert into everchat_kind (id, name) values (1, 'user'), (2, 'asst'), (3, 'tool'), (4, 'echo'), (5, 'work'), (6, 'note'), (7, 'late')`,
   `create trigger everchat_kind_no_update before update on everchat_kind
        begin select raise(abort, 'everchat_kind is append only'); end`,
   `create trigger everchat_kind_no_delete before delete on everchat_kind
@@ -163,7 +163,7 @@ export const schema: ReadonlyArray<string> = [
        output    text,
        size      integer,
        shown     integer,
-       status    text    not null check (status in ('running', 'done', 'failed', 'denied', 'cut')),
+       status    text    not null check (status in ('running', 'done', 'failed', 'denied', 'cut', 'pending')),
        pgid      integer,
        launch    integer not null,
        created   integer not null,
@@ -330,6 +330,51 @@ export const schema: ReadonlyArray<string> = [
        begin select raise(abort, 'everchat_event is append only'); end`,
   `create trigger everchat_event_no_delete before delete on everchat_event when exists (select 1 from everchat_chat where id = old.chat)
        begin select raise(abort, 'everchat_event is append only'); end`,
+
+  // Each call that waits for a person's answer, and what became of it, for
+  // ever. `input` is the call's own, the exact call that a yes runs.
+  `create table everchat_approval (
+       chat     integer not null references everchat_chat (id) on delete cascade,
+       n        integer not null,
+       turn     integer not null,
+       call     integer not null,
+       fn       text    not null,
+       input    text    not null,
+       status   text    not null check (status in ('pending', 'yes', 'no', 'expired', 'running', 'done', 'failed', 'cut')),
+       who      text,
+       answer   text,
+       answered integer,
+       output   text,
+       ended    integer,
+       msg      integer,
+       created  integer not null,
+       updated  integer not null,
+       check ((status = 'pending') = (answered is null)),
+       check ((status in ('done', 'failed', 'cut')) = (ended is not null)),
+       check (status <> 'expired' or who is null),
+       primary key (chat, n),
+       unique (chat, call),
+       foreign key (chat, turn) references everchat_turn (chat, n) on delete cascade,
+       foreign key (chat, call) references everchat_call (chat, n) on delete cascade,
+       foreign key (chat, msg) references everchat_msg (chat, i) on delete cascade
+     ) strict`,
+  `create index everchat_approval_pending on everchat_approval (chat, status)`,
+  `create trigger everchat_approval_no_move before update of chat, n on everchat_approval
+       begin select raise(abort, 'everchat_approval keeps its chat and its n'); end`,
+  `create trigger everchat_approval_no_new_call before update of turn, call, fn, input on everchat_approval
+       begin select raise(abort, 'everchat_approval keeps its call as it was recorded'); end`,
+  `create trigger everchat_approval_no_new_answer before update of who, answer, answered on everchat_approval when old.answered is not null
+       begin select raise(abort, 'everchat_approval keeps its answer'); end`,
+  `create trigger everchat_approval_status_order before update of status on everchat_approval
+       when new.status is not old.status
+        and not ((old.status = 'pending' and new.status in ('yes', 'no', 'expired'))
+              or (old.status = 'yes' and new.status = 'running')
+              or (old.status = 'running' and new.status in ('done', 'failed', 'cut')))
+       begin select raise(abort, 'everchat_approval changes its status only in its order'); end`,
+  `create trigger everchat_approval_no_new_msg before update of msg on everchat_approval when old.msg is not null
+       begin select raise(abort, 'everchat_approval keeps its msg'); end`,
+  `create trigger everchat_approval_no_delete before delete on everchat_approval when exists (select 1 from everchat_chat where id = old.chat)
+       begin select raise(abort, 'everchat_approval is kept for ever'); end`,
 
   // For people: the log with kinds as words and times as text. A reader names the chat.
   `create view everchat_msg_read as

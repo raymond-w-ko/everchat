@@ -8,11 +8,11 @@ import { expect, test } from "bun:test"
 import { loadQuickJSWasm } from "./pi/index.ts"
 import { Effect, Exit, Fiber, Layer } from "effect"
 import { newFile, options, PICK, rows } from "@everchat/sqlite/testing"
-import { type Caller, ENGINE_GLOBALS, FunctionError, Functions, INHERITED, make, RESERVED, Shortened } from "@everchat/core/functions"
+import { type Caller, type Declaration, ENGINE_GLOBALS, type Entry, FunctionError, Functions, INHERITED, make, pending, RESERVED, Shortened } from "@everchat/core/functions"
 import { given } from "@everchat/core/limit"
 import { Sandbox, STOPPED } from "@everchat/core/sandbox"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { Store } from "@everchat/core/store"
+import { Store, StoreError } from "@everchat/core/store"
 import { cases, STOP } from "../tests/cases.ts"
 import { inlineLayer } from "./inline.ts"
 
@@ -52,6 +52,7 @@ const fakes = (more: Record<string, Fake> = {}) => {
     Functions.of({
       declarations: Object.keys(table).map((name) => ({ name, signature: "()", description: name })),
       names: Object.keys(table),
+      approval: new Set(),
       call: (name, args, caller) => {
         seen.push({ name, args, caller })
         return table[name]!(args, caller)
@@ -66,9 +67,9 @@ const withSandbox = <A, E>(
   file: string,
   fake: { readonly layer: ReturnType<typeof fakes>["layer"] },
   effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
-  over: { memory?: number; polls?: number } = {}
+  over: { memory?: number; polls?: number } = {},
+  store: ReturnType<typeof storeLayer> = storeLayer(file, options())
 ) => {
-  const store = storeLayer(file, options())
   const sandbox = inlineLayer({ polls: POLLS, ...over, wasm }).pipe(Layer.provide(fake.layer), Layer.provideMerge(store))
   let n = 0
   const body = Effect.gen(function*() {
@@ -170,6 +171,7 @@ const schemaFakes = () => {
         { name: "echo", description: "echo", signature: "(...args: unknown[]): Promise<unknown[]>" }
       ],
       names: Object.keys(table),
+      approval: new Set(),
       call: (name, args) => {
         seen.push({ name, args })
         return table[name]!(args, { turn: 0, program: 0, call: 0 })
@@ -406,4 +408,113 @@ test("inline: the limit of this engine: it blocks its host while a program compu
       if (Exit.isSuccess(exit)) expect(exit.value).toEqual({ output: SPENT, failed: true })
       expect(yield* run("return 1")).toEqual({ output: "1", failed: false })
     }))
+})
+
+// A call that needs approval (calls.ts, the gate in `invoke`)
+// ------------------------------------------------------------
+
+// Functions by the core's `make`, where `send` (a schema function) and
+// `post` (spread) need a person's yes before each run and `echo` does not.
+// `ran` holds the name of each entry's run.
+const gated = () => {
+  const ran: Array<string> = []
+  const entry = (declaration: Declaration, approval: boolean): Entry => ({
+    declaration,
+    run: (args) => Effect.sync(() => (ran.push(declaration.name), args)),
+    ...(approval ? { approval } : {})
+  })
+  const declarations: ReadonlyArray<Declaration> = [
+    { name: "send", description: "send", inputSchema: { type: "object", properties: { to: { type: "string" } } } },
+    { name: "post", description: "post", signature: "(...args: unknown[]): Promise<unknown>" },
+    { name: "echo", description: "echo", signature: "(...args: unknown[]): Promise<unknown[]>" }
+  ]
+  const layer = Layer.succeed(Functions, make(declarations, [entry(declarations[0]!, true), entry(declarations[1]!, true), entry(declarations[2]!, false)]))
+  return { ran, layer }
+}
+
+// One launch with the gated functions; with `broken`, the store's
+// `pendCall` fails, and the rest of the store is the real one.
+const withGated = <A, E>(
+  file: string,
+  fake: ReturnType<typeof gated>,
+  effect: (run: (program: string) => Effect.Effect<{ output: string; failed: boolean }>) => Effect.Effect<A, E, Sandbox | Store>,
+  broken = false
+) => {
+  const real = storeLayer(file, options())
+  const store = broken
+    ? Layer.effect(Store, Effect.gen(function*() {
+      const one = yield* Store
+      return Store.of({ ...one, pendCall: () => Effect.fail(new StoreError({ op: "pendCall", cause: "broken" })) })
+    })).pipe(Layer.provide(real))
+    : real
+  return withSandbox(file, fake, effect, {}, store)
+}
+
+const approvalRows = (file: string) =>
+  rows<{ n: number; turn: number; call: number; fn: string; input: string; status: string; answered: number | null; output: string | null }>(
+    file,
+    "select n, turn, call, fn, input, status, answered, output from everchat_approval order by n"
+  )
+
+test("inline: a gated call does not run: beside another call in Promise.all, the other runs, the program gets pending(n) at once and goes on; the call's row is pending with its end and that text; the approval's row has the call, the name and the exact input", async () => {
+  const file = newFile()
+  const fake = gated()
+  await withGated(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("const [a, b] = await Promise.all([send({ to: 'ann' }), echo(1, 'x')]); return JSON.stringify({ a, b })")).toEqual({
+        output: JSON.stringify({ a: pending(1), b: [1, "x"] }),
+        failed: false
+      })
+    }))
+  expect(fake.ran).toEqual(["echo"])
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "send", input: "[{\"to\":\"ann\"}]", output: JSON.stringify(pending(1)), status: "pending" },
+    { parent: 1, fn: "echo", input: "[1,\"x\"]", output: "[1,\"x\"]", status: "done" }
+  ])
+  expect(rows(file, "select n, status, ended is not null as ended from everchat_call order by n")).toEqual([
+    { n: 1, status: "running", ended: 0 },
+    { n: 2, status: "pending", ended: 1 },
+    { n: 3, status: "done", ended: 1 }
+  ])
+  expect(approvalRows(file)).toEqual([{ n: 1, turn: 1, call: 2, fn: "send", input: "[{\"to\":\"ann\"}]", status: "pending", answered: null, output: null }])
+})
+
+test("inline: two gated calls of one program give two approvals, a schema function's input [object] and a spread one's list; a schema function's gated call with no argument fails as today and makes no approval", async () => {
+  const file = newFile()
+  const fake = gated()
+  await withGated(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("const a = await send({ to: 'bo' }); const b = await post(1, [2], { c: null }); return JSON.stringify([a, b])")).toEqual({
+        output: JSON.stringify([pending(1), pending(2)]),
+        failed: false
+      })
+      expect(yield* run("try { await send() } catch (e) { return 'caught: ' + e.message }")).toEqual({
+        output: "caught: send takes one argument, an object: it was called with none.",
+        failed: false
+      })
+    }))
+  expect(fake.ran).toEqual([])
+  expect(functionRows(file)).toEqual([
+    { parent: 1, fn: "send", input: "[{\"to\":\"bo\"}]", output: JSON.stringify(pending(1)), status: "pending" },
+    { parent: 1, fn: "post", input: "[1,[2],{\"c\":null}]", output: JSON.stringify(pending(2)), status: "pending" },
+    { parent: 4, fn: "send", input: "[]", output: "send takes one argument, an object: it was called with none.", status: "failed" }
+  ])
+  expect(approvalRows(file).map((one) => [one.n, one.call, one.fn, one.input, one.status])).toEqual([
+    [1, 2, "send", "[{\"to\":\"bo\"}]", "pending"],
+    [2, 3, "post", "[1,[2],{\"c\":null}]", "pending"]
+  ])
+})
+
+test("inline: a pendCall that fails gives the program the database's error, and the gated function does not run", async () => {
+  const file = newFile()
+  const fake = gated()
+  await withGated(file, fake, (run) =>
+    Effect.gen(function*() {
+      expect(yield* run("try { await send({ to: 'cy' }) } catch (e) { return 'caught: ' + e.message }")).toEqual({
+        output: "caught: EverChat's database failed (pendCall).",
+        failed: false
+      })
+    }), true)
+  expect(fake.ran).toEqual([])
+  expect(approvalRows(file)).toEqual([])
 })

@@ -41,7 +41,7 @@ import { Context, type Effect, type Option, Schema, type Scope } from "effect"
 // Data
 // ----
 
-export const Kind = Schema.Literals(["user", "asst", "tool", "echo", "work", "note"])
+export const Kind = Schema.Literals(["user", "asst", "tool", "echo", "work", "note", "late"])
 export type Kind = typeof Kind.Type
 
 // The kinds of message. The model reads each message as `<kind>: <text>`.
@@ -52,7 +52,8 @@ export const KINDS = {
   tool: 3, // a program that the model ran
   echo: 4, // that program's result
   work: 5, // an agent's report
-  note: 6 // the program itself
+  note: 6, // the program itself
+  late: 7 // the result of a call that ran after a person's yes
 } as const
 
 // A model choice.
@@ -253,7 +254,7 @@ export interface NewCall {
 }
 
 // How a call ended. `size`: the bytes of the whole result. `shown`: the
-// bytes that its reader got.
+// bytes that its reader got. A call ends `pending` only by `pendCall`.
 export interface CallEnd {
   readonly status: "done" | "failed" | "denied" | "cut"
   readonly output: string
@@ -268,12 +269,78 @@ export interface Call {
   readonly fn: string
   readonly input: string
   readonly output: string | null
-  readonly status: "running" | "done" | "failed" | "denied" | "cut"
+  // `pending`: it waits for a person's answer (an `Approval`); for the
+  // program it has ended, and `output` is what the program got.
+  readonly status: "running" | "done" | "failed" | "denied" | "cut" | "pending"
   readonly size: number | null // the bytes of the whole result
   readonly shown: number | null // the bytes that its reader got
   readonly created: number
   readonly ended: number | null
 }
+
+// The states of an approval. Its only changes: `pending` to `yes`, `no` or
+// `expired`; `yes` to `running`; `running` to `done`, `failed` or `cut`.
+export const ApprovalStatus = Schema.Literals(["pending", "yes", "no", "expired", "running", "done", "failed", "cut"])
+export type ApprovalStatus = typeof ApprovalStatus.Type
+
+// The most time that an approval waits for its answer, in ms: 7 days.
+export const WAIT = 7 * 24 * 60 * 60 * 1000
+
+// A call that waits for a person's answer, and what became of it; kept for
+// ever. `id` is the number that the person answers. `turn`, `fn` and
+// `input` are those of the call's row (`call`): the exact call that a yes
+// runs. `answered` is null exactly while it is `pending` (for `expired`, it
+// is the time of the expiry, and `who` is null); `who` names who answered.
+// `output` and `ended` are the run's, after a yes; `ended` is set exactly
+// for `done`, `failed` and `cut`. `msg` is the first page of the message
+// that told the chat of the end: null until then.
+export interface Approval {
+  readonly id: number
+  readonly turn: number
+  readonly call: number
+  readonly fn: string
+  readonly input: string
+  readonly status: ApprovalStatus
+  readonly who: string | null
+  readonly answer: string | null
+  readonly answered: number | null
+  readonly output: string | null
+  readonly ended: number | null
+  readonly msg: number | null
+  readonly created: number
+  readonly updated: number
+}
+
+// A person's answer to an approval: yes or no, who answered (a text of 1
+// to `WHO_MAX` characters) and what they said with it (at most
+// `ANSWER_MAX` characters; none: null). It is kept as given.
+export interface ApprovalAnswer {
+  readonly yes: boolean
+  readonly who: string
+  readonly text?: string | null | undefined
+}
+
+export const WHO_MAX = 256
+export const ANSWER_MAX = 4096
+
+// What became of an answer. `answered`: the row is now `yes` or `no`, with
+// the answer. `none`: the chat has no such approval. `closed`: the row was
+// not `pending`, and nothing changed. `expired`: the row had waited more
+// than `WAIT`; it is `expired` now, and the answer is not kept.
+export type Answered =
+  | { readonly _tag: "answered"; readonly approval: Approval }
+  | { readonly _tag: "none" }
+  | { readonly _tag: "closed"; readonly approval: Approval }
+  | { readonly _tag: "expired"; readonly approval: Approval }
+
+// How the run of an approved call ended.
+export interface ApprovalEnd {
+  readonly status: "done" | "failed" | "cut"
+  readonly output: string
+}
+
+// The states of an approval whose end the chat is told of (`msg`).
+export const TOLD: ReadonlyArray<ApprovalStatus> = ["no", "expired", "done", "failed", "cut"]
 
 // What one request to a model used, as it is kept.
 export interface UsageRecord {
@@ -447,6 +514,18 @@ export interface Reading {
   calls(turn: number): Effect.Effect<Array<Call>, StoreError>
   call(id: number): Effect.Effect<Option.Option<Call>, StoreError>
 
+  // Approvals. `approvalOf`: the approval of the call `call`.
+  // `approvals`: all, or those in one of `statuses`, in the order of their
+  // ids. `approvalsOf`: those whose call is a function of the program
+  // `program`, in the order of their ids.
+  approval(id: number): Effect.Effect<Option.Option<Approval>, StoreError>
+  approvalOf(call: number): Effect.Effect<Option.Option<Approval>, StoreError>
+  approvals(statuses?: ReadonlyArray<ApprovalStatus>): Effect.Effect<Array<Approval>, StoreError>
+  approvalsOf(program: number): Effect.Effect<Array<Approval>, StoreError>
+  // The approvals whose end the chat has not been told of: `msg` null, in
+  // one of the states `TOLD`; in the order of their ids.
+  untoldApprovals(): Effect.Effect<Array<Approval>, StoreError>
+
   // The usage, newest first, and its sums for each kind of request.
   usage(filter?: UsageFilter): Effect.Effect<Array<UsageRecord>, StoreError>
   readonly usageTotals: Effect.Effect<Array<UsageTotal>, StoreError>
@@ -519,6 +598,35 @@ export class Store extends Context.Service<Store, Reading & {
   endCall(id: number, end: CallEnd): Effect.Effect<void, StoreError>
   // The process group of a shell command, while it runs.
   setCallPgid(id: number, pgid: number): Effect.Effect<void, StoreError>
+  // A function's call that waits for a person's answer: in one
+  // transaction, the approval's row, made from the call's own row (its
+  // turn, its function and its input), and the call's end as `pending`,
+  // with `output(n)` as what the program got; it gives the approval's id
+  // `n`. It fails, and writes nothing, for a call that is not `running`
+  // and for a program (a call with no parent).
+  pendCall(id: number, output: (approval: number) => string): Effect.Effect<number, StoreError>
+
+  // The approvals' changes. Each is one transaction, takes its time from
+  // the clock, and changes a row only from the state that it names.
+  // `answerApproval`: a person's answer to the approval `id` (`Answered`);
+  // a `who` or a `text` out of its bounds fails, and writes nothing.
+  // `expireApprovals`: each `pending` row that has waited more than `WAIT`
+  // becomes `expired` (`answered` is now, `who` null); it gives them.
+  // `startApproval`: a `yes` row becomes `running`, and is given; none
+  // when the row is not `yes`, so a run starts one time.
+  // `endApproval`: a `running` row ends, and is given; none when the row is
+  // not `running`.
+  // `cutApprovals`: each `running` row becomes `cut` with `output`; it gives
+  // them. For a load: a run that an earlier launch left.
+  // `tellApproval`: `msg` is the first page of the message that told the
+  // chat of the row's end. It fails, and writes nothing, for a row that is
+  // not there, not in a state of `TOLD`, or told already.
+  answerApproval(id: number, answer: ApprovalAnswer): Effect.Effect<Answered, StoreError>
+  expireApprovals(): Effect.Effect<Array<Approval>, StoreError>
+  startApproval(id: number): Effect.Effect<Option.Option<Approval>, StoreError>
+  endApproval(id: number, end: ApprovalEnd): Effect.Effect<Option.Option<Approval>, StoreError>
+  cutApprovals(output: string): Effect.Effect<Array<Approval>, StoreError>
+  tellApproval(id: number, msg: number): Effect.Effect<void, StoreError>
 
   // An event's row, with the chat's next event number (its `seq` plus 1),
   // which it gives back; `seq` becomes that number. An event's row belongs

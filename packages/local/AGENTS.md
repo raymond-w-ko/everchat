@@ -50,6 +50,50 @@ What holds for both:
   (`clean` in `packages/local/src/paint.ts`). Use it for every text that you
   show.
 
+The terminal's answers to approvals (`packages/local/src/terminal.ts`;
+pipe mode has no commands, and none of this):
+
+- `/approvals` lists the calls that wait: for each its number, the
+  function, its arguments on one line (cut at 100 characters, with their
+  length) and when it expires; with none, one line says so.
+  `/approvals <n>` shows one whole: every character of its arguments, on
+  as many rows as they need.
+- `/approve <n> [text]` and `/deny <n> [text]` answer it, the rest of the
+  line being the answer's text, as `the person in the terminal` (`WHO`).
+  The number is a whole number of 1 or more, in digits; another, or none,
+  gives the command's usage and asks nothing. The answer's line says what
+  became of it (`Approvals.answer`): a yes, a no, no such approval, answered
+  already (with that answer), expired. Each is a line of the terminal's
+  own, not a message.
+- At each turn's end, when calls wait, one dim line: `1 approval waits:
+  /approvals`, `<k> approvals wait: /approvals`.
+- The terminal calls the service `Approvals` only (no store member of its
+  own), and the commands run in their own fiber: all of it works while a
+  turn runs, as with none.
+- Every text of an approval that the terminal shows (`fn`, the arguments
+  cut and whole, `who`, an answer's text) was written by a model or a
+  server, and the person decides on it. Each code point in it that draws
+  as nothing, or that can move the cursor, change the order on the screen
+  or hide a part, is shown as an escape (`visible`, before `clean`): those
+  of the General_Category `Cc` (C0, DEL, C1), `Cf` (the bidi controls, the
+  zero-width ones, U+FEFF, the soft hyphen, the tags), `Cs` (a surrogate
+  with no pair), `Co`, `Cn`, `Zl` and `Zp` (U+2028, U+2029), and each one
+  with the property `Default_Ignorable_Code_Point` (the variation
+  selectors, the fillers such as U+3164, U+034F), matched by code point.
+  The escape: below U+0100 `\x1b`, else `\u{202e}` (small letters, no
+  leading zero). So the person sees exactly what they approve, and no text
+  can move the cursor or hide a part. Shown as they are: the spaces of
+  `Zs`, a mark that joins a letter, and the letters of a script written
+  from right to left (their order on the screen is the terminal's); an
+  emoji that needs U+FE0F or U+200D is shown in parts, with the escapes
+  between. No other text of the terminal is changed by this. The rule is
+  the core's, in one place: `visible` in `packages/core/src/functions.ts`,
+  which the terminal imports. The notes that the log keeps of an approval
+  (a call that waits, a no, an expiry, the first line of a run's end) have
+  the arguments with the same escapes, from the core (`shownInput`: the
+  cut first, then `visible`), for every reader; the approval's row keeps
+  its `input` exact.
+
 How to test them:
 
 - `packages/local/tests/pipe.test.ts` runs the whole program in pipe mode, as a
@@ -191,6 +235,25 @@ How to test them:
   server that never answers, no client with no server, no child left: of
   a server that starts a helper, and of one that hears neither the end of
   its input nor SIGTERM, at the end, at a signal, and during the load).
+
+## Approvals at a launch
+
+- Each launch of `everchat` (the terminal and pipe mode) builds the
+  approvals in `layer` of `packages/local/src/main.ts`: `Approvals.source`
+  below the turn loop, `Approvals.layer` over it
+  (`packages/core/src/approval.ts`; `packages/core/AGENTS.md`, "Approval").
+  `everchat serve` and `everchat inspect` do not.
+- At its start, after the turn loop's own restart: a run of an approved
+  call that the last launch left at work is `cut` (it may or may not have
+  finished, and it never runs again); each approval past its 7 days
+  expires, with a note in the chat; each yes whose run had not started
+  runs, one time; each no or expiry that the chat was not told of gets its
+  note; and a run that ended and was not told starts its turn.
+- The launch's end cuts a run at work: its row says so, and the next
+  launch tells the chat.
+- A gated function comes from a server whose config sets `approval: "ask"`
+  ("The config file"). The person answers in the terminal ("The terminal
+  and pipe mode": `/approvals`, `/approve`, `/deny`).
 
 ## The inspector
 

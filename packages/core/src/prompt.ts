@@ -66,6 +66,7 @@ Each message has a kind:
 - echo: their results
 - work: an agent's report, starting "[Name]"
 - note: notes from the program itself
+- late: the result of a call that ran after the user approved it
 
 The summaries form a binary tree: each message is compressed into a line (a
 short message is its own line), then adjacent lines are merged in pairs, again

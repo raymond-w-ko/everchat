@@ -81,6 +81,7 @@ const functions = Layer.succeed(
       { name: "nothing", signature: "()", description: "nothing" }
     ],
     names: ["echo", "nothing"],
+    approval: new Set(),
     call: (name, args) =>
       name === "echo" ? Effect.succeed(args) : name === "nothing" ? Effect.void : Effect.fail(new FunctionError({ message: "no such function" }))
   })

@@ -127,6 +127,7 @@ import { Cause, Config, Console, Deferred, Effect, Exit, FileSystem, Layer, Logg
 import { CliConfig, CliError, Command, Flag, GlobalFlag } from "effect/cli"
 import * as fs from "node:fs"
 import * as os from "node:os"
+import { Approvals } from "@everchat/core/approval"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
 import * as Compactor from "@everchat/core/compactor"
@@ -264,7 +265,12 @@ export const layer = (given: {
     const limits = limitLayer({ limit: given.limit }).pipe(Layer.provideMerge(memory))
     const functions = functionsLayer(declarations, { cwd: given.cwd, more: outside.entries }).pipe(Layer.provideMerge(limits))
     const sandbox = threadLayer({ worker: WORKER }).pipe(Layer.provideMerge(functions))
-    return Turns.layer({ head: made }).pipe(Layer.provideMerge(sandbox))
+    // The approvals (approval.ts): their source, the result of a run after
+    // a yes, below the turn loop; the answers and the runs over it. Its
+    // build is a load: a run that a crash left is cut, the expired ones get
+    // their notes, a yes that did not run yet runs.
+    const turns = Turns.layer({ head: made }).pipe(Layer.provide(Approvals.source), Layer.provideMerge(sandbox))
+    return Approvals.layer.pipe(Layer.provideMerge(turns))
   }
   // The shell is built before the load, and so ends after it: its end
   // kills what carries the run tag, and the servers carry it too, so the

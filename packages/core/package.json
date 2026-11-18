@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/turn.ts",
+    "./approval": "./src/approval.ts",
     "./ask": "./src/ask.ts",
     "./cache": "./src/cache.ts",
     "./codemode": "./src/codemode/types.ts",

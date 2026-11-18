@@ -62,9 +62,9 @@ transport. No check of `just check` holds this rule: the reviews do (see
 
 **The load** (`load(servers, options)`): from a list of servers
 (`Server`: a name, a function that makes the SDK's transport, the settings
-`approval` and `tools`) to `Loaded`: `declarations` and `entries`
-(`Outside`: the core's `Entry` with the server, the tool's own name and its
-`_meta`) in one order, and every refusal (`Refused`: the server, the tool,
+`approval` and `tools`, and `marked`) to `Loaded`: `declarations` and
+`entries` (`Outside`: the core's `Entry` with the server, the tool's own
+name and its `_meta`) in one order, and every refusal (`Refused`: the server, the tool,
 a sentence). It never fails, and no server can stop it:
 
 - each server loads under one time limit for its connection, every page
@@ -108,8 +108,22 @@ a sentence). It never fails, and no server can stop it:
   server (256), the first by name. The declaration that the model reads
   holds the shown schemas ("The shown schema"), never the schemas as they
   came (H1);
-- a tool's setting: `deny` leaves it out, `ask` refuses it (approval is
-  not built), `auto` lets it in;
+- a tool's setting (`Setting`: its own in `tools`, else its server's
+  `approval`, else `auto`; a value that is no setting counts as `ask`):
+  `deny` leaves it out with no refusal; `ask` lets it in with
+  `approval: true` on its entry, so a program's call of it does not run
+  and waits for a person's yes (the core's `Entry`; the gate is in
+  `packages/codemode/src/calls.ts`, `invoke`); `auto` lets it in with no
+  flag. The flag is not in the declaration: the head's bytes do not change
+  with a setting;
+- a server that is `marked` (the provider of a hosted deployment sets it;
+  the local connectors do not) also gates a tool whose definition's
+  `_meta` has the own key `io.everchat/approval` (`MARK`) with any value
+  but `false` (`true`, `"yes"`, `1`, `null` all gate), whatever its
+  setting but `deny`, which still leaves it out. Without `marked` the key
+  is not read: a server cannot gate or ungate a tool of the local use by
+  its definitions. The key is read after the definition's checks, which
+  make `_meta` an object or nothing;
 - the list is sorted by name; the core's check of a list (`refusals`)
   runs over the built-in functions (`beside`) and the list; then at most
   `count` functions (100) and at most `budget` characters of their

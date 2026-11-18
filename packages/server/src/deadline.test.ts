@@ -9,9 +9,9 @@
 // A wait for the core's memory lock can be interrupted (memory.ts,
 // `pushWith`; lead, ec-pqhgg): the last two cases measure that. A stopped
 // load whose restart has 12 compactions answered frees the lock as risk 1
-// does, at lock + 6 × store (the compaction writes still queued when the
-// close reaches them are cut), not at 90 s as when the wait could not be
-// cut. Risk 2 is gone: a log that waits behind a compaction's write is cut
+// does, at lock + 6 × store (the turn loop's close cuts the compaction
+// writes still queued as it begins, `Memory.cut`), not at 90 s as when the
+// wait could not be cut. Risk 2 is gone: a log that waits behind a compaction's write is cut
 // at the deadline, writes nothing and gives `ChatBusy`, and the lock is
 // free at the deadline itself.
 //
@@ -36,7 +36,7 @@
 // time of an event of the model.
 
 import { expect, test } from "bun:test"
-import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, Logger, Redacted, Scope, Semaphore, Stream } from "effect"
+import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, Logger, Redacted, Scheduler, Scope, Semaphore, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { Ask } from "@everchat/core/ask"
 import { Cache } from "@everchat/core/cache"
@@ -220,11 +220,19 @@ const build = (m: Model, w: World) =>
   })
 
 // Runs a case over a new file, on Effect's TestClock, with no logger: the
-// host's and the turn loop's lines are not what a case measures.
-const run = <A, E>(body: Effect.Effect<A, E, Chats | Scope.Scope>) => {
+// host's and the turn loop's lines are not what a case measures. `budget`:
+// Effect's `Scheduler.MaxOpsBeforeYield` (none: Effect's own), which decides
+// which of two fibers woken at one instant of the model runs first.
+const run = <A, E>(body: Effect.Effect<A, E, Chats | Scope.Scope>, budget?: number) => {
   const file = newFile()
   return Effect.runPromise(
-    body.pipe(Effect.scoped, Effect.provide(chatsLayer(file)), Effect.provide(TestClock.layer()), Effect.provide(Logger.layer([])))
+    body.pipe(
+      Effect.scoped,
+      budget === undefined ? (effect) => effect : Effect.provideService(Scheduler.MaxOpsBeforeYield, budget),
+      Effect.provide(chatsLayer(file)),
+      Effect.provide(TestClock.layer()),
+      Effect.provide(Logger.layer([]))
+    )
   )
 }
 
@@ -337,8 +345,8 @@ const finish = (m: Model) =>
 
 // One measure: `setup` gives the model's waits; then a message in, from
 // `t0`, after a lock that the case holds until `held` ms (0: none). Gives
-// the times, from `t0`, and the trace.
-const measure = (setup: (b: Built, m: Model, w: World, t0: number) => Effect.Effect<ReadonlyArray<number>, unknown, Scope.Scope>, held = 0) =>
+// the times, from `t0`, and the trace. `budget`: as for `run`.
+const measure = (setup: (b: Built, m: Model, w: World, t0: number) => Effect.Effect<ReadonlyArray<number>, unknown, Scope.Scope>, held = 0, budget?: number) =>
   run(Effect.gen(function*() {
     const m = model()
     const w: World = { compactAt: null, asks: true }
@@ -364,7 +372,7 @@ const measure = (setup: (b: Built, m: Model, w: World, t0: number) => Effect.Eff
       exit,
       trace
     }
-  }))
+  }), budget)
 
 // The bound that a measure shows: at most the page's sum, and within 20 ms
 // of it, so that the case measures what it names.
@@ -455,10 +463,14 @@ const replay = (w: World, compactAt: World["compactAt"]) => (b: Built, m: Model,
     const seq = yield* crashed(b, 12, "\u0001")
     yield* joined(b.channel, seq)
     let restarted = false
+    let reads = 0
     m.wait = (op, start) => {
       if (op === "launch" || op === "count" || start >= t0 + 19_990) return NEARLY
-      if (op === "addEvent") restarted = true
-      return restarted ? fill(t0 + 19_990, start) : 0
+      if (restarted) return fill(t0 + 19_990, start)
+      // The restart's second read of the running turns, the last call before
+      // its `start`: the calls after it take time.
+      if (op === "runningTurns" && ++reads === 2) restarted = true
+      return 0
     }
     return []
   })
@@ -474,18 +486,30 @@ test("risk 1: a load stopped while it replays a restart of 14 large events reads
   )
 }, 20_000)
 
-test("the same stopped load with the 12 compactions of its restart answered: the close cuts the compaction writes that wait for the memory's lock; only the one that takes it as the close begins runs, beside the restarted turn's call: the lock is free at lock + 6 × store (50 s), as in risk 1", async () => {
-  const got = await measure((b, m, w, t0) => replay(w, null)(b, m, w, t0))
-  // The load's call in flight at the deadline ends at 24.989 s, and the
-  // close begins. The compaction write in flight then (19.990 s) frees the
-  // memory's lock at that moment, and the next queued write takes it before
-  // the close reaches the compactions: it runs beside the restarted turn's
-  // `messagesAfter` and costs no time of its own. Every other queued write
-  // is cut: none starts from 25 s on.
-  near(got.freed, 49_984)
-  expect(got.trace).toContain("messagesAfter* 24.989-29.988, transaction* 24.989-29.988, addDiagnostics* 29.988-34.987")
-  expect(got.trace.match(/transaction\* (2[5-9]|[3-9]\d|\d{3,})\./g)).toBeNull()
-}, 20_000)
+// The order of two fibers woken at one instant of the model is the order of
+// Effect's scheduler: the case holds at Effect's own budget of ops before a
+// yield and at others (the diagnosis ec-60ya6, Table 2: HEAD's or the
+// batch's turn.ts without the close's cut fails at each of these but one).
+for (const budget of [undefined, 256, 512, 1024, 2000, 2100]) {
+  test("the same stopped load with the 12 compactions of its restart answered: the close cuts the compaction writes that wait for the memory's lock; only the one that takes it as the close begins runs, beside the restarted turn's call: the lock is free at lock + 6 × store (50 s), as in risk 1" + (budget === undefined ? "" : ", at Effect's MaxOpsBeforeYield " + budget), async () => {
+    const got = await measure((b, m, w, t0) => replay(w, null)(b, m, w, t0), 0, budget)
+    // The load's call in flight at the deadline ends at 24.989 s, and the
+    // close begins: it cuts the turn and the queued compaction writes at once
+    // (`Memory.cut`). The compaction write in flight then (19.990 s) frees
+    // the memory's lock at that moment; the next queued write may take it in
+    // that same instant, before the cut: it runs beside the restarted turn's
+    // `messagesAfter` and costs no time of its own. Every other queued write
+    // is cut: none starts from 25 s on.
+    near(got.freed, 49_984)
+    // Whether that write runs, and where the trace lists it beside the turn's
+    // call, is the order of two events of one instant of the model: either
+    // way, it ends with the turn's call and the close goes on at 29.988 s.
+    expect(got.trace).toContain("messagesAfter* 24.989-29.988")
+    expect(got.trace).toContain("addDiagnostics* 29.988-34.987")
+    expect(got.trace.match(/transaction\* 24\.989-/g)?.length ?? 0).toBeLessThanOrEqual(1)
+    expect(got.trace.match(/transaction\* (2[5-9]|[3-9]\d|\d{3,})\./g)).toBeNull()
+  }, 20_000)
+}
 
 test("risk 2 no more: a log that waits for the memory's own lock behind a compaction's write is cut at the deadline, logs nothing, and the lock is free at 20 s", async () => {
   const got = await measure((b, m, w, t0) =>

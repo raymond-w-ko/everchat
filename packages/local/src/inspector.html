@@ -15,7 +15,7 @@
   --text: #0b0b0b; --text-2: #52514e; --text-3: #7b7a74;
   --cell: #cfcdc5; --hatch: rgba(0, 0, 0, 0.45);
   --view: #6250d6; --on-view: #ffffff;
-  --user: #2a78d6; --asst: #eb6834; --tool: #1baf7a; --echo: #eda100; --work: #e87ba4; --note: #008300;
+  --user: #2a78d6; --asst: #eb6834; --tool: #1baf7a; --echo: #eda100; --work: #e87ba4; --note: #008300; --late: #9a6b16;
   --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
 }
 @media (prefers-color-scheme: dark) {
@@ -25,7 +25,7 @@
     --text: #f0efec; --text-2: #c3c2b7; --text-3: #8f8e86;
     --cell: #55554f; --hatch: rgba(255, 255, 255, 0.55);
     --view: #9085e9; --on-view: #0b0b0b;
-    --user: #3987e5; --asst: #d95926; --tool: #199e70; --echo: #c98500; --work: #d55181; --note: #008300;
+    --user: #3987e5; --asst: #d95926; --tool: #199e70; --echo: #c98500; --work: #d55181; --note: #008300; --late: #b8892e;
   }
 }
 * { box-sizing: border-box; }
@@ -67,9 +67,9 @@ section { margin-bottom: 26px; }
 .tag { display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; white-space: nowrap; color: var(--text-2); background: var(--surface); }
 .tag .dot, .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
 .kind-user { --c: var(--user); } .kind-asst { --c: var(--asst); } .kind-tool { --c: var(--tool); }
-.kind-echo { --c: var(--echo); } .kind-work { --c: var(--work); } .kind-note { --c: var(--note); }
+.kind-echo { --c: var(--echo); } .kind-work { --c: var(--work); } .kind-note { --c: var(--note); } .kind-late { --c: var(--late); }
 .tag .dot, .strip .m { background: var(--c, var(--text-3)); }
-.status-done { --c: var(--good); } .status-failed { --c: var(--critical); } .status-stopped, .status-cut, .status-denied { --c: var(--warning); } .status-running { --c: var(--user); }
+.status-done { --c: var(--good); } .status-failed { --c: var(--critical); } .status-stopped, .status-cut, .status-denied { --c: var(--warning); } .status-running { --c: var(--user); } .status-pending { --c: var(--serious); }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-2); font-size: 12.5px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .swatch.built { background: var(--cell); } .swatch.chat { background: var(--view); }
@@ -152,7 +152,7 @@ details[open] > summary { margin-bottom: 6px; }
 // ----
 
 const ROOT = "/" + location.pathname.split("/")[1] + "/"
-const KINDS = { user: "the person", asst: "EverChat", tool: "a program", echo: "a program's result", work: "an agent's report", note: "the program itself" }
+const KINDS = { user: "the person", asst: "EverChat", tool: "a program", echo: "a program's result", work: "an agent's report", note: "the program itself", late: "a result after a person's yes" }
 const TABS = [["memory", "Memory"], ["requests", "Requests"], ["usage", "Usage"], ["diagnostics", "Diagnostics"]]
 const CLIP = 4000 // the most characters of a long text, until the person asks for all
 
@@ -209,7 +209,7 @@ const lasted = (from, to) => {
 const bytes = (text) => new TextEncoder().encode(text).length
 
 const kindTag = (kind) => h("span", { class: "tag kind-" + kind, title: KINDS[kind] || "" }, h("span", { class: "dot" }), kind)
-const MARKS = { done: "✓", failed: "✕", stopped: "■", cut: "✂", denied: "⊘", running: "●" }
+const MARKS = { done: "✓", failed: "✕", stopped: "■", cut: "✂", denied: "⊘", running: "●", pending: "⧗" }
 const statusTag = (status) => h("span", { class: "tag status-" + status }, h("span", { class: "dot" }), (MARKS[status] || "") + " " + status)
 
 // What the person opened, so that a new answer does not close it.

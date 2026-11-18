@@ -12,7 +12,8 @@ import { SqlClient } from "effect/sql"
 import * as Database from "./database.ts"
 import { VERSION } from "./schema.ts"
 import { chatsLayer, chatsLayerNoDatabase, ProcessAlive, readsLayer, storeLayer, storeLayerNoDatabase } from "./sqlite.ts"
-import { Chats, DatabaseVersion, LaunchLive, type NewEvent, NoChat, type Part, Reads, Store, StoreError } from "@everchat/core/store"
+import { TestClock } from "effect/testing"
+import { ANSWER_MAX, type Answered, Chats, DatabaseVersion, LaunchLive, type NewEvent, NoChat, type Part, Reads, type Reading, Store, StoreError, WAIT, WHO_MAX } from "@everchat/core/store"
 
 const launches = (file: string) =>
   rows<{ id: number; pid: number; ended: number | null; why: string | null }>(
@@ -675,6 +676,423 @@ test("the tree by level, the turns, the calls, the usage and the launches are re
     ])
     expect((yield* reads.launches(5)).map((one) => [one.id, one.host, one.cwd, one.version, one.why])).toEqual([[1, "test-host", "/work", "0.0.0-test", "exit"]])
   }))
+})
+
+// Approvals
+// ---------
+
+// A turn with a program and three of its functions (`send` twice and
+// `read`), all running; a second program with one function. Gives their ids.
+const calls = (store: typeof Store.Service) =>
+  Effect.gen(function*() {
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const program = yield* store.startCall({ turn: turn.id, vendorId: "call_1", fn: "run", input: "await send(1)" })
+    const send = yield* store.startCall({ turn: turn.id, parent: program, fn: "send", input: "{\"to\":\"x\",\"text\":\"hi\"}" })
+    const again = yield* store.startCall({ turn: turn.id, parent: program, fn: "send", input: "{\"to\":\"y\"}" })
+    const read = yield* store.startCall({ turn: turn.id, parent: program, fn: "read", input: "{\"path\":\"a\"}" })
+    const other = yield* store.startCall({ turn: turn.id, vendorId: "call_2", fn: "run", input: "await send(2)" })
+    const late = yield* store.startCall({ turn: turn.id, parent: other, fn: "send", input: "{\"to\":\"z\"}" })
+    return { turn: turn.id, program, send, again, read, other, late }
+  })
+
+const callRow = (file: string, n: number) =>
+  rows(file, `select status, output, size, shown, ended is not null as ended from everchat_call where chat = 1 and n = ${n}`)
+
+const approvalCount = (file: string) => rows<{ n: number }>(file, "select count(*) as n from everchat_approval")[0]!.n
+
+test("pendCall: the approval's row takes the call's turn, function and input from the call's row; the call is pending, with its end and the text of output(n); the ids go 1, 2", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* calls(store)
+    const given: Array<number> = []
+    const first = yield* store.pendCall(ids.send, (n) => {
+      given.push(n)
+      return `send waits: approval ${n}`
+    })
+    const second = yield* store.pendCall(ids.late, (n) => `send waits: approval ${n}`)
+    return { ids, first, second, given, approval: yield* store.approval(first), call: yield* store.call(ids.send) }
+  }))
+  expect([got.first, got.second, got.given]).toEqual([1, 2, [1]])
+  const approval = Option.getOrThrow(got.approval)
+  expect(approval).toEqual({
+    id: 1,
+    turn: got.ids.turn,
+    call: got.ids.send,
+    fn: "send",
+    input: "{\"to\":\"x\",\"text\":\"hi\"}",
+    status: "pending",
+    who: null,
+    answer: null,
+    answered: null,
+    output: null,
+    ended: null,
+    msg: null,
+    created: approval.created,
+    updated: approval.created
+  })
+  expect(approval.created).toBeGreaterThan(0)
+  const call = Option.getOrThrow(got.call)
+  expect([call.status, call.output, call.size, call.shown, call.ended]).toEqual(["pending", "send waits: approval 1", 22, 22, approval.created])
+  // The other calls run on.
+  expect(rows(file, "select n, status from everchat_call where chat = 1 order by n")).toEqual([
+    { n: 1, status: "running" },
+    { n: 2, status: "pending" },
+    { n: 3, status: "running" },
+    { n: 4, status: "running" },
+    { n: 5, status: "running" },
+    { n: 6, status: "pending" }
+  ])
+  expect(rows(file, "select n, call, fn, input from everchat_approval where chat = 1 order by n")).toEqual([
+    { n: 1, call: 2, fn: "send", input: "{\"to\":\"x\",\"text\":\"hi\"}" },
+    { n: 2, call: 6, fn: "send", input: "{\"to\":\"z\"}" }
+  ])
+})
+
+test("pendCall: a call that is not running, a program, a call that waits already and a call that is not there are refused with StoreError, and nothing is written", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* calls(store)
+    yield* store.endCall(ids.read, { status: "done", output: "a" })
+    yield* store.pendCall(ids.send, (n) => `waits ${n}`)
+    const tries = [ids.read, ids.program, ids.send, 99]
+    const errors = []
+    for (const id of tries) errors.push(yield* Effect.flip(store.pendCall(id, (n) => `again ${n}`)))
+    return { ids, errors }
+  }))
+  for (const error of got.errors) {
+    expect(error).toBeInstanceOf(StoreError)
+    expect(error.op).toBe("pendCall")
+  }
+  expect(got.errors.map((error) => String(error.cause))).toEqual([
+    `Error: the call ${got.ids.read} is done, not running`,
+    `Error: the call ${got.ids.program} is a program, and only a function's call waits for an answer`,
+    `Error: the call ${got.ids.send} is pending, not running`,
+    "Error: the chat has no call 99"
+  ])
+  expect(approvalCount(file)).toBe(1)
+  expect(callRow(file, got.ids.read)).toEqual([{ status: "done", output: "a", size: 1, shown: 1, ended: 1 }])
+  expect(callRow(file, got.ids.program)).toEqual([{ status: "running", output: null, size: null, shown: null, ended: 0 }])
+  expect(callRow(file, got.ids.send)).toEqual([{ status: "pending", output: "waits 1", size: 7, shown: 7, ended: 1 }])
+})
+
+test("pendCall: both or neither: in a transaction that fails, and with an output that throws, the call stays running and no approval is made; the next pendCall takes id 1", async () => {
+  const file = newFile()
+  const got = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* calls(store)
+    const failed = yield* Effect.flip(store.transaction(Effect.andThen(store.pendCall(ids.send, (n) => `waits ${n}`), Effect.fail("no"))))
+    const thrown = yield* Effect.exit(store.pendCall(ids.send, () => {
+      throw new Error("no text")
+    }))
+    const after = { approvals: yield* store.approvals(), call: yield* store.call(ids.send) }
+    const next = yield* store.pendCall(ids.send, (n) => `waits ${n}`)
+    return { failed, thrown, after, next }
+  }))
+  expect(got.failed).toBe("no")
+  expect(Exit.isFailure(got.thrown) && String(Cause.squash(got.thrown.cause))).toBe("Error: no text")
+  expect(got.after.approvals).toEqual([])
+  expect(Option.getOrThrow(got.after.call).status).toBe("running")
+  expect(Option.getOrThrow(got.after.call).output).toBe(null)
+  expect(got.next).toBe(1)
+  expect(approvalCount(file)).toBe(1)
+})
+
+test("the approvals are read by id, by call, by state and by program, in the order of their ids, on the store and on the reads", async () => {
+  const file = newFile()
+  const ids = await withStore(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* calls(store)
+    yield* store.pendCall(ids.late, (n) => `waits ${n}`)
+    yield* store.pendCall(ids.again, (n) => `waits ${n}`)
+    yield* store.pendCall(ids.send, (n) => `waits ${n}`)
+    return ids
+  }))
+  // The first approval is answered no, as the next bead's member will.
+  write(file, "update everchat_approval set status = 'no', who = 'the person', answered = 9, updated = 9 where chat = 1 and n = 1")
+  const read = (reads: Reading) =>
+    Effect.gen(function*() {
+      const id = (rows: ReadonlyArray<{ readonly id: number }>) => rows.map((row) => row.id)
+      return {
+        one: Option.map(yield* reads.approval(1), (row) => [row.id, row.call, row.status, row.who, row.answered]),
+        none: Option.isNone(yield* reads.approval(4)),
+        byCall: yield* Effect.forEach([ids.send, ids.again, ids.late, ids.read, ids.program], (call) =>
+          Effect.map(reads.approvalOf(call), (row) => Option.getOrNull(Option.map(row, (row) => row.id)))),
+        all: id(yield* reads.approvals()),
+        pending: id(yield* reads.approvals(["pending"])),
+        no: id(yield* reads.approvals(["no"])),
+        both: id(yield* reads.approvals(["no", "pending"])),
+        nothing: id(yield* reads.approvals([])),
+        done: id(yield* reads.approvals(["done"])),
+        program: id(yield* reads.approvalsOf(ids.program)),
+        other: id(yield* reads.approvalsOf(ids.other)),
+        function: id(yield* reads.approvalsOf(ids.send))
+      }
+    })
+  const fromStore = await withStore(file, Store.use(read))
+  const fromReads = await withReads(file, Reads.use(read))
+  expect(fromReads).toEqual(fromStore)
+  expect(fromStore).toEqual({
+    one: Option.some([1, ids.late, "no", "the person", 9]),
+    none: true,
+    byCall: [3, 2, 1, null, null],
+    all: [1, 2, 3],
+    pending: [2, 3],
+    no: [1],
+    both: [1, 2, 3],
+    nothing: [],
+    done: [],
+    program: [2, 3],
+    other: [1],
+    function: []
+  })
+})
+
+// The answer, the 7 days and the run
+// ----------------------------------
+
+// Runs `effect` with the store over `file`, on a test clock that the effect
+// sets (`TestClock.setTime`): the store's members read their time from it.
+const withClock = <A, E>(file: string, effect: Effect.Effect<A, E, Store | TestClock.TestClock>) =>
+  withStore(file, effect.pipe(Effect.provide(TestClock.layer())))
+
+// One program of a turn with `count` functions, all running. Gives their
+// ids, in order.
+const functions = (store: typeof Store.Service, count: number) =>
+  Effect.gen(function*() {
+    const turn = yield* store.startTurn({ pick: PICK, head: "{}", firstMsg: 0 })
+    const program = yield* store.startCall({ turn: turn.id, vendorId: "call_1", fn: "run", input: "await all()" })
+    const ids: Array<number> = []
+    for (let k = 1; k <= count; k++) ids.push(yield* store.startCall({ turn: turn.id, parent: program, fn: "send", input: `{"k":${k}}` }))
+    return ids
+  })
+
+// The row of an answer, or null for `none`.
+const rowOf = (answered: Answered) => (answered._tag === "none" ? null : answered.approval)
+
+// The approval's row as the file has it.
+const approvalRow = (file: string, n: number) =>
+  rows(file, `select status, who, answer, answered, output, ended, msg, updated from everchat_approval where chat = 1 and n = ${n}`)[0]
+
+test("answerApproval: a yes and a no are kept as given (who, answer, answered); a second answer gives closed and the row is as the first left it; a number that the chat has not gives none", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 2)
+    yield* TestClock.setTime(1000)
+    for (const id of ids) yield* store.pendCall(id, (n) => `waits ${n}`)
+    yield* TestClock.setTime(5000)
+    const yes = yield* store.answerApproval(1, { yes: true, who: "Zoë at the desk", text: "Go on ✓" })
+    const no = yield* store.answerApproval(2, { yes: false, who: "Ada" })
+    yield* TestClock.setTime(6000)
+    const again = [
+      yield* store.answerApproval(1, { yes: false, who: "Eve", text: "stop" }),
+      yield* store.answerApproval(2, { yes: true, who: "Eve", text: null })
+    ]
+    const none = yield* store.answerApproval(3, { yes: true, who: "Eve" })
+    return { yes, no, again, none, rows: yield* store.approvals() }
+  }))
+  expect(got.yes._tag).toBe("answered")
+  expect(got.yes).toMatchObject({ approval: { id: 1, status: "yes", who: "Zoë at the desk", answer: "Go on ✓", answered: 5000, updated: 5000, created: 1000 } })
+  expect(got.no).toMatchObject({ _tag: "answered", approval: { id: 2, status: "no", who: "Ada", answer: null, answered: 5000, updated: 5000 } })
+  expect(got.again).toEqual([
+    { _tag: "closed", approval: got.rows[0]! },
+    { _tag: "closed", approval: got.rows[1]! }
+  ])
+  expect(got.rows).toEqual([rowOf(got.yes)!, rowOf(got.no)!])
+  expect(got.none).toEqual({ _tag: "none" })
+  expect(approvalRow(file, 1)).toEqual({ status: "yes", who: "Zoë at the desk", answer: "Go on ✓", answered: 5000, output: null, ended: null, msg: null, updated: 5000 })
+  expect(approvalRow(file, 2)).toEqual({ status: "no", who: "Ada", answer: null, answered: 5000, output: null, ended: null, msg: null, updated: 5000 })
+})
+
+test("answerApproval: an answer at WAIT exactly is kept, and one 1 ms later gives expired: the row is expired at that time, with no who and no answer", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 2)
+    yield* TestClock.setTime(1000)
+    for (const id of ids) yield* store.pendCall(id, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT)
+    const kept = yield* store.answerApproval(1, { yes: true, who: "Ada", text: "in time" })
+    yield* TestClock.setTime(1000 + WAIT + 1)
+    const late = yield* store.answerApproval(2, { yes: true, who: "Ada", text: "too late" })
+    const after = yield* store.answerApproval(2, { yes: true, who: "Ada", text: "again" })
+    return { kept, late, after }
+  }))
+  expect(got.kept).toMatchObject({ _tag: "answered", approval: { id: 1, status: "yes", who: "Ada", answer: "in time", answered: 1000 + WAIT } })
+  expect(got.late).toEqual({ _tag: "expired", approval: expect.objectContaining({ id: 2, status: "expired", who: null, answer: null, answered: 1000 + WAIT + 1 }) })
+  expect(got.after).toEqual({ _tag: "closed", approval: rowOf(got.late)! })
+  expect(approvalRow(file, 2)).toEqual({ status: "expired", who: null, answer: null, answered: 1000 + WAIT + 1, output: null, ended: null, msg: null, updated: 1000 + WAIT + 1 })
+})
+
+test("answerApproval: a who of 0 or 257 characters and a text of 4,097 are refused with StoreError and write nothing; a who of 256 and a text of 4,096 are kept", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 1)
+    yield* store.pendCall(ids[0]!, (n) => `waits ${n}`)
+    const refused = [
+      yield* Effect.flip(store.answerApproval(1, { yes: true, who: "" })),
+      yield* Effect.flip(store.answerApproval(1, { yes: true, who: "w".repeat(WHO_MAX + 1) })),
+      yield* Effect.flip(store.answerApproval(1, { yes: false, who: "Ada", text: "t".repeat(ANSWER_MAX + 1) }))
+    ]
+    const before = yield* store.approval(1)
+    const kept = yield* store.answerApproval(1, { yes: false, who: "w".repeat(WHO_MAX), text: "t".repeat(ANSWER_MAX) })
+    return { refused, before, kept }
+  }))
+  expect(got.refused.map((error) => [error instanceof StoreError, error.op, String(error.cause)])).toEqual([
+    [true, "answerApproval", "Error: who answers is a text of 1 to 256 characters, not 0"],
+    [true, "answerApproval", "Error: who answers is a text of 1 to 256 characters, not 257"],
+    [true, "answerApproval", "Error: an answer's text has at most 4096 characters, not 4097"]
+  ])
+  expect(Option.getOrThrow(got.before).status).toBe("pending")
+  expect(got.kept).toMatchObject({ _tag: "answered", approval: { status: "no", who: "w".repeat(WHO_MAX), answer: "t".repeat(ANSWER_MAX) } })
+})
+
+test("expireApprovals: it takes only the pending rows that have waited more than WAIT, and gives them; a second call gives none", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 3)
+    yield* TestClock.setTime(1000)
+    yield* store.pendCall(ids[0]!, (n) => `waits ${n}`)
+    yield* TestClock.setTime(2000)
+    yield* store.pendCall(ids[1]!, (n) => `waits ${n}`)
+    yield* store.pendCall(ids[2]!, (n) => `waits ${n}`)
+    yield* store.answerApproval(3, { yes: true, who: "Ada" })
+    const id = (rows: ReadonlyArray<{ readonly id: number }>) => rows.map((row) => row.id)
+    yield* TestClock.setTime(1000 + WAIT)
+    const atWait = id(yield* store.expireApprovals())
+    yield* TestClock.setTime(1000 + WAIT + 1)
+    const first = yield* store.expireApprovals()
+    const again = id(yield* store.expireApprovals())
+    yield* TestClock.setTime(2000 + WAIT + 1)
+    const second = yield* store.expireApprovals()
+    const last = id(yield* store.expireApprovals())
+    return { atWait, first, again, second, last, rows: yield* store.approvals() }
+  }))
+  expect(got.atWait).toEqual([])
+  expect(got.first).toEqual([expect.objectContaining({ id: 1, status: "expired", who: null, answered: 1000 + WAIT + 1, updated: 1000 + WAIT + 1 })])
+  expect(got.again).toEqual([])
+  expect(got.second).toEqual([expect.objectContaining({ id: 2, status: "expired", who: null, answered: 2000 + WAIT + 1 })])
+  expect(got.last).toEqual([])
+  expect(got.rows.map((row) => [row.id, row.status])).toEqual([[1, "expired"], [2, "expired"], [3, "yes"]])
+  expect(got.rows.slice(0, 2)).toEqual([...got.first, ...got.second])
+})
+
+test("the run: startApproval gives a yes row one time, and none for each other state; endApproval ends only a running row; cutApprovals takes only running rows", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 7)
+    yield* TestClock.setTime(1000)
+    yield* store.pendCall(ids[0]!, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT)
+    for (const id of ids.slice(1)) yield* store.pendCall(id, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT + 1)
+    // 1 expired, 2 no, 3 to 7 yes; 8 is no approval.
+    yield* store.answerApproval(1, { yes: true, who: "Ada" })
+    yield* store.answerApproval(2, { yes: false, who: "Ada" })
+    for (const n of [3, 4, 5, 6, 7]) yield* store.answerApproval(n, { yes: true, who: "Ada" })
+    const status = (row: Option.Option<{ readonly id: number; readonly status: string }>) => Option.getOrNull(Option.map(row, (row) => [row.id, row.status]))
+    yield* TestClock.setTime(1000 + WAIT + 2)
+    const started = yield* Effect.forEach([3, 3, 4, 5, 6], (n) => Effect.map(store.startApproval(n), status))
+    const others = yield* Effect.forEach([1, 2, 8], (n) => Effect.map(store.startApproval(n), status))
+    yield* TestClock.setTime(1000 + WAIT + 3)
+    // 7 is yes and not running.
+    const notRunning = yield* Effect.forEach([1, 2, 7, 8], (n) => Effect.map(store.endApproval(n, { status: "done", output: "no" }), status))
+    const ended = [
+      yield* store.endApproval(3, { status: "done", output: "sent ✓" }),
+      yield* store.endApproval(4, { status: "failed", output: "the server said no" })
+    ]
+    const twice = yield* Effect.map(store.endApproval(3, { status: "failed", output: "again" }), status)
+    const ranAgain = yield* Effect.map(store.startApproval(3), status)
+    yield* TestClock.setTime(1000 + WAIT + 4)
+    const cut = yield* store.cutApprovals("an earlier launch left the run")
+    const cutAgain = yield* store.cutApprovals("again")
+    return { started, others, notRunning, ended, twice, ranAgain, cut, cutAgain, rows: yield* store.approvals() }
+  }))
+  expect(got.started).toEqual([[3, "running"], null, [4, "running"], [5, "running"], [6, "running"]])
+  expect(got.others).toEqual([null, null, null])
+  expect(got.notRunning).toEqual([null, null, null, null])
+  expect(got.ended.map((row) => Option.getOrThrow(row))).toEqual([
+    expect.objectContaining({ id: 3, status: "done", output: "sent ✓", ended: 1000 + WAIT + 3, updated: 1000 + WAIT + 3, who: "Ada" }),
+    expect.objectContaining({ id: 4, status: "failed", output: "the server said no", ended: 1000 + WAIT + 3 })
+  ])
+  expect([got.twice, got.ranAgain]).toEqual([null, null])
+  expect(got.cut.map((row) => [row.id, row.status, row.output, row.ended])).toEqual([
+    [5, "cut", "an earlier launch left the run", 1000 + WAIT + 4],
+    [6, "cut", "an earlier launch left the run", 1000 + WAIT + 4]
+  ])
+  expect(got.cutAgain).toEqual([])
+  expect(got.rows.map((row) => [row.id, row.status, row.output, row.ended])).toEqual([
+    [1, "expired", null, null],
+    [2, "no", null, null],
+    [3, "done", "sent ✓", 1000 + WAIT + 3],
+    [4, "failed", "the server said no", 1000 + WAIT + 3],
+    [5, "cut", "an earlier launch left the run", 1000 + WAIT + 4],
+    [6, "cut", "an earlier launch left the run", 1000 + WAIT + 4],
+    [7, "yes", null, null]
+  ])
+})
+
+test("tellApproval sets msg one time and refuses a pending, yes or running row; untoldApprovals lists by id and loses a row when it is told", async () => {
+  const file = newFile()
+  const got = await withClock(file, Effect.gen(function*() {
+    const store = yield* Store
+    const ids = yield* functions(store, 8)
+    yield* store.append([{ kind: "note", text: "one" }, { kind: "note", text: "two" }])
+    yield* TestClock.setTime(1000)
+    yield* store.pendCall(ids[4]!, (n) => `waits ${n}`) // 1: expired
+    yield* TestClock.setTime(1000 + WAIT)
+    for (const id of [...ids.slice(0, 4), ...ids.slice(5)]) yield* store.pendCall(id, (n) => `waits ${n}`)
+    yield* TestClock.setTime(1000 + WAIT + 1)
+    // 1 expired, 2 pending, 3 yes, 4 running, 5 no, 6 done, 7 failed, 8 cut.
+    yield* store.answerApproval(1, { yes: true, who: "Ada" })
+    for (const n of [3, 4, 6, 7, 8]) yield* store.answerApproval(n, { yes: true, who: "Ada" })
+    yield* store.answerApproval(5, { yes: false, who: "Ada" })
+    for (const n of [6, 7, 8]) yield* store.startApproval(n)
+    yield* store.endApproval(6, { status: "done", output: "ok" })
+    yield* store.endApproval(7, { status: "failed", output: "no" })
+    yield* store.cutApprovals("cut")
+    yield* store.startApproval(4)
+    const id = (rows: ReadonlyArray<{ readonly id: number }>) => rows.map((row) => row.id)
+    const first = id(yield* store.untoldApprovals())
+    const refused = yield* Effect.forEach([2, 3, 4, 9], (n) => Effect.flip(store.tellApproval(n, 0)))
+    yield* TestClock.setTime(1000 + WAIT + 2)
+    yield* store.tellApproval(6, 1)
+    const afterOne = id(yield* store.untoldApprovals())
+    const twice = yield* Effect.flip(store.tellApproval(6, 0))
+    const noMessage = yield* Effect.flip(store.tellApproval(5, 99))
+    for (const n of [1, 5, 7, 8]) yield* store.tellApproval(n, 0)
+    const last = id(yield* store.untoldApprovals())
+    return { first, refused, afterOne, twice, noMessage, last, rows: yield* store.approvals() }
+  }))
+  expect(got.first).toEqual([1, 5, 6, 7, 8])
+  expect(got.refused.map((error) => [error instanceof StoreError, error.op, String(error.cause)])).toEqual([
+    [true, "tellApproval", "Error: the approval 2 is pending, and has no end to tell"],
+    [true, "tellApproval", "Error: the approval 3 is yes, and has no end to tell"],
+    [true, "tellApproval", "Error: the approval 4 is running, and has no end to tell"],
+    [true, "tellApproval", "Error: the chat has no approval 9"]
+  ])
+  expect(got.afterOne).toEqual([1, 5, 7, 8])
+  expect([got.twice.op, String(got.twice.cause)]).toEqual(["tellApproval", "Error: the approval 6 was told already, at message 1"])
+  expect(got.noMessage).toBeInstanceOf(StoreError)
+  // The reference (chat, msg) refuses a message that the chat has not.
+  expect(String((got.noMessage.cause as { readonly cause?: unknown }).cause)).toContain("ConstraintError")
+  expect(got.last).toEqual([])
+  expect(got.rows.map((row) => [row.id, row.status, row.msg])).toEqual([
+    [1, "expired", 0],
+    [2, "pending", null],
+    [3, "yes", null],
+    [4, "running", null],
+    [5, "no", 0],
+    [6, "done", 1],
+    [7, "failed", 0],
+    [8, "cut", 0]
+  ])
+  expect(approvalRow(file, 6)).toMatchObject({ msg: 1, updated: 1000 + WAIT + 2 })
 })
 
 // The tag of a deployment

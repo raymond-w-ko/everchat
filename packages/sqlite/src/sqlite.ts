@@ -49,6 +49,12 @@ import { Clock, Context, Effect, Exit, Layer, Option, Schema } from "effect"
 import { SqlClient, SqlError } from "effect/sql"
 import * as Database from "./database.ts"
 import {
+  ANSWER_MAX,
+  type Answered,
+  type Approval,
+  type ApprovalAnswer,
+  type ApprovalEnd,
+  ApprovalStatus,
   type CallEnd,
   Chats,
   DatabaseVersion,
@@ -76,6 +82,9 @@ import {
   Reads,
   type Reading,
   SENDER_KEY,
+  TOLD,
+  WAIT,
+  WHO_MAX,
   Store,
   StoreError,
   type Turn,
@@ -170,11 +179,28 @@ const CallRow = Schema.Struct({
   fn: Schema.String,
   input: Schema.String,
   output: Schema.NullOr(Schema.String),
-  status: Schema.Literals(["running", "done", "failed", "denied", "cut"]),
+  status: Schema.Literals(["running", "done", "failed", "denied", "cut", "pending"]),
   size: Schema.NullOr(Schema.Int),
   shown: Schema.NullOr(Schema.Int),
   created: Schema.Int,
   ended: Schema.NullOr(Schema.Int)
+})
+
+const ApprovalRow = Schema.Struct({
+  id: Schema.Int,
+  turn: Schema.Int,
+  call: Schema.Int,
+  fn: Schema.String,
+  input: Schema.String,
+  status: ApprovalStatus,
+  who: Schema.NullOr(Schema.String),
+  answer: Schema.NullOr(Schema.String),
+  answered: Schema.NullOr(Schema.Int),
+  output: Schema.NullOr(Schema.String),
+  ended: Schema.NullOr(Schema.Int),
+  msg: Schema.NullOr(Schema.Int),
+  created: Schema.Int,
+  updated: Schema.Int
 })
 
 const SERVED = Schema.Literals(["turn", "compaction", "goal"])
@@ -250,6 +276,7 @@ const decodeEvents = Schema.decodeUnknownEffect(Schema.Array(EventRow))
 const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow))
 const decodeTurnItems = Schema.decodeUnknownEffect(Schema.Array(TurnItemRow))
 const decodeCalls = Schema.decodeUnknownEffect(Schema.Array(CallRow))
+const decodeApprovals = Schema.decodeUnknownEffect(Schema.Array(ApprovalRow))
 const decodeMessages = Schema.decodeUnknownEffect(Schema.Array(MessageRow))
 const decodeNodes = Schema.decodeUnknownEffect(Schema.Array(Node))
 const decodeViews = Schema.decodeUnknownEffect(Schema.Array(ViewRow))
@@ -344,7 +371,15 @@ const bound = (sql: SqlClient.SqlClient) =>
   })
 
 // The tables whose rows the program numbers with `n`, from 1 in each chat.
-type Numbered = "everchat_launch" | "everchat_head" | "everchat_turn" | "everchat_call" | "everchat_image" | "everchat_usage" | "everchat_log"
+type Numbered =
+  | "everchat_launch"
+  | "everchat_head"
+  | "everchat_turn"
+  | "everchat_call"
+  | "everchat_image"
+  | "everchat_usage"
+  | "everchat_log"
+  | "everchat_approval"
 
 // The next `n` of the chat in `table`. Only inside the transaction of the
 // write that takes it.
@@ -375,6 +410,15 @@ const turnRows = (sql: SqlClient.SqlClient, chat: number, rest: string, params: 
 // A call. `rest` goes on as in TURN; the chat is the first parameter.
 const CALL = "select n as id, turn, parent, vendor_id as vendorId, fn, input, output, status, size, shown, created, ended from everchat_call where chat = ?"
 
+// An approval. `rest` goes on as in TURN; the chat is the first parameter.
+const APPROVAL = `select a.n as id, a.turn, a.call, a.fn, a.input, a.status, a.who, a.answer, a.answered, a.output, a.ended, a.msg,
+                         a.created, a.updated
+                  from everchat_approval a
+                  where a.chat = ?`
+
+// The approvals of the chat `chat`; `rest` goes on as in TURN.
+const approvalRows = (sql: SqlClient.SqlClient, chat: number, rest: string, params: ReadonlyArray<string | number>) =>
+  Effect.map(Effect.flatMap(sql.unsafe(APPROVAL + rest, [chat, ...params]), decodeApprovals), (rows): Array<Approval> => [...rows])
 // The reads
 // ---------
 
@@ -566,6 +610,35 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     return Option.fromUndefinedOr(rows[0])
   }, failed("call"))
 
+  const approval = Effect.fn("Store.approval")(function*(n: number) {
+    return Option.fromUndefinedOr((yield* approvalRows(sql, id, " and a.n = ?", [n]))[0])
+  }, failed("approval"))
+
+  const approvalOf = Effect.fn("Store.approvalOf")(function*(call: number) {
+    return Option.fromUndefinedOr((yield* approvalRows(sql, id, " and a.call = ?", [call]))[0])
+  }, failed("approvalOf"))
+
+  // No state given: all of them; an empty list: none.
+  const approvals = Effect.fn("Store.approvals")(function*(statuses?: ReadonlyArray<ApprovalStatus>) {
+    if (statuses === undefined) return yield* approvalRows(sql, id, " order by a.n", [])
+    if (statuses.length === 0) return []
+    return yield* approvalRows(sql, id, ` and a.status in (${statuses.map(() => "?").join(", ")}) order by a.n`, statuses)
+  }, failed("approvals"))
+
+  // The join names the chat on both sides.
+  const approvalsOf = Effect.fn("Store.approvalsOf")(function*(program: number) {
+    return yield* approvalRows(
+      sql,
+      id,
+      " and exists (select 1 from everchat_call c where c.chat = a.chat and c.chat = ? and c.n = a.call and c.parent = ?) order by a.n",
+      [id, program]
+    )
+  }, failed("approvalsOf"))
+
+  const untoldApprovals = Effect.fn("Store.untoldApprovals")(function*() {
+    return yield* approvalRows(sql, id, ` and a.msg is null and a.status in (${TOLD.map(() => "?").join(", ")}) order by a.n`, TOLD)
+  }, failed("untoldApprovals"))
+
   const endedRunTags = Effect.gen(function*() {
     const rows = yield* sql<{ tag: string }>`select distinct run_tag as tag from everchat_launch where chat = ${id} and ended is not null`
     return rows.map((row) => row.tag)
@@ -683,6 +756,11 @@ const reading = (sql: SqlClient.SqlClient, { chat: id, tenant }: Bound): Reading
     turnItems,
     calls,
     call,
+    approval,
+    approvalOf,
+    approvals,
+    approvalsOf,
+    untoldApprovals,
     usage,
     usageTotals,
     launches,
@@ -1056,6 +1134,134 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     yield* sql`update everchat_call set pgid = ${pgid} where chat = ${chat} and n = ${id} and status = 'running'`
   }, failed("setCallPgid"))
 
+  // The approval's `turn`, `fn` and `input` are read from the call's row,
+  // in the transaction that closes it: the call that a yes runs is the
+  // call that was recorded. The close names `running` too, and must close
+  // one row.
+  const pendCall = Effect.fn("Store.pendCall")(function*(id: number, output: (approval: number) => string) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql<{ turn: number; parent: number | null; fn: string; input: string; status: string }>`
+        select turn, parent, fn, input, status from everchat_call where chat = ${chat} and n = ${id}`
+      const row = rows[0]
+      if (row === undefined) return yield* Effect.fail(new Error(`the chat has no call ${id}`))
+      if (row.parent === null) return yield* Effect.fail(new Error(`the call ${id} is a program, and only a function's call waits for an answer`))
+      if (row.status !== "running") return yield* Effect.fail(new Error(`the call ${id} is ${row.status}, not running`))
+      const n = yield* next(sql, chat, "everchat_approval")
+      const at = yield* now
+      yield* sql`insert into everchat_approval ${
+        sql.insert({ chat, n, turn: row.turn, call: id, fn: row.fn, input: row.input, status: "pending", created: at, updated: at })
+      }`
+      const text = output(n).toWellFormed()
+      const size = bytes(text)
+      const closed = yield* sql<{ n: number }>`
+        update everchat_call set status = 'pending', output = ${text}, size = ${size}, shown = ${size}, pgid = null, ended = ${at}
+        where chat = ${chat} and n = ${id} and status = 'running'
+        returning n`
+      yield* only(closed)
+      return n
+    }))
+  }, failed("pendCall"))
+
+  // The approvals' changes. Each reads the time once, and each update names
+  // the state that it changes from, so that a row changes only by rule 2
+  // (docs/schema.html, everchat_approval) even when two writers race. The
+  // rows that an update changed are read again, in the same transaction.
+  const approvalsIn = (ns: ReadonlyArray<number>) =>
+    ns.length === 0 ? Effect.succeed([]) : approvalRows(sql, chat, ` and a.n in (${ns.map(() => "?").join(", ")}) order by a.n`, ns)
+  const oneApproval = (n: number) => Effect.map(approvalRows(sql, chat, " and a.n = ?", [n]), (rows) => Option.fromUndefinedOr(rows[0]))
+
+  // The bounds are checked before the transaction: a value out of them
+  // writes nothing. An approval that has waited more than `WAIT` is expired
+  // here, at its answer, with no timer.
+  const answerApproval = Effect.fn("Store.answerApproval")(function*(n: number, answer: ApprovalAnswer) {
+    const who = answer.who.toWellFormed()
+    const text = answer.text === undefined || answer.text === null ? null : answer.text.toWellFormed()
+    if (who.length < 1 || who.length > WHO_MAX) {
+      return yield* Effect.fail(new Error(`who answers is a text of 1 to ${WHO_MAX} characters, not ${who.length}`))
+    }
+    if (text !== null && text.length > ANSWER_MAX) {
+      return yield* Effect.fail(new Error(`an answer's text has at most ${ANSWER_MAX} characters, not ${text.length}`))
+    }
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const found = yield* oneApproval(n)
+      if (Option.isNone(found)) return { _tag: "none" } as Answered
+      const row = found.value
+      if (row.status !== "pending") return { _tag: "closed", approval: row } as Answered
+      const at = yield* now
+      if (at - row.created > WAIT) {
+        yield* sql`
+          update everchat_approval set status = 'expired', answered = ${at}, updated = ${at}
+          where chat = ${chat} and n = ${n} and status = 'pending'`
+        return { _tag: "expired", approval: Option.getOrThrow(yield* oneApproval(n)) } as Answered
+      }
+      yield* sql`
+        update everchat_approval set status = ${answer.yes ? "yes" : "no"}, who = ${who}, answer = ${text}, answered = ${at}, updated = ${at}
+        where chat = ${chat} and n = ${n} and status = 'pending'`
+      return { _tag: "answered", approval: Option.getOrThrow(yield* oneApproval(n)) } as Answered
+    }))
+  }, failed("answerApproval"))
+
+  const expireApprovals = Effect.fn("Store.expireApprovals")(function*() {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_approval set status = 'expired', answered = ${at}, updated = ${at}
+        where chat = ${chat} and status = 'pending' and ${at} - created > ${WAIT}
+        returning n`
+      return yield* approvalsIn(changed.map((row) => row.n))
+    }))
+  }, failed("expireApprovals"))
+
+  const startApproval = Effect.fn("Store.startApproval")(function*(n: number) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_approval set status = 'running', updated = ${at}
+        where chat = ${chat} and n = ${n} and status = 'yes'
+        returning n`
+      return changed.length === 0 ? Option.none<Approval>() : yield* oneApproval(n)
+    }))
+  }, failed("startApproval"))
+
+  const endApproval = Effect.fn("Store.endApproval")(function*(n: number, end: ApprovalEnd) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_approval set status = ${end.status}, output = ${end.output.toWellFormed()}, ended = ${at}, updated = ${at}
+        where chat = ${chat} and n = ${n} and status = 'running'
+        returning n`
+      return changed.length === 0 ? Option.none<Approval>() : yield* oneApproval(n)
+    }))
+  }, failed("endApproval"))
+
+  const cutApprovals = Effect.fn("Store.cutApprovals")(function*(output: string) {
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const at = yield* now
+      const changed = yield* sql<{ n: number }>`
+        update everchat_approval set status = 'cut', output = ${output.toWellFormed()}, ended = ${at}, updated = ${at}
+        where chat = ${chat} and status = 'running'
+        returning n`
+      return yield* approvalsIn(changed.map((row) => row.n))
+    }))
+  }, failed("cutApprovals"))
+
+  // The message is the chat's own: the reference (chat, msg) refuses
+  // another chat's.
+  const tellApproval = Effect.fn("Store.tellApproval")(function*(n: number, msg: number) {
+    yield* sql.withTransaction(Effect.gen(function*() {
+      const found = yield* oneApproval(n)
+      if (Option.isNone(found)) return yield* Effect.fail(new Error(`the chat has no approval ${n}`))
+      const row = found.value
+      if (!TOLD.includes(row.status)) return yield* Effect.fail(new Error(`the approval ${n} is ${row.status}, and has no end to tell`))
+      if (row.msg !== null) return yield* Effect.fail(new Error(`the approval ${n} was told already, at message ${row.msg}`))
+      const changed = yield* sql<{ n: number }>`
+        update everchat_approval set msg = ${msg}, updated = ${yield* now}
+        where chat = ${chat} and n = ${n} and msg is null and ${sql.in("status", TOLD)}
+        returning n`
+      yield* only(changed)
+    }))
+  }, failed("tellApproval"))
+
   // Events
   // ------
 
@@ -1144,6 +1350,13 @@ const storeOf = Effect.fnUntraced(function*(sql: SqlClient.SqlClient, { chat, te
     startCall,
     endCall,
     setCallPgid,
+    pendCall,
+    answerApproval,
+    expireApprovals,
+    startApproval,
+    endApproval,
+    cutApprovals,
+    tellApproval,
     addEvent,
     addDiagnostics,
     dropDiagnostics

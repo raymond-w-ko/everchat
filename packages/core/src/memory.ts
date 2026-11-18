@@ -35,7 +35,7 @@
 // - Dropped with their features: imports (a second side), billing holds,
 //   the move of a chat to another process, acts. Images are not here yet.
 
-import { Clock, Context, Deferred, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schedule, Schema, Semaphore } from "effect"
 import { page, pages } from "./pages.ts"
 import type { Block } from "./request.ts"
 import { type Kind, type Message, type NewMessage, type NewUsage, Store, type StoreError } from "./store.ts"
@@ -605,6 +605,20 @@ export class Memory extends Context.Service<Memory, {
   // Waits until no compaction runs.
   readonly idle: Effect.Effect<void, StoreError>
 
+  // The close has begun: from this call on no compaction starts, none asks
+  // its compactor and none begins a write, and each one at work is cut, at
+  // its answer or at its write's wait for the lock, also one that a change
+  // was forking as it came. A write that holds the lock ends first; `cut`
+  // returns then, with no compaction at work or still to begin. After it,
+  // `busy` is false, and `idle` waits for no job that was cut or never
+  // started. A second call does the same. It makes no write fail: a `push`
+  // still logs. A node whose compaction was cut stays not built, and the
+  // next launch's load asks for it again (the first change, `pump`). The
+  // turn loop runs it as its own close begins, beside the cut of its turn
+  // (turn.ts): a write that waits does not take the lock while the close
+  // waits for the turn's call.
+  readonly cut: Effect.Effect<void>
+
   // True while a compaction runs, its write too, with no wait. A
   // compaction that was prepared and never started (its change's write
   // failed) is no work.
@@ -641,6 +655,14 @@ export class Memory extends Context.Service<Memory, {
       // failed) is no work. `mem.busy` is the algorithm's, and holds such
       // jobs too.
       let running = 0
+      // The compactions' fibers, and whether the close has begun (`cut`).
+      const jobs = new Set<Fiber.Fiber<void>>()
+      let stopped = false
+      // The forks in flight: a job that `apply` has let start (`stopped`
+      // was false) and whose fiber is not yet in `jobs`; and the signal of
+      // `cut`, done when no fork is in flight.
+      let forking = 0
+      let forked: Deferred.Deferred<void> | null = null
       // When the last compaction ended; the layer's start before any.
       let rested = clock.currentTimeMillisUnsafe()
       // After a job ends, its write too: if none runs now, the memory rests
@@ -773,9 +795,36 @@ export class Memory extends Context.Service<Memory, {
               waiters.clear()
             }))
           wrote?.()
+          // A fork can yield to the scheduler before its fiber is in `jobs`,
+          // and a `cut` can begin there. So the job is marked in flight in
+          // the same step as the test of `stopped` (no yield between them),
+          // and `cut` waits for the mark to go before it cuts `jobs`. Such a
+          // fiber can begin before `cut` reaches it: it asks no compactor and
+          // begins no write once `stopped` is set (`run`).
           for (const job of mem.started.splice(0)) {
+            if (stopped) continue
+            forking += 1
             running += 1
-            yield* Effect.forkIn(run(job), scope)
+            // The job's end, one time: after its write, when it fails, or
+            // when its fiber ends in any way (a cut before it began too).
+            let finished = false
+            const end = () => {
+              if (!finished) {
+                finished = true
+                ended()
+              }
+            }
+            const fiber = yield* Effect.forkIn(run(job, end), scope)
+            jobs.add(fiber)
+            fiber.addObserver(() => {
+              jobs.delete(fiber)
+              end()
+            })
+            forking -= 1
+            if (forking === 0 && forked !== null) {
+              Deferred.doneUnsafe(forked, Exit.void)
+              forked = null
+            }
           }
           yield* wake
           if (then !== null) {
@@ -789,23 +838,17 @@ export class Memory extends Context.Service<Memory, {
       // a line too long adds only a note with its size and where the limit
       // cuts it: never more than the first request and that note. No line:
       // the node is its source, cut.
-      const run = (job: Job): Effect.Effect<void> => {
-        // The job's end, one time: after its write, or when it fails or is
-        // stopped.
-        let finished = false
-        const end = () => {
-          if (!finished) {
-            finished = true
-            ended()
-          }
-        }
+      // `end`: the job's end (in `apply`), one time.
+      const run = (job: Job, end: () => void): Effect.Effect<void> => {
         return Effect.gen(function*() {
           const lines: Array<string> = []
           const used: Array<NewUsage> = []
           let ask = job.blocks
           for (;;) {
             const request = ask
-            const got = yield* Effect.suspend(() => compactor.compact(request, { l: job.l, i: job.i })).pipe(
+            // From the close's begin no compactor is asked: a job that comes
+            // here then waits for its cut.
+            const got = yield* Effect.suspend(() => (stopped ? Effect.never : compactor.compact(request, { l: job.l, i: job.i }))).pipe(
               Effect.tapError((error) => diagnostic(Effect.logWarning(`the compaction of node ${job.l}/${job.i} failed, and is asked again`, error))),
               Effect.retry(retry)
             )
@@ -826,7 +869,10 @@ export class Memory extends Context.Service<Memory, {
             yield* diagnostic(Effect.logWarning(`the compaction of node ${job.l}/${job.i} gave no line: its source is cut`))
           }
           const kept = lines.length === 0 ? cut(flat(job.text)) : lines.reduce((a, b) => (bytes(b) < bytes(a) ? b : a))
+          // From the close's begin no write begins: a job that takes the
+          // lock then writes nothing, and its node stays not built.
           yield* apply(() => {
+            if (stopped) return
             mem.journal.usage.push(...used)
             store(mem, [{ l: job.l, i: job.i, text: kept }])
             mem.busy.delete(slot(job.l, job.i))
@@ -918,7 +964,20 @@ export class Memory extends Context.Service<Memory, {
         whole,
         say,
         settle: (upto) => until(() => first(mem) >= upto),
-        idle: until(() => mem.busy.size === 0),
+        idle: until(() => mem.busy.size === 0 || (stopped && jobs.size === 0)),
+        // No job starts from now on, and none asks or begins a write
+        // (`run`). It waits, on its signal, until no fork is in flight
+        // (`apply`); none begins after `stopped`, so `jobs` then holds every
+        // job. All are cut and waited for, then `idle` is woken.
+        cut: Effect.gen(function*() {
+          stopped = true
+          while (forking > 0) {
+            forked ??= Deferred.makeUnsafe<void>()
+            yield* Deferred.await(forked)
+          }
+          yield* Fiber.interruptAll([...jobs])
+          yield* wake
+        }),
         busy: Effect.sync(() => running > 0),
         worked: Effect.sync(() => (running > 0 ? clock.currentTimeMillisUnsafe() : rested)),
         view: (upto) => Effect.sync(() => blocks(mem, upto ?? mem.count, mem.view.parts)),

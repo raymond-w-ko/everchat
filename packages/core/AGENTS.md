@@ -90,6 +90,140 @@ and the view that each request shows the model), and the prompt-cache rule in
 When a library replaces code that these depend on, make sure the behavior
 stays the same, and test it.
 
+The close of the turn loop's layer (`Turns.layer`) first cuts the turn that
+runs and the memory's compactions at one time (`Memory.cut`): no compaction
+starts from then on, and a compaction's write that waits for the memory's
+lock is cut as the close begins, not after the turn's call in flight. A
+write that holds the lock ends first. A node whose compaction was cut stays
+not built, and the next launch's load asks for it again.
+
+## A message from outside a turn: the source
+
+The turn loop (`packages/core/src/turn.ts`) has one way in besides the
+person's message: a source (`Source`, a seam), whose message starts a turn
+of its own and never steers a turn that runs. Its first user is the result
+of a call that ran after a person's yes (the kind `late`); the wake-ups
+will be the second. The core knows only a kind, a text and a write: no
+timer, no table and no approval.
+
+- The shape: `Source { next }` gives an `Offer { kind, text, write }` or
+  null. The kind is a key of `HEADS` but `user` and `work` (today `late`
+  alone); another is a defect. A host with more than one source gives one
+  `Source` that asks them in its own order. The source decides before
+  `next` returns; its `write` only marks its own row.
+- Who asks, and when: the loop, under its lock, at two places. At a
+  turn's end, done or failed, when no message of the person waits (a
+  message that waits starts its turn first, or waits for the person after
+  a failure); and in `Turns.ready`, which the source's owner calls when it
+  has something: with no turn running the offer starts its turn at once;
+  while one runs it does nothing, and that turn's end asks. Not after a
+  stop: the offer waits for the next end or the next `ready`.
+- One transaction holds the offer's message (its pages and their `message`
+  events), the new turn and its `start`, and the source's `write` with the
+  message's first page and that turn. A failed write fails it all, and
+  stops the memory for the launch, as every failed write does.
+- The turn's first item takes the messages after `taken` of the kinds of
+  `HEADS` (`user`, `work`, `late`), in one block under the header of the
+  kind of the turn's first message (`HEAD`, `LATE`); a message of another
+  kind is given as `<kind>: <text>`. A turn that the person's message
+  starts is as before, byte for byte. Only `user` and `work` steer a turn.
+- What a chat with no source pays: one `Effect.serviceOption` at the
+  layer's build (`Turns.layer` needs nothing more), and one test at each
+  turn's end; `ready` does nothing.
+
+Two notes that approval needs, both written by the turn loop, which alone
+writes a message with its event:
+
+- After each program, in the transaction that logs its `tool` and `echo`
+  and after them: one `note` for each call of it that waits for a person's
+  yes or no (`store.approvalsOf(<the program's call>)`, in the order of the
+  approvals' numbers). The text is `waits(approval)` (`functions.ts`, beside
+  `pending`): `Approval <n> waits for a person's yes or no: <fn>(<input>).
+  The call did not run.`, the input with no outer brackets, cut at 500
+  characters with `…` and never inside a pair. A program with no such call
+  logs what it logged before, with one more read. The notes do not steer
+  the turn: its next request is as for any program, and a later turn reads
+  them in its view.
+- `Turns.note(text, write?)`: a note from outside a turn (a no, an
+  expiry), logged with its `message` event under the loop's lock, whether a
+  turn runs or not; it gives the note's first page. `write`, if given, runs
+  with that first page in the note's one transaction, after its pages and
+  their events, as a source's `write` runs in an offer's: a `write` that
+  fails fails it all, with no page and no event of the note written (and
+  the memory stops for the launch, as after every failed write). It starts
+  no turn and steers none. Not from inside the loop's lock (a source's
+  `write`): it would wait for itself.
+
+## Approval
+
+A function may need a person's yes before each run. The whole path:
+
+- The flag: `Entry.approval` (`functions.ts`); `Functions.approval` holds
+  the names. It is not in the declaration, so the head's bytes do not
+  change with a setting.
+- The gate, in the sandbox's calls (`packages/codemode/src/calls.ts`,
+  `invoke`): a program's call of a gated function does not run. Its row is
+  written, and `store.pendCall` makes, in one transaction, the approval's
+  row from the call's own row (its turn, `fn` and `input`) and ends the
+  call `pending`, with `pending(n)` as what the program got. The turn loop
+  logs the note `waits(approval)` after the program (above).
+- The row (`Approval`, `store.ts`; the table `everchat_approval`), kept for
+  ever: `pending`, then `yes`, `no` or `expired`; `yes` to `running`;
+  `running` to `done`, `failed` or `cut`. The run is recorded on the
+  approval's row only: the call's row stays `pending`, and `result(<call>)`
+  reads the run's output from the approval (`functions.ts`, `read`); before
+  the run's end, or after a no or an expiry, it is an error that says
+  which. `msg` is the first page of the message that told the chat of the
+  end, set one time.
+- The service: `Approvals` (`packages/core/src/approval.ts`, the entry
+  `./approval`). `waiting`: the `pending` rows. `answer(n, { yes, who,
+  text? })`: the store's `answerApproval`; it returns when the answer is
+  recorded (and a no's note is logged). `Approvals.layer` needs `Store`,
+  `Functions` and `Turns`; `Approvals.source` is the turn loop's `Source`,
+  over `Store` and `Limit`, given below `Turns.layer`.
+- The run, after a yes: in one worker, a fiber of the layer's scope, one
+  at a time for a chat, in the order of the answers as the store keeps
+  them. A yes (and a load) only wakes the worker; at each wake, and after
+  each run, it reads `approvals(["yes"])` and runs the row with the least
+  `answered`, and of rows with one time the least number, until no `yes`
+  row is left; a row that `startApproval` refuses is passed. A read that
+  fails, or a start that fails, is a diagnostic, and the worker waits for
+  its next wake (an answer, or the next load). `startApproval` makes the row
+  `running` only from `yes`, so the recorded call runs at most one time,
+  whatever comes between (two answers, a stop, a crash, a second launch).
+  It calls `Functions.call(fn, JSON.parse(input), caller)` with the row's
+  own `fn` and `input`, nothing that a program or a model gave later, and
+  the caller of the recorded call (its turn, its program, its row). Then
+  `endApproval`: `done` with the result's text (a `Shortened`: its
+  `whole`), `failed` with the error's message (a defect as `calls.ts`
+  words it), `cut` when the run is interrupted (the layer's scope ends:
+  `CUT_RUN`). Then `Turns.ready`: a request, not a promise; an offer that
+  it does not take stays untold in the store, and a later turn's end, a
+  later `ready` or the next load takes it.
+- The two messages. A run's end is a message of the kind `late`, from the
+  source: `Approval <n>: <fn>(<input>) ran after a yes by <who>.`, then
+  `Result:` and the output, or `It failed:` and the message, or the cut's
+  sentence; an output over the limit is shown as every result is
+  (`Limit.show`: its head, its tail and the line of `result(<call>)`). It
+  waits until the chat is idle and starts a turn of its own; its `write`
+  sets `msg` (`tellApproval`) in the transaction that logs it. A no and an
+  expiry are a note (`Turns.note`), which starts no turn: `Approval <n>:
+  <who> said no to <fn>(<input>).` with the person's words after it, if
+  any, in quotes; `Approval <n> expired after 7 days with no answer:
+  <fn>(<input>). The call did not run.` Its `write` is `tellApproval` with
+  the note's first page, in the note's one transaction: a row is told
+  exactly when its note is in the log, and a note that fails (a
+  diagnostic) is given by the next load. The input is shown as `waits`
+  shows it.
+- The 7 days (`WAIT`) are checked at a load and at each answer: nothing
+  waits in memory, so an unload, a crash or an upgrade loses no approval.
+  An answer after them is `expired`, and is told as an expiry.
+- A load (the build of `Approvals.layer`), in this order: `cutApprovals`
+  (a run that an earlier launch left is `cut`, never run again); the
+  expiries, each with its note; the worker is woken for the rows still
+  `yes`; each `no` and `expired` row not told yet gets its note; then
+  `Turns.ready`, for a run that ended and was not told.
+
 ## The boundaries of the core
 
 - The core has no runtime API, with one exception: `createHash` from

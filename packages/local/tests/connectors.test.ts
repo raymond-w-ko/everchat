@@ -360,7 +360,7 @@ const run = async (at: ReturnType<typeof place>, address: string, input: string)
 
 // The head of compactor.test.ts's hash case: the bytes of the head of a
 // chat with no server.
-const TODAY = "52cab4d3bef1ebac0fd4125fa6db9eefac15f977867448fcff28e2457136f826"
+const TODAY = "66f19cc5d500aa33a1f4c15c8403653d59fd8ea29858aba17207c2cbddd6346d"
 
 // Writes, at the process's exit, the modules that it loaded.
 const MODULES = path.join(dir, "modules.ts")

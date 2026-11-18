@@ -5,6 +5,7 @@
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Deferred, Effect, Exit, Fiber, Layer, PubSub } from "effect"
+import { pending, waits, WAITS_INPUT } from "./functions.ts"
 import { TestClock } from "effect/testing"
 import * as path from "node:path"
 import { compactor, fakeWire, newFile, options, PICK, reply, rows, wireError } from "@everchat/local/testing"
@@ -14,7 +15,7 @@ import { head } from "./head.ts"
 import { Memory } from "./memory.ts"
 import type { Head, Item, Reply, Request } from "./request.ts"
 import { chatsLayer, storeLayer } from "@everchat/sqlite/bun"
-import { Chats, Store, StoreError } from "./store.ts"
+import { type Approval, Chats, Store, StoreError } from "./store.ts"
 import { limitLayer } from "@everchat/local/limitfile"
 import { DECLARATIONS } from "@everchat/local/localfunctions"
 import { Sandbox } from "./sandbox.ts"
@@ -1243,4 +1244,247 @@ test("a why of 2,000 characters or fewer does not change", async () => {
   assert.equal(whyOf("short"), "short")
   const got = await failedWith("OpenAI answered 400: Too much input.")
   assert.deepStrictEqual({ row: got.row, event: got.event }, { row: "OpenAI answered 400: Too much input.", event: "OpenAI answered 400: Too much input." })
+})
+
+// Approval's notes
+// ----------------
+
+// A program that calls three functions: two wait for a person's yes or no
+// (the store's `pendCall`, as the sandbox's `invoke` does), the second of
+// them first, and one in between runs. `store` is the launch's.
+const pends = (holder: { store: Store["Service"] | null }): Run =>
+  ((_program: string, at?: { readonly turn: number; readonly call: number }) =>
+    Effect.gen(function*() {
+      const store = holder.store!
+      const parent = at!.call
+      const first = yield* store.startCall({ turn: at!.turn, parent, fn: "send", input: "{\"to\":\"x\",\"text\":\"hello\"}" })
+      const ran = yield* store.startCall({ turn: at!.turn, parent, fn: "read", input: "[\"a.md\"]" })
+      yield* store.endCall(ran, { status: "done", output: "a" })
+      const second = yield* store.startCall({ turn: at!.turn, parent, fn: "send", input: "[\"y\"]" })
+      yield* store.pendCall(second, (n) => JSON.stringify(pending(n)))
+      yield* store.pendCall(first, (n) => JSON.stringify(pending(n)))
+      return { output: "sent later", failed: false }
+    }).pipe(Effect.orDie)) as Run
+
+const NOTE_1 = "Approval 1 waits for a person's yes or no: send(\"y\"). The call did not run."
+const NOTE_2 = "Approval 2 waits for a person's yes or no: send(\"to\":\"x\",\"text\":\"hello\"). The call did not run."
+
+test("a program that left two calls waiting: the log is tool, echo, then a note for each, in the order of the approvals, each with its event, in the program's transaction; the turn's next request is as for any program, and the next turn's view has the notes", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "await send()") : says(asked, n === 2 ? "Sent for approval." : "Fine.")))
+  const holder: { store: Store["Service"] | null } = { store: null }
+  await withTurns(file, wire, pends(holder), Effect.gen(function*() {
+    holder.store = yield* Store
+    const turnsService = yield* Turns
+    yield* turnsService.say("send it")
+    yield* turnsService.idle
+    yield* turnsService.say("and now?")
+    yield* turnsService.idle
+  }))
+  assert.deepStrictEqual(messages(file).map((m) => [m.i, m.kind, m.text, m.turn, m.call]), [
+    [0, "user", "send it", null, null],
+    [1, "tool", "await send()", 1, 1],
+    [2, "echo", "sent later", 1, 1],
+    [3, "note", NOTE_1, 1, 1],
+    [4, "note", NOTE_2, 1, 1],
+    [5, "asst", "Sent for approval.", 1, null],
+    [6, "user", "and now?", null, null],
+    [7, "asst", "Fine.", 2, null]
+  ])
+  // Each page has its `message` event, in the log's order.
+  assert.deepStrictEqual(events(file).filter((row) => row.type === "message").map((row) => row.msg), [1, 2, 3, 4, 5, 7])
+  counted(file)
+  // The turn's next request: its items as for any program, with no note.
+  const second = wire.sent[1]!.items
+  assert.deepStrictEqual(second.map((one) => one.kind), ["user", "turn", "back"])
+  assert.deepStrictEqual(second[2], { kind: "back", results: [{ id: "call_1", output: "sent later" }] })
+  assert.ok(!JSON.stringify(second).includes("waits for a person"))
+  // The next turn reads them in its view, as it reads a note of a turn.
+  const third = JSON.stringify(wire.sent[2]!.items[0])
+  assert.ok(third.includes(JSON.stringify("note: " + NOTE_1).slice(1, -1)))
+  assert.ok(third.includes(JSON.stringify("note: " + NOTE_2).slice(1, -1)))
+  assert.deepStrictEqual(rows(file, "select n, call, status from everchat_approval order by n"), [{ n: 1, call: 4, status: "pending" }, { n: 2, call: 2, status: "pending" }])
+})
+
+test("a program with no call that waits: its log and its events are as before, tool and echo and no note", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "await read()") : says(asked, "Read.")))
+  const holder: { store: Store["Service"] | null } = { store: null }
+  // A function that ran, and none that waits.
+  const run = ((_program: string, at?: { readonly turn: number; readonly call: number }) =>
+    Effect.gen(function*() {
+      const ran = yield* holder.store!.startCall({ turn: at!.turn, parent: at!.call, fn: "read", input: "[\"a.md\"]" })
+      yield* holder.store!.endCall(ran, { status: "done", output: "a" })
+      return { output: "a", failed: false }
+    }).pipe(Effect.orDie)) as Run
+  await withTurns(file, wire, run, Effect.gen(function*() {
+    holder.store = yield* Store
+    yield* (yield* Turns).say("read it")
+    yield* (yield* Turns).idle
+  }))
+  assert.deepStrictEqual(messages(file).map((m) => [m.i, m.kind, m.text, m.turn, m.call]), [
+    [0, "user", "read it", null, null],
+    [1, "tool", "await read()", 1, 1],
+    [2, "echo", "a", 1, 1],
+    [3, "asst", "Read.", 1, null]
+  ])
+  assert.deepStrictEqual(events(file).map((row) => [row.n, row.type, row.turn, row.call, row.msg]), [
+    [1, "accepted", null, null, 0],
+    [2, "start", 1, null, null],
+    [3, "call", 1, 1, null],
+    [4, "message", null, null, 1],
+    [5, "message", null, null, 2],
+    [6, "message", null, null, 3],
+    [7, "end", 1, null, null]
+  ])
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_approval"), [{ n: 0 }])
+})
+
+test("the notes of the calls that wait are in the program's own transaction: when the store refuses a note, the program's tool and echo are not logged either, and its call stays running", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => runs(asked, "call_1", "await send()"))
+  const holder: { store: Store["Service"] | null } = { store: null }
+  // The store refuses a write of a page that says that a call waits.
+  const refusing = Layer.effect(
+    Store,
+    Store.useSync((real) =>
+      Store.of({
+        ...real,
+        append: (written, key) =>
+          written.some((message) => message.kind === "note" && message.text.includes("waits for a person"))
+            ? Effect.fail(new StoreError({ op: "append", cause: new Error("refused") }))
+            : real.append(written, key)
+      }))
+  )
+  await withTurns(file, wire, pends(holder), Effect.gen(function*() {
+    holder.store = yield* Store
+    yield* (yield* Turns).say("send it")
+    yield* (yield* Turns).idle
+  }), undefined, { store: refusing })
+  assert.deepStrictEqual(messages(file).map((m) => m.kind), ["user"])
+  assert.deepStrictEqual(rows(file, "select n, parent, status from everchat_call where parent is null"), [{ n: 1, parent: null, status: "running" }])
+  // The two calls wait all the same: the program made them.
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_approval"), [{ n: 2 }])
+  assert.deepStrictEqual(events(file).filter((row) => row.type === "message"), [])
+})
+
+test("Turns.note with no turn running: the note and its message event, and no turn; while a turn runs: the note in the log in the events' order, and the turn's requests as they would be without it", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked, n) => (n === 1 ? runs(asked, "call_1", "return 1") : says(asked, "Done.")))
+  const started = Deferred.makeUnsafe<void>()
+  const gate = Deferred.makeUnsafe<void>()
+  const run: Run = () => Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(gate), { output: "1", failed: false }))
+  const seen: Array<TurnEvent> = []
+  const got = await withTurns(file, wire, run, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    yield* Effect.forkChild(Stream.runForEach(turnsService.events, (event) => Effect.sync(() => seen.push(event))))
+    yield* Effect.sleep("5 millis")
+    const idle = yield* turnsService.note("Approval 3: the person said no.")
+    const quiet = { busy: yield* turnsService.busy, turns: turns(file).length }
+    yield* turnsService.say("go")
+    yield* Deferred.await(started)
+    const during = yield* turnsService.note("Approval 4 expired after 7 days.")
+    yield* Deferred.succeed(gate, undefined)
+    yield* turnsService.idle
+    yield* Effect.sleep("5 millis")
+    return { idle, quiet, during }
+  }))
+  assert.deepStrictEqual([got.idle.i, got.idle.kind, got.idle.text, got.idle.turn], [0, "note", "Approval 3: the person said no.", null])
+  assert.deepStrictEqual(got.quiet, { busy: false, turns: 0 })
+  assert.deepStrictEqual([got.during.i, got.during.kind, got.during.turn], [2, "note", null])
+  assert.deepStrictEqual(messages(file).map((m) => [m.i, m.kind, m.text]), [
+    [0, "note", "Approval 3: the person said no."],
+    [1, "user", "go"],
+    [2, "note", "Approval 4 expired after 7 days."],
+    [3, "tool", "return 1"],
+    [4, "echo", "1"],
+    [5, "asst", "Done."]
+  ])
+  // Each note has its event, in the order of the log; a listener got them.
+  assert.deepStrictEqual(events(file).map((row) => [row.type, row.msg]), [
+    ["message", 0],
+    ["accepted", 1],
+    ["start", null],
+    ["call", null],
+    ["message", 2],
+    ["message", 3],
+    ["message", 4],
+    ["message", 5],
+    ["end", null]
+  ])
+  assert.deepStrictEqual(reported(seen), events(file))
+  counted(file)
+  // One turn; its second request is its first item, its step and the
+  // program's result: the note did not steer it.
+  assert.deepStrictEqual(turns(file), [{ id: 1, status: "done", why: null, first_msg: 1 }])
+  assert.deepStrictEqual(wire.sent[1]!.items.map((one) => one.kind), ["user", "turn", "back"])
+  assert.equal(JSON.stringify(wire.sent[1]!.items[0]), JSON.stringify(wire.sent[0]!.items[0]))
+  assert.ok(!JSON.stringify(wire.sent).includes("expired after 7 days"))
+})
+
+test("Turns.note with a write: the write gets the note's first page, after its pages and their events, in the note's transaction; a write that fails leaves no page of the note, no event and none of its own writes, and the note fails", async () => {
+  const file = newFile()
+  const wire = fakeWire((asked) => says(asked, "Done."))
+  const seen: Array<{ readonly first: number; readonly pages: ReadonlyArray<number>; readonly events: ReadonlyArray<number | null> }> = []
+  const got = await withTurns(file, wire, noPrograms, Effect.gen(function*() {
+    const turnsService = yield* Turns
+    const store = yield* Store
+    // A write that reads what the note wrote, and writes a row of its own.
+    const kept = yield* turnsService.note("Approval 3: the person said no.", (first) =>
+      Effect.gen(function*() {
+        const pages = yield* store.messages(0, 10)
+        const events = yield* store.eventsAfter(0, 10)
+        seen.push({ first: first.i, pages: pages.map((m) => m.i), events: events.map((e) => (e.type === "message" ? e.message.i : null)) })
+        yield* store.setGoal("told " + first.i)
+      }))
+    // A write that writes, then fails.
+    const lost = yield* Effect.exit(turnsService.note("Approval 4 expired after 7 days.", (first) =>
+      Effect.andThen(store.setGoal("lost " + first.i), Effect.fail(new StoreError({ op: "tellApproval", cause: new Error("refused") })))))
+    return { kept, lost }
+  }))
+  assert.deepStrictEqual([got.kept.i, got.kept.kind, got.kept.text], [0, "note", "Approval 3: the person said no."])
+  // The write saw the note's page and its event, with the page it was given.
+  assert.deepStrictEqual(seen, [{ first: 0, pages: [0], events: [0] }])
+  assert.ok(Exit.isFailure(got.lost))
+  // The failed note: no page, no event, and its write's row rolled back.
+  assert.deepStrictEqual(messages(file).map((m) => [m.i, m.kind, m.text]), [[0, "note", "Approval 3: the person said no."]])
+  assert.deepStrictEqual(events(file).map((row) => [row.type, row.msg]), [["message", 0]])
+  assert.deepStrictEqual(rows(file, "select goal from everchat_chat"), [{ goal: "told 0" }])
+  assert.equal(wire.sent.length, 0)
+})
+
+test("waits: the note of a call that waits; its input with no outer brackets, 500 characters whole, 501 cut with …, and a cut never parts a pair", () => {
+  const approval = (input: string): Approval => ({
+    id: 7,
+    turn: 1,
+    call: 2,
+    fn: "mail.send",
+    input,
+    status: "pending",
+    who: null,
+    answer: null,
+    answered: null,
+    output: null,
+    ended: null,
+    msg: null,
+    created: 1,
+    updated: 1
+  })
+  const at = (input: string) => waits(approval(input)).slice("Approval 7 waits for a person's yes or no: mail.send(".length, -"). The call did not run.".length)
+  assert.equal(waits(approval("{\"to\":\"x\"}")), "Approval 7 waits for a person's yes or no: mail.send(\"to\":\"x\"). The call did not run.")
+  assert.equal(at("[1,2]"), "1,2")
+  assert.equal(at("[]"), "")
+  // Not a pair of outer brackets: as it is.
+  assert.equal(at("{\"a\":1]"), "{\"a\":1]")
+  assert.equal(at("\"x\""), "\"x\"")
+  assert.equal(WAITS_INPUT, 500)
+  const whole = "[" + "a".repeat(WAITS_INPUT) + "]"
+  assert.equal(at(whole), "a".repeat(WAITS_INPUT))
+  assert.equal(at("[" + "a".repeat(WAITS_INPUT + 1) + "]"), "a".repeat(WAITS_INPUT) + "…")
+  // A pair across the 500th place goes whole to the next note: cut before it.
+  const across = at("[" + "a".repeat(WAITS_INPUT - 1) + "😀" + "b]")
+  assert.equal(across, "a".repeat(WAITS_INPUT - 1) + "…")
+  assert.ok(across.isWellFormed())
+  // A pair that ends at the 500th place fits.
+  assert.equal(at("[" + "a".repeat(WAITS_INPUT - 2) + "😀" + "b]"), "a".repeat(WAITS_INPUT - 2) + "😀" + "…")
 })

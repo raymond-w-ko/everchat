@@ -81,6 +81,11 @@ test("each kind has its own look, and a person's or a program's text is never re
   expect(read(message("tool", "return a * b // **").render(40))).toEqual(["▸ return a * b // **"])
   expect(read(message("echo", "# not a title").render(40))).toEqual(["◂ # not a title"])
   expect(read(message("note", "Stopped.").render(40))).toEqual(["· Stopped."])
+  // The result of a call that ran after a person's yes: a result, with a
+  // mark of its own, shortened as a result is.
+  expect(read(message("late", "# sent **1**").render(40))).toEqual(["◃ # sent **1**"])
+  expect(LOOKS.late.most).toBe(MOST)
+  expect(read(new Wrapped(numbered(MOST + 1), LOOKS.late).render(40)).length).toBe(MOST)
   expect(read(message("asst", "It is **bold**.").render(40)).map((row) => row.trimEnd())).toEqual(["It is bold."])
   expect(read(message("work", "[CalmOtter] `done`").render(40)).map((row) => row.trimEnd())).toEqual(["[CalmOtter] done"])
   // EverChat's words are cleaned too.
@@ -100,11 +105,12 @@ test("a message as plain text: its mark, its lines under the text, no ink, and n
   expect(written("tool", "const a = 1\nreturn a")).toBe("▸ const a = 1\n  return a")
   expect(written("echo", "a\n\nb")).toBe("◂ a\n  \n  b")
   expect(written("note", "Stopped.")).toBe("· Stopped.")
+  expect(written("late", "sent\nto x")).toBe("◃ sent\n  to x")
   // EverChat's words, and an agent's report, are as the model wrote them.
   expect(written("asst", "It is **bold**.\n\n- one\n- two")).toBe("It is **bold**.\n\n- one\n- two")
   expect(written("work", "[CalmOtter] `done`")).toBe("[CalmOtter] `done`")
   // Every kind is cleaned, and none is shortened.
-  for (const kind of ["user", "asst", "tool", "echo", "work", "note"] as const) {
+  for (const kind of ["user", "asst", "tool", "echo", "work", "note", "late"] as const) {
     expect(written(kind, "a \u001b[31mred\u0007 word\tend")).toEndWith("a red word    end")
   }
   const long = Array.from({ length: 500 }, (_, k) => "row " + k).join("\n")

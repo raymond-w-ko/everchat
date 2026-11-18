@@ -10,12 +10,12 @@ import * as assert from "node:assert/strict"
 import { test } from "node:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { compactor, newFile, options, PICK } from "@everchat/local/testing"
-import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, refusals, RESERVED, RESULT, Shortened, TYPE_MAX, ZOOM } from "./functions.ts"
+import { CALLED, type Caller, DATE, type Declaration, type Entry, Functions, HOSTED, hostedLayer, ENGINE_GLOBALS, INHERITED, make, pending, refusals, RESERVED, RESULT, Shortened, shownInput, TYPE_MAX, visible, waits, WAITS_INPUT, ZOOM } from "./functions.ts"
 import { globalOf, head } from "./head.ts"
 import { given, MAX } from "./limit.ts"
 import { Memory } from "./memory.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { Store } from "./store.ts"
+import { type Approval, Store } from "./store.ts"
 
 // One launch of a host's chat: the store, the memory, and the hosted set.
 const withHosted = <A, E>(file: string, effect: Effect.Effect<A, E, Functions | Store | Memory>) => {
@@ -370,4 +370,47 @@ test("hostedLayer takes the list of the stack's head: HOSTED builds; another lis
   assert.deepEqual(Exit.isSuccess(good) ? good.value : died(good), ["zoom", "date", "result"])
   assert.equal(died(await build([DATE, ZOOM, RESULT])), 'The functions are not the list of the head: The list has "date", "zoom", "result" in this order, and the entries "zoom", "date", "result".')
   assert.equal(died(await build([...HOSTED, SEARCH])), 'The functions are not the list of the head: The list has "docs.search", and no entry.')
+})
+
+test("make: approval holds exactly the names of the entries that say approval: true (not false, not left out); call runs a gated function as any other, for the run after a yes; pending(n) is the value that a program gets", async () => {
+  const ran: Array<string> = []
+  const entry = (declaration: Declaration, approval?: boolean): Entry => ({
+    declaration,
+    run: (args) => Effect.sync(() => (ran.push(declaration.name), args)),
+    ...(approval === undefined ? {} : { approval })
+  })
+  const functions = make([...HOSTED, SEARCH], [entry(ZOOM, true), entry(DATE, false), entry(RESULT), entry(SEARCH, true)])
+  assert.deepEqual([...functions.approval], ["zoom", "docs.search"])
+  assert.deepEqual(make(HOSTED, HOSTED.map((one) => entry(one))).approval, new Set())
+  assert.deepEqual(await Effect.runPromise(functions.call("docs.search", [{ q: "a" }], CALLER)), [{ q: "a" }])
+  assert.deepEqual(ran, ["docs.search"])
+  // The declarations do not change with a setting: the head is the same.
+  assert.deepEqual(functions.declarations, [...HOSTED, SEARCH])
+  assert.deepEqual(pending(3), {
+    pending: 3,
+    note: "This call did not run. It waits for a person's yes or no, as approval 3. Go on without its result: it comes in a later turn if the person says yes."
+  })
+})
+
+
+test("shownInput and waits of arguments with U+E0041, U+009B and U+202E give their escapes and no such code point; arguments longer than WAITS_INPUT are cut first, then escaped, and never inside a pair", () => {
+  const hidden = (text: string) => [...text].filter((one) => one === "\u{e0041}" || one === "\u009b" || one === "\u202e").map((one) => one.codePointAt(0)!.toString(16))
+  const input = "[\"a\u{e0041}b\",\"\u009b31m\",\"\u202eevil\"]"
+  const shown = "\"a\\u{e0041}b\",\"\\x9b31m\",\"\\u{202e}evil\""
+  assert.equal(shownInput(input), shown)
+  assert.deepEqual(hidden(shownInput(input)), [])
+  const approval: Approval = {
+    id: 4, turn: 1, call: 2, fn: "acme.send", input, status: "pending", who: null, answer: null, answered: null,
+    output: null, ended: null, msg: null, created: 0, updated: 0
+  }
+  assert.equal(waits(approval), "Approval 4 waits for a person's yes or no: acme.send(" + shown + "). The call did not run.")
+  assert.deepEqual(hidden(waits(approval)), [])
+  // The cut first: the last character kept is U+009B, whole as its escape.
+  assert.equal(WAITS_INPUT, 500)
+  assert.equal(shownInput("[" + "x".repeat(WAITS_INPUT - 1) + "\u009b" + "y".repeat(10) + "]"), "x".repeat(WAITS_INPUT - 1) + "\\x9b…")
+  // A pair at the cut is left out whole: no half of it is escaped.
+  assert.equal(shownInput("[" + "x".repeat(WAITS_INPUT - 1) + "\u{e0041}" + "y".repeat(10) + "]"), "x".repeat(WAITS_INPUT - 1) + "…")
+  // One rule: shownInput is visible over the cut text.
+  assert.equal(shownInput("[\u2066\u00ad]"), visible("\u2066\u00ad"))
+  assert.equal(shownInput("[\u2066\u00ad]"), "\\u{2066}\\xad")
 })

@@ -18,6 +18,24 @@ The root `AGENTS.md` holds the rules for every file.
   `src/pi/LICENSE.md`). Each change of it is listed in that notice, and
   gets one review from each vendor.
 
+## The gate of approval
+
+`invoke` (`packages/codemode/src/calls.ts`), shared by both engines, is
+the one place where a program's call of a function starts. A function
+whose name is in `Functions.approval` (its entry says `approval: true`)
+needs a person's yes before each run, and a program's call of it never
+runs it. After the call's row is written and its arguments are a list (a
+call whose arguments came in another form fails as any other, and makes no
+approval), the store's `pendCall` closes the row as `pending` with the
+text of `pending(n)` and makes the approval's row, with the row's exact
+`input`, in one transaction; the program gets `pending(n)`
+(`packages/core/src/functions.ts`) at once and goes on, and its other
+calls run. The step is in the part that nothing interrupts, and the name
+never joins `working`. A failure of `pendCall` gives the program the
+database's `FunctionError`, as one of `startCall` does. The gate is before
+`Functions.call`, never inside it: the run after a yes calls it with
+`JSON.parse(input)`.
+
 ## The thread engine
 
 - The worker thread's program is our own `packages/local/src/worker.ts`, the

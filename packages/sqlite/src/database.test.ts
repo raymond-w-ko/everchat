@@ -16,6 +16,7 @@ const withDatabase = <A, E>(file: string, effect: Effect.Effect<A, E, SqlClient.
 
 // The names of the page's block (docs/schema.html, section 8).
 const TABLES = [
+  "everchat_approval",
   "everchat_call",
   "everchat_chat",
   "everchat_event",
@@ -36,6 +37,12 @@ const TABLES = [
 ]
 
 const TRIGGERS = [
+  "everchat_approval_no_delete",
+  "everchat_approval_no_move",
+  "everchat_approval_no_new_answer",
+  "everchat_approval_no_new_call",
+  "everchat_approval_no_new_msg",
+  "everchat_approval_status_order",
   "everchat_call_no_move",
   "everchat_chat_no_delete",
   "everchat_chat_no_move",
@@ -64,6 +71,7 @@ const TRIGGERS = [
 ]
 
 const INDEXES = [
+  "everchat_approval_pending",
   "everchat_call_parent",
   "everchat_call_running",
   "everchat_call_vendor",
@@ -109,15 +117,15 @@ const oldFile = async (mark: number) => {
   return file
 }
 
-test("a new file gets the whole schema of the page, and the mark: 17 tables, 25 triggers, 8 indexes, 1 view, each table strict", async () => {
+test("a new file gets the whole schema of the page, and the mark: 18 tables, 31 triggers, 9 indexes, 1 view, each table strict", async () => {
   const file = newFile()
   await withDatabase(file, Effect.void)
   expect(names(file, "table")).toEqual(TABLES)
   expect(names(file, "trigger")).toEqual(TRIGGERS)
   expect(names(file, "index")).toEqual(INDEXES)
   expect(names(file, "view")).toEqual(["everchat_msg_read"])
-  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([17, 25, 8])
-  expect(VERSION).toBe(6)
+  expect([TABLES.length, TRIGGERS.length, INDEXES.length]).toEqual([18, 31, 9])
+  expect(VERSION).toBe(7)
   expect(rows(file, "pragma user_version")).toEqual([{ user_version: VERSION }])
   const strict = rows<{ name: string; strict: number }>(file, "select name, strict from pragma_table_list where schema = 'main' and type = 'table'")
     .filter((row) => !row.name.startsWith("sqlite_"))
@@ -136,9 +144,11 @@ test("the rule of created and updated, read from the file: each table has update
     return [table, changes, triggers.has(table + "_no_update")]
   })
   expect(seen.filter(([, changes, refuses]) => changes === refuses)).toEqual([])
-  // Twelve tables refuse an update, and five may change.
+  // Twelve tables refuse an update, and six may change (the chat's row
+  // and the five tables of a chat whose rows may change).
   expect(seen.filter(([, , refuses]) => refuses).length).toBe(12)
   expect(seen.filter(([, changes]) => changes).map(([table]) => table)).toEqual([
+    "everchat_approval",
     "everchat_call",
     "everchat_chat",
     "everchat_launch",
@@ -209,14 +219,14 @@ test("a file with tables and no mark, as Effect's migrator left it, is refused, 
   expect(state(file)).toEqual(before)
 })
 
-test("a file of mark 5, the schema before the sender's key, is refused, and not changed; a new file has mark 6", async () => {
+test("a file of mark 6, the schema before the approvals, is refused, and not changed; a new file has mark 7", async () => {
   const file = newFile()
   await withDatabase(file, Effect.void)
-  expect(rows(file, "pragma user_version")).toEqual([{ user_version: 6 }])
-  write(file, "pragma user_version = 5")
+  expect(rows(file, "pragma user_version")).toEqual([{ user_version: 7 }])
+  write(file, "pragma user_version = 6")
   const bytes = fs.readFileSync(file)
   const refused = await refusal(file)
-  expect(refused._tag === "DatabaseVersion" ? [refused.have, refused.want] : null).toEqual([5, 6])
+  expect(refused._tag === "DatabaseVersion" ? [refused.have, refused.want] : null).toEqual([6, 7])
   expect(fs.readFileSync(file).equals(bytes)).toBe(true)
 })
 
@@ -325,6 +335,10 @@ const UUID3 = "x'3333333333333333333333333333333a'"
 // view, so that a move of a row of chat 1 into it finds the row's parents and
 // reaches the guard, not a missing parent; chat 3, of the first tenant, has no
 // rows. Chat 1's launch 3 and turn 3 have no child, as its call 2 has none.
+// Chat 1's launch 4 and its turn 4 hold the approvals: a program (call 4)
+// and three of its functions that wait (calls 5, 6 and 7), whose approvals
+// are 1, pending, 2, answered no, with the message that told the chat of
+// it, and 3, pending, the target of the refused changes of state only.
 const BASE = [
   `insert into everchat_pick (id, vendor, model, effort, speed, created) values (1, 'v', 'm', 'e', 's', 1)`,
   `insert into everchat_tenant (id, created) values (${TENANT}, 1)`,
@@ -346,6 +360,15 @@ const BASE = [
   `insert into everchat_event (chat, n, type, msg, msg_last, created) values (1, 1, 'accepted', 0, 0, 1)`,
   `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created, ended, why) values (1, 3, 9, 'h', '/', '0', 't', 1, 1, 'exit')`,
   `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, ended) values (1, 3, 'done', 1, 1, 0, 1, 1, 1)`,
+  `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created, ended, why) values (1, 4, 8, 'h', '/', '0', 't', 1, 1, 'exit')`,
+  `insert into everchat_turn (chat, n, status, pick, head, first_msg, launch, created, ended) values (1, 4, 'done', 1, 1, 0, 4, 1, 1)`,
+  `insert into everchat_call (chat, n, turn, vendor_id, fn, input, output, status, launch, created, ended) values (1, 4, 4, 'call_c', 'run', 'x', 'ok', 'done', 4, 1, 1)`,
+  `insert into everchat_call (chat, n, turn, parent, fn, input, output, status, launch, created, ended) values (1, 5, 4, 4, 'send', '{"to":"x"}', 'waits as approval 1', 'pending', 4, 1, 1)`,
+  `insert into everchat_call (chat, n, turn, parent, fn, input, output, status, launch, created, ended) values (1, 6, 4, 4, 'send', '{"to":"y"}', 'waits as approval 2', 'pending', 4, 1, 1)`,
+  `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 1, 4, 5, 'send', '{"to":"x"}', 'pending', 1, 1)`,
+  `insert into everchat_approval (chat, n, turn, call, fn, input, status, who, answer, answered, msg, created, updated) values (1, 2, 4, 6, 'send', '{"to":"y"}', 'no', 'the person', 'not now', 2, 0, 1, 2)`,
+  `insert into everchat_call (chat, n, turn, parent, fn, input, output, status, launch, created, ended) values (1, 7, 4, 4, 'send', '{"to":"w"}', 'waits as approval 3', 'pending', 4, 1, 1)`,
+  `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 3, 4, 7, 'send', '{"to":"w"}', 'pending', 1, 1)`,
   `insert into everchat_tenant (id, created) values (${OTHER}, 1)`,
   `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (2, ${OTHER}, ${UUID2}, 1, 1, 1)`,
   `insert into everchat_chat (id, tenant, uuid, pick, created, updated) values (3, ${TENANT}, ${UUID3}, 1, 1, 1)`,
@@ -382,7 +405,7 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a delete of a pick", `delete from everchat_pick`, "everchat_pick is append only"],
   ["a second head with the same hash", `insert into everchat_head (chat, n, hash, body, created) values (1, 2, 'abc', '{}', 2)`, "UNIQUE"],
   ["a change of a head", `update everchat_head set body = '[]'`, "everchat_head is append only"],
-  ["a second kind with the same name", `insert into everchat_kind (id, name) values (7, 'user')`, "UNIQUE"],
+  ["a second kind with the same name", `insert into everchat_kind (id, name) values (8, 'user')`, "UNIQUE"],
   ["a change of a kind", `update everchat_kind set name = 'used'`, "everchat_kind is append only"],
   ["a delete of a kind", `delete from everchat_kind where id = 6`, "everchat_kind is append only"],
 
@@ -435,6 +458,33 @@ const REFUSED: ReadonlyArray<readonly [name: string, statement: string, error: s
   ["a move of a call onto another tenant's call, with or replace", `update or replace everchat_call set chat = 2, n = 1 where chat = 1 and n = 2`, "everchat_call keeps its chat and its n"],
   ["a change of a call's n", `update everchat_call set n = 9 where chat = 1 and n = 2`, "everchat_call keeps its chat and its n"],
   ["a move of a call by the do update of an upsert", `insert into everchat_call (chat, n, turn, parent, fn, input, status, launch, created) values (1, 2, 1, 1, 'shell', '{}', 'running', 1, 1) on conflict (chat, n) do update set chat = 3`, "everchat_call keeps its chat and its n"],
+  ["a pending call with no end", `update everchat_call set status = 'pending' where chat = 1 and n = 1`, "CHECK"],
+
+  ["an approval of a call that is not there", `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 9, 4, 99, 'send', '{}', 'pending', 1, 1)`, "FOREIGN KEY"],
+  ["a second approval of one call", `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 9, 4, 5, 'send', '{}', 'pending', 1, 1)`, "UNIQUE"],
+  ["an approval with an unknown status", `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 9, 4, 4, 'send', '{}', 'lost', 1, 1)`, "CHECK"],
+  ["a pending approval with an answer's time", `update everchat_approval set answered = 2 where chat = 1 and n = 1`, "CHECK"],
+  ["an answered approval with no answer's time", `update everchat_approval set status = 'no' where chat = 1 and n = 1`, "CHECK"],
+  ["an approval that ended with no end", `insert into everchat_approval (chat, n, turn, call, fn, input, status, answered, created, updated) values (1, 9, 4, 4, 'send', '{}', 'done', 2, 1, 1)`, "CHECK"],
+  ["an approval that did not end with an end", `insert into everchat_approval (chat, n, turn, call, fn, input, status, answered, ended, created, updated) values (1, 9, 4, 4, 'send', '{}', 'yes', 2, 2, 1, 1)`, "CHECK"],
+  ["an expired approval that names who answered", `insert into everchat_approval (chat, n, turn, call, fn, input, status, who, answered, created, updated) values (1, 9, 4, 4, 'send', '{}', 'expired', 'the person', 2, 1, 1)`, "CHECK"],
+  ["a move of an approval to another tenant's chat", `update everchat_approval set chat = 2 where chat = 1 and n = 1`, "everchat_approval keeps its chat and its n"],
+  ["a move of an approval to another tenant's chat, with or replace", `update or replace everchat_approval set chat = 2 where chat = 1 and n = 2`, "everchat_approval keeps its chat and its n"],
+  ["a change of an approval's n", `update everchat_approval set n = 9 where chat = 1 and n = 1`, "everchat_approval keeps its chat and its n"],
+  ["a move of an approval by the do update of an upsert", `insert into everchat_approval (chat, n, turn, call, fn, input, status, created, updated) values (1, 1, 4, 5, 'send', '{}', 'pending', 1, 1) on conflict (chat, n) do update set chat = 3`, "everchat_approval keeps its chat and its n"],
+  ["a change of an approval's turn", `update everchat_approval set turn = 1 where chat = 1 and n = 1`, "everchat_approval keeps its call as it was recorded"],
+  ["a change of an approval's call", `update everchat_approval set call = 4 where chat = 1 and n = 1`, "everchat_approval keeps its call as it was recorded"],
+  ["a change of an approval's function", `update everchat_approval set fn = 'shell' where chat = 1 and n = 1`, "everchat_approval keeps its call as it was recorded"],
+  ["a change of an approval's input, the call that a yes runs", `update everchat_approval set input = '{"to":"z"}' where chat = 1 and n = 1`, "everchat_approval keeps its call as it was recorded"],
+  ["a change of who answered, once answered", `update everchat_approval set who = 'someone else' where chat = 1 and n = 2`, "everchat_approval keeps its answer"],
+  ["a change of the answer's text, once answered", `update everchat_approval set answer = 'yes, send it' where chat = 1 and n = 2`, "everchat_approval keeps its answer"],
+  ["a change of the answer's time, once answered", `update everchat_approval set answered = 3 where chat = 1 and n = 2`, "everchat_approval keeps its answer"],
+  ["a pending approval that runs with no yes", `update everchat_approval set status = 'running', answered = 3 where chat = 1 and n = 3`, "everchat_approval changes its status only in its order"],
+  ["a pending approval that is done with no yes", `update everchat_approval set status = 'done', answered = 3, ended = 3 where chat = 1 and n = 3`, "everchat_approval changes its status only in its order"],
+  ["a no that becomes a yes", `update everchat_approval set status = 'yes' where chat = 1 and n = 2`, "everchat_approval changes its status only in its order"],
+  ["a change of the message that told the chat of the end, once set", `update everchat_approval set msg = null where chat = 1 and n = 2`, "everchat_approval keeps its msg"],
+  ["a delete of an approval", `delete from everchat_approval where chat = 1 and n = 1`, "everchat_approval is kept for ever"],
+  ["a delete of a call that an approval names", `delete from everchat_call where chat = 1 and n = 5`, "everchat_approval is kept for ever"],
 
   ["a change of a usage", `update everchat_usage set output = 2`, "usage is append only"],
   ["a usage that served an unknown thing", `insert into everchat_usage (chat, n, served, pick, input, cache_read, cache_write, output, created) values (1, 2, 'chat', 1, 1, 0, 0, 1, 1)`, "CHECK"],
@@ -457,7 +507,12 @@ const ALLOWED = [
   `delete from everchat_log where chat = 1 and created < 2`,
   `update everchat_launch set ended = 2, why = 'exit' where chat = 1 and n = 1`,
   `insert into everchat_launch (chat, n, pid, host, cwd, version, run_tag, created) values (1, 2, 11, 'h', '/', '0', 't', 2)`,
-  `insert into everchat_msg_image (chat, msg, n, image) values (1, 0, 1, 1)`
+  `insert into everchat_msg_image (chat, msg, n, image) values (1, 0, 1, 1)`,
+  // An approval's way, in its order: a yes, the run, its end and its message.
+  `update everchat_approval set status = 'yes', who = 'the person', answered = 3, updated = 3 where chat = 1 and n = 1`,
+  `update everchat_approval set status = 'running', updated = 4 where chat = 1 and n = 1`,
+  `update everchat_approval set status = 'done', output = 'sent', ended = 5, updated = 5 where chat = 1 and n = 1`,
+  `update everchat_approval set msg = 0, updated = 6 where chat = 1 and n = 1`
 ]
 
 test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves the data as it was`, async () => {
@@ -483,11 +538,18 @@ test(`the schema refuses ${REFUSED.length} kinds of bad write, and each leaves t
   expect(failures).toEqual([])
   expect(rows(file, "select text from everchat_msg")).toEqual([{ text: "hello" }])
   expect(rows(file, "select text from everchat_node")).toEqual([{ text: "user: hello" }])
-  expect(rows(file, "select count(*) as n from everchat_launch")).toEqual([{ n: 4 }])
+  expect(rows(file, "select count(*) as n from everchat_launch")).toEqual([{ n: 5 }])
   expect(rows(file, "select chat, name from everchat_view order by chat")).toEqual([{ chat: 1, name: "chat" }, { chat: 2, name: "chat" }])
   expect(rows(file, "select id from everchat_chat order by id")).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
   expect(rows(file, "select msg, n, image from everchat_msg_image order by n")).toEqual([{ msg: 0, n: 0, image: 2 }, { msg: 0, n: 1, image: 1 }])
   expect(rows(file, "select count(*) as n from everchat_event")).toEqual([{ n: 1 }])
+  // The approvals: the first went its way (ALLOWED), the second is as it was.
+  expect(rows(file, "select chat, n, turn, call, fn, input, status, who, answer, answered, output, ended, msg, updated from everchat_approval order by chat, n")).toEqual([
+    { chat: 1, n: 1, turn: 4, call: 5, fn: "send", input: '{"to":"x"}', status: "done", who: "the person", answer: null, answered: 3, output: "sent", ended: 5, msg: 0, updated: 6 },
+    { chat: 1, n: 2, turn: 4, call: 6, fn: "send", input: '{"to":"y"}', status: "no", who: "the person", answer: "not now", answered: 2, output: null, ended: null, msg: 0, updated: 2 },
+    { chat: 1, n: 3, turn: 4, call: 7, fn: "send", input: '{"to":"w"}', status: "pending", who: null, answer: null, answered: null, output: null, ended: null, msg: null, updated: 1 }
+  ])
+  expect(rows(file, "select n, status from everchat_call where chat = 1 and n in (5, 6, 7) order by n")).toEqual([{ n: 5, status: "pending" }, { n: 6, status: "pending" }, { n: 7, status: "pending" }])
 })
 
 // The key of a message's sender (docs/schema.html, everchat_msg): unique in
@@ -550,7 +612,8 @@ const REPLACES: ReadonlyArray<{
     table: "everchat_turn",
     where: "n = 1",
     set: { n: "5" },
-    left: { everchat_turn_item: 0, everchat_call: 0 }
+    // The calls of turn 4 (the approvals') stay; turn 1's two are gone.
+    left: { everchat_turn_item: 0, everchat_call: 4 }
   },
   {
     name: "the schema allows it: a head that no turn names moves, as its delete and an insert each pass",
@@ -579,6 +642,8 @@ const REPLACES: ReadonlyArray<{
   },
   { name: "the delete trigger of a message's image refuses it: an image that a message names", table: "everchat_image", where: "n = 2", refused: "everchat_msg_image is append only" },
   { name: "the delete trigger of a message refuses it: a message", table: "everchat_msg", where: "i = 0", refused: "everchat_msg is append only" },
+  { name: "the delete trigger of an approval refuses it: an approval", table: "everchat_approval", where: "n = 1", refused: "everchat_approval is kept for ever" },
+  { name: "the delete trigger of an approval refuses it: a call that an approval names", table: "everchat_call", where: "n = 5", refused: "everchat_approval is kept for ever" },
   {
     name: "the delete trigger of an event refuses it: an event",
     table: "everchat_event",
@@ -682,9 +747,9 @@ test("one rule, read from the file: each table with a column chat refuses an upd
     })
   )
   expect(failures).toEqual([])
-  // The 13 tables of a chat: chat and the rest of each key (29); the chat's id;
+  // The 14 tables of a chat: chat and the rest of each key (31); the chat's id;
   // its rowid by three names.
-  expect(updates.length).toBe(33)
+  expect(updates.length).toBe(35)
 })
 
 test("the delete of the tenant erases its chat and every row of the chat, and leaves the shared lists", async () => {
@@ -700,7 +765,7 @@ test("the delete of the tenant erases its chat and every row of the chat, and le
   for (const table of TABLES.filter((table) => table !== "everchat_kind" && table !== "everchat_pick")) {
     expect([table, rows(file, `select count(*) as n from ${table}`)]).toEqual([table, [{ n: 0 }]])
   }
-  expect(rows(file, "select count(*) as n from everchat_kind")).toEqual([{ n: 6 }])
+  expect(rows(file, "select count(*) as n from everchat_kind")).toEqual([{ n: 7 }])
   expect(rows(file, "select count(*) as n from everchat_pick")).toEqual([{ n: 1 }])
 })
 

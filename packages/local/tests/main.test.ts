@@ -9,7 +9,7 @@ import { afterEach, expect, test } from "bun:test"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { ending, terminalLost } from "../src/main.ts"
-import { rows } from "./help.ts"
+import { rows, write } from "./help.ts"
 import { Pty } from "./pty.ts"
 import { env, place, PROGRAM, program, text, vendor } from "./vendor.ts"
 
@@ -472,6 +472,49 @@ test("a launch whose rules file is missing does not start: the code 1, the field
   expect(pty.raw).not.toContain("\x1b[?2004h")
   expect(fs.existsSync(at.file)).toBe(false)
   expect(server.bodies.length).toBe(0)
+})
+
+// The repository's example server (tools/mcpexample.ts), as a config's server.
+const EXAMPLE = path.join(import.meta.dir, "../../../tools/mcpexample.ts")
+const isCompaction = (body: unknown) => JSON.stringify(body).includes("Compaction: ")
+
+test("a launch with a gated function (the example's tools, approval ask): a program's call waits; after a yes, the next launch's load runs it one time and its result starts a turn of its own", async () => {
+  const at = place()
+  configure(at, { servers: { example: { command: process.execPath, args: [EXAMPLE], approval: "ask" } } })
+  let turns = 0
+  const server = fake((_, body) =>
+    isCompaction(body)
+      ? text("a line")
+      : JSON.stringify(body).includes("a call that waited for approval has run")
+      ? text("Late seen.")
+      : ++turns === 1
+      ? program("call_1", "return await example.send({ to: 'ada', text: 'hi' })")
+      : text("It waits.")
+  )
+  const first = start(at, server.address)
+  await first.sees(IDLE)
+  first.type("send it\r")
+  await first.sees("It waits.", IDLE)
+  first.type("/quit\r")
+  await first.ends()
+  expect(first.code).toBe(0)
+  const approval = () => rows<{ n: number; fn: string; input: string; status: string; output: string | null; msg: number | null }>(at.file, "select n, fn, input, status, output, msg from everchat_approval")
+  expect(approval()).toEqual([{ n: 1, fn: "example.send", input: "[{\"to\":\"ada\",\"text\":\"hi\"}]", status: "pending", output: null, msg: null }])
+  // A person's yes, as the store's answer writes it.
+  write(at.file, "update everchat_approval set status = 'yes', who = 'Ada', answered = ? where n = 1", [Date.now()])
+  const second = start(at, server.address)
+  await second.sees("Late seen.", IDLE)
+  second.type("/quit\r")
+  await second.ends()
+  expect(second.code).toBe(0)
+  const [row] = approval()
+  expect([row!.status, row!.output]).toEqual(["done", "Not sent (an example): 2 characters to \"ada\"."])
+  const late = messages(at.file).filter((one) => one.kind === "late")
+  expect(late.map((one) => one.text)).toEqual(["Approval 1: example.send({\"to\":\"ada\",\"text\":\"hi\"}) ran after a yes by Ada.\nResult:\nNot sent (an example): 2 characters to \"ada\"."])
+  expect(rows<{ msg: number }>(at.file, "select msg from everchat_approval")[0]!.msg).toBe(rows<{ i: number }>(at.file, "select i from everchat_msg_read where kind = 'late'")[0]!.i)
+  // The call's own row still waits; the turn of the late message ran.
+  expect(rows<{ status: string }>(at.file, "select status from everchat_call where fn = 'example.send'")).toEqual([{ status: "pending" }])
+  expect(server.bodies.filter((body) => JSON.stringify(body).includes("a call that waited for approval has run")).length).toBe(1)
 })
 
 test("when only one of the standard input and the standard output is a terminal, the program works in pipe mode", async () => {

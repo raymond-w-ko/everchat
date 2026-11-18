@@ -27,10 +27,36 @@
 //   results of its present step. A message that comes too late for the turn
 //   starts the next turn.
 //
+// A message from outside a turn (`Source`, the seam)
+//
+// A source (the result of a call that ran after a person's yes; later a
+// wake-up) has a message that must start a turn of its own. It never steers
+// a turn that runs: it waits until the chat is idle. The loop asks the
+// source (`next`) at two places, under its `lock`: at a turn's end, done or
+// failed, when no message of the person waits; and in `ready`, which the
+// source's owner calls when it has something, and which does nothing while
+// a turn runs (that turn's end asks). Not after a stop: the offer waits for
+// the next end or the next `ready`. An offer is logged with its turn in one
+// transaction (`offer`): its pages and their `message` events, the turn and
+// its `start`, then the source's own `write`. A chat with no source pays
+// one test at a turn's end.
+//
+// A stop whose end could not be written (the read of the running turn, or
+// the end's write, failed) keeps a lost end: the stop's reason, with a
+// diagnostic of the cause. The loop is idle then, so a host can unload the
+// chat, and the next launch goes on with the turn that still runs. `ready`
+// first writes a lost end (the turn read again, ended as stopped with its
+// note and its `end`), so the stopped turn's `end` comes before the offer's
+// message and `start`; a read that finds no running turn forgets it. If
+// that read or write fails again, `ready` fails with its error, asks no
+// source, writes nothing more, and the lost end waits for the next `ready`.
+//
 // A turn's request
 //
 // Its first item is: the chat's view up to the first message that goes
-// whole, then the new messages whole. The turn waits until every message
+// whole, then the new messages whole, in one block that starts with the
+// header of the kind of the turn's first message (`HEADS`); a message of
+// another kind is given as `<kind>: <text>`. The turn waits until every message
 // before that point has its leaf. Then each step adds what the model gave
 // back, the results of its programs, and any message that steered it. The
 // items are kept as sent (table `turn_item`), so a later step, and a step
@@ -40,14 +66,32 @@
 // section 9):
 //
 //   a message, and no turn runs    msg, turn (running)
+//   a source's offer               msg, turn (running), the source's row
 //   the first request is built     turn_item 0, chat.taken
 //   a model step ends              turn_item (turn), msg asst, usage
 //   a program starts               call (running)
-//   a program ends                 call (done or failed), msg tool and echo
+//   a program ends                 call (done or failed), msg tool and echo,
+//                                  and a note for each call of it that
+//                                  waits for a person's answer
 //   all results of a step are in   turn_item (back)
 //   messages steer the turn        turn_item (user), chat.taken
 //   a turn ends                    turn (done, stopped or failed), and a
 //                                  note when it did not end well
+//   a note from outside a turn     msg note (`note`), and its own
+//                                  `write` (the approval's row)
+//
+// Two notes that approval needs. After each program, in the transaction of
+// its `tool` and `echo` and after them, one note for each call that it left
+// waiting for a person's yes or no (`store.approvalsOf`, in the order of
+// their numbers; `waits` in functions.ts says the text): the log keeps for
+// ever that a call waits, and the person sees it. A program with no such
+// call logs what it did before, with one more read. And `note`: a note
+// from outside a turn (a no, an expiry), logged with its `message` event
+// under the loop's lock, whether a turn runs or not, and with its caller's
+// `write` (which marks the approval's row as told) in the same transaction,
+// after its pages and their events, as a source's `write` in an offer's: a
+// failed `write` logs no page of the note and no event. It starts no turn
+// and steers none: the model reads it in the view of a later request.
 //
 // A restart (section 8): each call that still runs is closed as cut, with a
 // `tool` and an `echo` that say so. Then the turn that still runs goes on
@@ -99,20 +143,33 @@
 //
 // Not here yet: agents, hooks, and images.
 
-import { Clock, Context, Effect, Fiber, Layer, Option, PubSub, Schema, type Scope, Semaphore, Stream } from "effect"
+import { Clock, Context, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Semaphore, Stream } from "effect"
 import { Ask } from "./ask.ts"
+import { waits } from "./functions.ts"
 import { TOOL } from "./head.ts"
 import { Limit } from "./limit.ts"
 import { Memory, type Said } from "./memory.ts"
 import type { Call, Head, Item, Reply, Result } from "./request.ts"
 import { Sandbox } from "./sandbox.ts"
-import { type Call as CallRow, type Event, type Message, SENDER_KEY, Store, StoreError, type Turn } from "./store.ts"
+import { type Call as CallRow, type Event, type Kind, type Message, SENDER_KEY, Store, StoreError, type Turn } from "./store.ts"
 
 // This module's diagnostics name it as their source (diagnostics.ts).
 const diagnostic = Effect.annotateLogs("source", "turn")
 
 // The start of the block with the person's new message, after the view.
 export const HEAD = "Turn: the user's new message:\n\n"
+
+// The start of the block of a turn that the result of a call that ran
+// after a person's yes starts (the kind `late`).
+export const LATE = "Turn: a call that waited for approval has run:\n\n"
+
+// The kinds of message that a turn's first item takes in, each with the
+// header of a block that a message of that kind starts. A source may offer
+// each of them but `user` and `work` (`Offer`).
+export const HEADS = { user: HEAD, work: HEAD, late: LATE } as const satisfies Partial<Record<Kind, string>>
+
+// The kinds that `HEADS` has, in its order.
+const TAKEN: ReadonlyArray<Kind> = Object.keys(HEADS) as Array<keyof typeof HEADS>
 
 // What a call's result says when the program stopped while it ran.
 export const CUT = "The program was cut when EverChat stopped. It may or may not have finished."
@@ -221,6 +278,27 @@ export interface Options {
   readonly hub?: number | undefined
 }
 
+// A message that a source outside a turn gives: its kind (a key of
+// `HEADS` but `user` and `work`; another is a defect), its text, and the
+// source's own write, which marks its row. `write` runs in the transaction
+// that logs the message and starts its turn, with the message's first page
+// and that turn. A failed `write` fails that transaction, and stops the
+// memory for the launch (memory.ts, `pushWith`).
+export interface Offer {
+  readonly kind: Kind
+  readonly text: string
+  readonly write: (first: Message, turn: Turn) => Effect.Effect<void, StoreError>
+}
+
+// The seam of a message from outside a turn. `next` gives what the source
+// has now, or null; it decides before it returns, and is asked only under
+// the loop's lock with no message of the person waiting. A host with more
+// than one source gives one `Source` that asks them in its own order. The
+// turn loop reads it at its build, if it is there (`Effect.serviceOption`).
+export class Source extends Context.Service<Source, {
+  readonly next: Effect.Effect<Offer | null, StoreError>
+}>()("everchat/turn/Source") {}
+
 export class Turns extends Context.Service<Turns, {
   // The person says something. It returns when the message is in the log.
   // `key`: its sender's key (the head comment). `told`: run with the `Sent`
@@ -234,6 +312,22 @@ export class Turns extends Context.Service<Turns, {
   say(text: string, key?: string | null, told?: (sent: Sent) => Effect.Effect<void>): Effect.Effect<Sent, StoreError>
   // The person stops the turn that runs.
   stop(why?: string): Effect.Effect<void>
+  // A note from outside a turn (a no, an expiry), with its `message`
+  // event, under the loop's lock: it gives the note's first page. `write`,
+  // if given, runs with that first page in the note's one transaction,
+  // after its pages and their events (as a source's `write` in an offer's):
+  // when it fails, the note fails whole, with no page and no event written,
+  // and the memory stops for the launch, as after every failed write. It
+  // starts no turn and steers none. Not from inside the loop's lock (a
+  // source's `write`): it would wait for itself.
+  note(text: string, write?: (first: Message) => Effect.Effect<void, StoreError>): Effect.Effect<Message, StoreError>
+  // The source (`Source`) has something: with no turn running, its offer
+  // is logged and starts its turn. While a turn runs it does nothing: that
+  // turn's end asks the source. With no source, it does nothing. A stopped
+  // turn's end that the stop could not write is written first; if that
+  // fails, `ready` fails with its error and asks no source (the head
+  // comment).
+  readonly ready: Effect.Effect<void, StoreError>
   // Waits until no turn runs.
   readonly idle: Effect.Effect<void>
   // True while a turn runs (a request, a call, its end), with no wait.
@@ -257,7 +351,13 @@ export class Turns extends Context.Service<Turns, {
         const ask = yield* Ask
         const sandbox = yield* Sandbox
         const limit = yield* Limit
+        const source = Option.getOrNull(yield* Effect.serviceOption(Source))
         const scope = yield* Effect.scope
+        // The turns' fibers run in a scope of their own, a child of the
+        // layer's. The layer's close closes it and cuts the memory's
+        // compactions at one time (`Memory.cut`; the finalizer at the end of
+        // the build).
+        const turns = yield* Scope.fork(scope, "sequential")
         const lock = yield* Semaphore.make(1)
         const capacity = options.hub
         if (capacity !== undefined && !(Number.isInteger(capacity) && capacity >= 1 && capacity <= LARGEST)) {
@@ -273,6 +373,9 @@ export class Turns extends Context.Service<Turns, {
         // True while a stopped turn's end is written, after `running` is
         // null.
         let ending = false
+        // The reason of a stop whose end could not be written: `ready`
+        // writes it before it asks the source (the head comment).
+        let lost: string | null = null
         const clock = yield* Clock.Clock
         // When the last turn ended; the layer's start before any.
         let rested = clock.currentTimeMillisUnsafe()
@@ -366,9 +469,28 @@ export class Turns extends Context.Service<Turns, {
 
         const keep = (turn: number, kept: Kept) => store.addTurnItem(turn, kept.kind, JSON.stringify(kept))
 
-        // A turn's first item: the view, then the new messages whole.
+        // The pages of each message as one text with its kind, from page
+        // `from` on.
+        const parts = (messages: ReadonlyArray<Message>, from: number): Array<{ readonly kind: Kind; readonly text: string }> => {
+          const out: Array<{ readonly kind: Kind; readonly text: string }> = []
+          let text = ""
+          for (const message of messages) {
+            if (message.i >= from) text += message.text
+            if (!message.more) {
+              if (text !== "") out.push({ kind: message.kind, text })
+              text = ""
+            }
+          }
+          const last = messages[messages.length - 1]
+          if (text !== "" && last !== undefined) out.push({ kind: last.kind, text })
+          return out
+        }
+
+        // A turn's first item: the view, then the new messages whole, of
+        // the kinds of `HEADS`, under the header of the kind of the turn's
+        // first message; a message of another kind says its kind.
         const first = Effect.fnUntraced(function*(turn: Turn) {
-          const messages = yield* waiting
+          const messages = yield* Effect.flatMap(store.chat, (chat) => store.messagesAfter(chat.taken, TAKEN))
           const start = messages[0]?.i ?? turn.firstMsg
           // The messages from `from` on go whole. Every message before it
           // must have its leaf, and a message that comes meanwhile can move it.
@@ -377,8 +499,13 @@ export class Turns extends Context.Service<Turns, {
             from = next
             yield* memory.settle(from)
           }
-          const text = texts(messages.length === 0 ? yield* store.messages(turn.firstMsg, turn.firstMsg + 1) : messages, from).join("\n\n")
-          const kept: Kept = { kind: "user", blocks: [...(yield* memory.view(from)), { text: HEAD + text, mark: true }] }
+          const own = messages.find((message) => message.i === turn.firstMsg) ?? (yield* store.messages(turn.firstMsg, turn.firstMsg + 1))[0]
+          const kind = own?.kind ?? "user"
+          const header = (HEADS as Partial<Record<Kind, string>>)[kind] ?? HEAD
+          const text = parts(messages.length === 0 ? yield* store.messages(turn.firstMsg, turn.firstMsg + 1) : messages, from)
+            .map((one) => (one.kind === kind ? one.text : one.kind + ": " + one.text))
+            .join("\n\n")
+          const kept: Kept = { kind: "user", blocks: [...(yield* memory.view(from)), { text: header + text, mark: true }] }
           const last = messages[messages.length - 1]?.i ?? turn.firstMsg
           yield* store.transaction(Effect.andThen(keep(turn.id, kept), store.setTaken(last)))
           return kept
@@ -417,6 +544,22 @@ export class Turns extends Context.Service<Turns, {
         // The functions that program `id` called.
         const functionsOf = (turn: number, id: number) => Effect.map(store.calls(turn), (rows) => rows.filter((row) => row.parent === id))
 
+        // A program's end: its `tool` and `echo`, then a note for each call
+        // of it that waits for a person's answer, each with its event, and
+        // `also`, in one transaction.
+        const ended = (turn: number, id: number, input: string, echo: string, also: Effect.Effect<void, StoreError>) =>
+          Effect.gen(function*() {
+            const waiting = yield* store.approvalsOf(id)
+            yield* log(
+              [
+                { kind: "tool", text: input, turn, call: id },
+                { kind: "echo", text: echo, turn, call: id },
+                ...waiting.map((approval) => ({ kind: "note" as const, text: waits(approval), turn, call: id }))
+              ],
+              also
+            )
+          })
+
         // One program of the model: its call is written when it starts, and
         // its `tool` and `echo` when it ends. The row and the event hold the
         // program made well-formed once, the same text; the sandbox runs it as
@@ -429,10 +572,7 @@ export class Turns extends Context.Service<Turns, {
             return [id, [{ type: "call", n, turn: turn.id, call: id, program: shown }]] as const
           })))
           const close = (status: "done" | "failed" | "cut", output: string, text: string, bytes?: number) =>
-            log(
-              [{ kind: "tool", text: call.input, turn: turn.id, call: id }, { kind: "echo", text, turn: turn.id, call: id }],
-              store.endCall(id, { status, output, shown: bytes })
-            )
+            ended(turn.id, id, call.input, text, store.endCall(id, { status, output, shown: bytes }))
           // The person stopped the turn: the call is closed, with the list
           // of its functions. The sandbox has closed those by then. The
           // program's own stop leaves the call running, for the next launch
@@ -555,6 +695,48 @@ export class Turns extends Context.Service<Turns, {
           })
         const started = (begun: { readonly turn: Turn; readonly n: number }): TurnEvent => ({ type: "start", n: begun.n, turn: begun.turn.id })
 
+        // The source's offer, under the loop's `lock`, with no turn running:
+        // nothing with no source, with a message of the person waiting, or
+        // with nothing offered (null). Else, in one transaction, the offer's
+        // message (its pages and their `message` events), the new turn and
+        // its `start`, and the source's `write`; then `next` with the turn,
+        // in the step that nothing interrupts after the commit and the
+        // publish.
+        const offer = (next: (turn: Turn) => Effect.Effect<void> = () => Effect.void): Effect.Effect<Turn | null, StoreError> =>
+          Effect.gen(function*() {
+            if (source === null || (yield* waiting).length > 0) {
+              return null
+            }
+            const offered = yield* source.next
+            if (offered === null) {
+              return null
+            }
+            if (!Object.hasOwn(HEADS, offered.kind) || offered.kind === "user" || offered.kind === "work") {
+              return yield* Effect.die(new Error("a source offered a message of the kind " + offered.kind + ", which no source may offer"))
+            }
+            return yield* recordPush(
+              [{ kind: offered.kind, text: offered.text }],
+              (written) =>
+                Effect.gen(function*() {
+                  const first = written[0]
+                  if (first === undefined) {
+                    return yield* Effect.die(new Error("a source's message logged no page"))
+                  }
+                  const numbers = yield* Effect.forEach(written, (message) => store.addEvent({ type: "message", msg: message.i, msgLast: message.i }))
+                  const begun = yield* begin(first.i)
+                  yield* offered.write(first, begun.turn)
+                  return [numbers, begun] as const
+                }),
+              null,
+              (written, [numbers, begun]) =>
+                [
+                  begun.turn,
+                  [...written.map((message, k): TurnEvent => ({ type: "message", n: numbers[k]!, message })), started(begun)]
+                ] as const,
+              next
+            )
+          })
+
         // Turns, one after the other, while messages wait. A turn that
         // failed ends the row: the person must speak again.
         const drive = (turn: Turn): Effect.Effect<void> =>
@@ -567,8 +749,13 @@ export class Turns extends Context.Service<Turns, {
                 // A message that came too late for the turn starts the next one.
                 const next: Message | undefined = status === "done" ? (yield* waiting)[0] : undefined
                 if (next === undefined) {
-                  rest()
-                  return null
+                  // With no message of the person waiting, done or failed,
+                  // the source's offer starts the next turn.
+                  const offered = source === null ? null : yield* offer()
+                  if (offered === null) {
+                    rest()
+                  }
+                  return offered
                 }
                 // Its turn and its `start`, in one transaction. The draft
                 // stays: it is what the person typed after that message.
@@ -586,10 +773,18 @@ export class Turns extends Context.Service<Turns, {
                 if (stopped === null || stopped.stop === null) {
                   return
                 }
-                const [turn] = yield* store.runningTurns(null)
-                if (turn !== undefined) {
-                  yield* end(turn, "stopped", stopped.stop)
-                }
+                const why = stopped.stop
+                yield* Effect.gen(function*() {
+                  const [turn] = yield* store.runningTurns(null)
+                  if (turn !== undefined) {
+                    yield* end(turn, "stopped", why)
+                  }
+                }).pipe(
+                  // Kept: `ready` writes it before it asks the source.
+                  Effect.catchCause((cause) =>
+                    Effect.andThen(Effect.sync(() => (lost = why)), diagnostic(Effect.logError("the end of a stopped turn was not written", cause)))
+                  )
+                )
               }).pipe(
                 Effect.ignore,
                 Effect.ensuring(Effect.sync(() => {
@@ -609,7 +804,7 @@ export class Turns extends Context.Service<Turns, {
         const launch = (turn: Turn) =>
           Effect.gen(function*() {
             running = { turn: turn.id, fiber: null, stop: null }
-            const fiber = yield* Effect.forkIn(drive(turn), scope)
+            const fiber = yield* Effect.forkIn(drive(turn), turns)
             if (running !== null) {
               running.fiber = fiber
             }
@@ -666,6 +861,26 @@ export class Turns extends Context.Service<Turns, {
             return sent
           }))
 
+        // A note from outside a turn: its pages, each with its `message`
+        // event, then the caller's `write` with the first page, in one
+        // transaction, under the lock.
+        const note = (text: string, write?: (first: Message) => Effect.Effect<void, StoreError>): Effect.Effect<Message, StoreError> =>
+          lock.withPermits(1)(recordPush(
+            [{ kind: "note", text }],
+            (written) =>
+              Effect.gen(function*() {
+                const first = written[0]
+                if (first === undefined) {
+                  return yield* Effect.die(new Error("a note logged no page"))
+                }
+                const numbers = yield* Effect.forEach(written, (message) => store.addEvent({ type: "message", msg: message.i, msgLast: message.i }))
+                if (write !== undefined) yield* write(first)
+                return numbers
+              }),
+            null,
+            (written, numbers) => [written[0]!, written.map((message, k): TurnEvent => ({ type: "message", n: numbers[k]!, message }))] as const
+          ))
+
         const stop = (why = "Stopped.") =>
           Effect.suspend(() => {
             if (running === null || running.fiber === null) {
@@ -674,6 +889,31 @@ export class Turns extends Context.Service<Turns, {
             running.stop = why
             return Fiber.interrupt(running.fiber)
           })
+
+        // The source has something: with no turn running, its offer starts
+        // a turn, as a person's message does (`say`). A stopped turn whose
+        // end is not yet written still runs, as for `busy`: the source is
+        // not asked then, and nothing is written. A stop takes no offer by
+        // itself: the next `ready` does, or a later turn's end. A lost end
+        // (the head comment) is written first, as the stop would have: if
+        // its read or its write fails, `ready` fails, the source is not
+        // asked, and the lost end stays.
+        const ready: Effect.Effect<void, StoreError> = lock.withPermits(1)(Effect.suspend(() => {
+          if (source === null || running !== null || ending) {
+            return Effect.void
+          }
+          return Effect.gen(function*() {
+            if (lost !== null) {
+              const why = lost
+              const [turn] = yield* store.runningTurns(null)
+              if (turn !== undefined) {
+                yield* end(turn, "stopped", why)
+              }
+              lost = null
+            }
+            yield* offer(launch)
+          })
+        }))
 
         const idle: Effect.Effect<void> = Effect.suspend(() =>
           running === null || running.fiber === null ? Effect.void : Effect.andThen(Fiber.await(running.fiber), idle)
@@ -692,10 +932,7 @@ export class Turns extends Context.Service<Turns, {
           }
           for (const call of open.filter((row) => row.parent === null)) {
             const text = (yield* limit.show(call.id, cutText(CUT, yield* functionsOf(turn.id, call.id)))).text
-            yield* log(
-              [{ kind: "tool", text: call.input, turn: turn.id, call: call.id }, { kind: "echo", text, turn: turn.id, call: call.id }],
-              store.endCall(call.id, { status: "cut", output: text })
-            )
+            yield* ended(turn.id, call.id, call.input, text, store.endCall(call.id, { status: "cut", output: text }))
           }
         }
         const [cut] = yield* store.runningTurns(null)
@@ -706,7 +943,15 @@ export class Turns extends Context.Service<Turns, {
           yield* launch(cut)
         }
 
-        return Turns.of({ say, stop, idle, busy, worked, events: Stream.fromPubSub(hub), subscribe: PubSub.subscribe(hub) })
+        // The close: the first thing that the layer's close does (added last,
+        // it runs before the close of `turns` that `Scope.fork` registered,
+        // the only other finalizer of the layer's scope). It cuts the turn
+        // and the queued compaction writes at one time: a compaction's write
+        // that waits for the memory's lock is cut as the close begins, not
+        // after the turn's call in flight.
+        yield* Effect.addFinalizer(() => Effect.all([memory.cut, Scope.close(turns, Exit.void)], { concurrency: 2, discard: true }))
+
+        return Turns.of({ say, stop, note, ready, idle, busy, worked, events: Stream.fromPubSub(hub), subscribe: PubSub.subscribe(hub) })
       })
     )
 }

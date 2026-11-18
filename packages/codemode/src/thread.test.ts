@@ -25,6 +25,7 @@ const slow = Layer.succeed(
   Functions.of({
     declarations: [{ name: "slow", signature: "(ms)", description: "slow" }],
     names: ["slow"],
+    approval: new Set(),
     call: (_name, args) => Effect.sleep(args[0] as number).pipe(Effect.as("slept"))
   })
 )
@@ -39,6 +40,7 @@ const withShell = Layer.succeed(
       { name: "shell", signature: "(command)", description: "shell" }
     ],
     names: ["slow", "shell"],
+    approval: new Set(),
     call: (name, args) => name === "slow" ? Effect.sleep(args[0] as number).pipe(Effect.as("slept")) : Effect.succeed("")
   })
 )

@@ -5,7 +5,7 @@
 
 import * as assert from "node:assert/strict"
 import { test } from "node:test"
-import { Deferred, Effect, Exit, Fiber, Layer, Schedule } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Schedule, Scheduler } from "effect"
 import { TestClock } from "effect/testing"
 import { compactor, newFile, options, rows, withMemory } from "@everchat/local/testing"
 import {
@@ -875,3 +875,162 @@ test("a write that fails stops the memory for good, and the database keeps the l
   const next = await withMemory(file, recorder().layer, Memory.use((memory) => memory.push([{ kind: "user", text: "after" }])))
   assert.equal(next[0]!.i, 1)
 })
+
+// The close's cut (`Memory.cut`)
+// ------------------------------
+
+test("cut: with one compaction's write holding the lock and others waiting for it, cut ends when the holder's write has ended; the others write nothing, and no compaction starts after it", async () => {
+  const file = newFile()
+  // Leaf 0's write holds the lock until `release`; leaves 1 and 2 answer at
+  // once, and their writes wait for the lock; leaf 3 waits at its answer,
+  // and `cutting` is done when the cut reaches it, after one yield: the cut
+  // runs a fiber's interruption at once, in its own call, so the yield lets
+  // the cut's fiber go on first (a cut that did not wait for the holder
+  // would return before the holder's write ends).
+  const writing = Deferred.makeUnsafe<void>()
+  const release = Deferred.makeUnsafe<void>()
+  const answered = Deferred.makeUnsafe<void>()
+  const cutting = Deferred.makeUnsafe<void>()
+  let answers = 0
+  const asked: Array<number> = []
+  const answering = compactor((_blocks, node) =>
+    Effect.suspend(() => {
+      asked.push(node.i)
+      if (node.l === 0 && node.i === 3) return Effect.onInterrupt(Effect.never, () => Effect.andThen(Effect.yieldNow, Deferred.succeed(cutting, undefined)))
+      if (++answers === 3) Deferred.doneUnsafe(answered, Exit.void)
+      return Effect.succeed({ text: "line " + node.i })
+    }))
+  let held = false
+  const holding = Layer.effect(
+    Store,
+    Store.useSync((store) =>
+      Store.of({
+        ...store,
+        putNodes: (nodes) => {
+          if (held || answers === 0) return store.putNodes(nodes)
+          held = true
+          return Effect.andThen(Deferred.succeed(writing, undefined), Effect.andThen(Deferred.await(release), store.putNodes(nodes)))
+        }
+      }))
+  ).pipe(Layer.provide(storeLayer(file, options())))
+  const got = await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      yield* memory.push(Array.from({ length: 4 }, () => ({ kind: "user" as const, text: sized(600) })))
+      yield* Deferred.await(answered)
+      yield* Deferred.await(writing)
+      // The node rows as `cut` returns, read in its own fiber.
+      let returned: unknown = null
+      const cut = yield* Effect.forkChild(Effect.andThen(memory.cut, Effect.sync(() => {
+        returned = rows(file, "select count(*) as n from everchat_node")[0]
+      })))
+      yield* Deferred.await(cutting)
+      // The cut has begun, and the holder's write still holds the lock: the
+      // cut has not ended.
+      const before = { ended: cut.pollUnsafe() !== undefined, nodes: rows(file, "select count(*) as n from everchat_node")[0] }
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(cut)
+      const after = rows<{ l: number; i: number; text: string }>(file, "select l, i, text from everchat_node order by l, i")
+      // After the cut: a message still logs, and starts no compaction (a
+      // compaction that starts is busy at once).
+      const k = asked.length
+      yield* memory.push([{ kind: "user", text: sized(600) }, { kind: "user", text: sized(600) }])
+      const busy = yield* memory.busy
+      return { before, returned, after, k, busy, later: asked.length, count: rows(file, "select count(*) as n from everchat_msg")[0] }
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(release, undefined)),
+      Effect.provide(Memory.layer.pipe(Layer.provide(holding), Layer.provide(answering)))
+    )
+  )
+  assert.deepStrictEqual(got.before, { ended: false, nodes: { n: 0 } })
+  // `cut` returned when the holder's write had ended.
+  assert.deepStrictEqual(got.returned, { n: 1 })
+  // The holder's leaf alone: the two that waited for the lock wrote nothing.
+  assert.equal(got.after.length, 1)
+  assert.deepStrictEqual([got.after[0]!.l, got.after[0]!.text], [0, "line " + got.after[0]!.i])
+  assert.deepStrictEqual(got.count, { n: 6 })
+  assert.equal(got.busy, false)
+  assert.equal(got.later, got.k)
+  assert.deepStrictEqual([...asked].sort(), [0, 1, 2, 3])
+})
+
+test("cut: after it, idle returns and busy is false, with compactions cut and never started; a second cut is no fault", async () => {
+  const file = newFile()
+  let asked = 0
+  const waiting = compactor(() => (asked++, Effect.never))
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const memory = yield* Memory
+      yield* memory.push(Array.from({ length: JOBS + 4 }, () => ({ kind: "user" as const, text: sized(600) })))
+      assert.equal(yield* memory.busy, true)
+      assert.equal((yield* memory.state).busy, JOBS)
+      yield* memory.cut
+      yield* memory.idle
+      assert.equal(yield* memory.busy, false)
+      yield* memory.cut
+      yield* memory.idle
+      assert.equal(yield* memory.busy, false)
+    }).pipe(Effect.provide(Memory.layer.pipe(Layer.provideMerge(storeLayer(file, options())), Layer.provide(waiting))))
+  )
+  assert.ok(asked <= JOBS)
+  assert.deepStrictEqual(rows(file, "select count(*) as n from everchat_node where l = 0"), [{ n: 0 }])
+})
+
+// The scheduler's budget sets where the push's fiber yields while it forks
+// its compactions, and the gate (the push's append) with `delay` yields sets
+// where the cut comes: at some of them, between a fork and the fiber's place
+// in the memory's jobs. The cut's own steps take no yield of the budget
+// (PreventSchedulerYield), so an ask counted after `cutting` came after the
+// cut began.
+for (const budget of [16, 32, 256, undefined]) {
+  test(`cut: at one time with a push that forks compactions, at Effect's MaxOpsBeforeYield ${budget ?? "default"}, busy is false at cut's return and stays false, and no compactor is asked after cut began`, async () => {
+    for (let delay = 0; delay <= 24; delay++) {
+      const file = newFile()
+      const ready = Deferred.makeUnsafe<void>()
+      let armed = false
+      let cutting = false
+      let asked = 0
+      let late = 0
+      const gated = Layer.effect(
+        Store,
+        Store.useSync((store) =>
+          Store.of({
+            ...store,
+            append: (messages, key) =>
+              Effect.tap(store.append(messages, key), () => Effect.sync(() => {
+                if (armed) Deferred.doneUnsafe(ready, Exit.void)
+              }))
+          }))
+      ).pipe(Layer.provide(storeLayer(file, options())))
+      const waiting = compactor(() =>
+        Effect.suspend(() => {
+          asked += 1
+          if (cutting) late += 1
+          return Effect.never
+        }))
+      const run = Effect.gen(function*() {
+        const memory = yield* Memory
+        const cutter = yield* Effect.forkChild(Effect.gen(function*() {
+          yield* Deferred.await(ready)
+          for (let i = 0; i < delay; i++) yield* Effect.yieldNow
+          return yield* Effect.provideService(
+            Effect.suspend(() => {
+              cutting = true
+              return Effect.andThen(memory.cut, memory.busy)
+            }),
+            Scheduler.PreventSchedulerYield,
+            true
+          )
+        }))
+        armed = true
+        yield* memory.push(Array.from({ length: 64 }, () => ({ kind: "user" as const, text: sized(600) })))
+        const atReturn = yield* Fiber.join(cutter)
+        const k = asked
+        for (let i = 0; i < 10; i++) yield* Effect.yieldNow
+        return { atReturn, late, busy: yield* memory.busy, more: asked - k }
+      }).pipe(Effect.provide(Memory.layer.pipe(Layer.provide(gated), Layer.provide(waiting))))
+      const got = await Effect.runPromise(budget === undefined ? run : Effect.provideService(run, Scheduler.MaxOpsBeforeYield, budget))
+      assert.deepStrictEqual(got, { atReturn: false, late: 0, busy: false, more: 0 }, `delay ${delay}`)
+    }
+  })
+}

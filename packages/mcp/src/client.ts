@@ -44,7 +44,12 @@
 //   shown schemas, never the schemas as they came (H1): a field that this
 //   client does not know is no fault, and is not copied.
 // - A tool's setting (`Setting`) comes from the server's: `deny` leaves it
-//   out, `ask` refuses it (approval is not built yet), `auto` lets it in.
+//   out, `ask` lets it in with `approval: true` (a program's call of it
+//   waits for a person's yes: the core's `Entry`), `auto` lets it in with no
+//   flag. A server that is `marked` (a hosted provider's) also gates each
+//   tool whose definition's `_meta` has the own key `io.everchat/approval`
+//   (`MARK`) with a value other than `false`, whatever its setting but
+//   `deny`. Without `marked`, the key is not read.
 // - The function's name is `<server>.<member>`, the member the tool's name
 //   made an identifier (`toCodemodeIdentifier`); the entry keeps the tool's
 //   own name for the call.
@@ -143,13 +148,20 @@ export type Setting = "auto" | "ask" | "deny"
 // functions. `transport` makes the SDK's transport (a program on stdio, an
 // address over HTTP): this package makes none. `approval` is the setting of
 // each of its tools, `tools` the setting of one tool by its own name, which
-// wins; with neither, a tool is `auto`.
+// wins; with neither, a tool is `auto`. `marked`: the server's definitions
+// may mark a tool that needs approval (`MARK`); a hosted provider sets it,
+// the local connectors do not.
 export interface Server {
   readonly name: string
   readonly transport: () => Transport
   readonly approval?: Setting
   readonly tools?: Readonly<Record<string, Setting>>
+  readonly marked?: boolean
 }
+
+// The key of a definition's `_meta` that marks a tool that needs a
+// person's yes before each call, read only for a `marked` server.
+export const MARK = "io.everchat/approval"
 
 // A function from outside: the core's entry, with the server, the tool's
 // own name, the `_meta` object of its definition (or undefined), and the
@@ -1300,16 +1312,16 @@ const checked = (
           refuse("Its name is given more than once by its server.")
           continue
         }
-        if (setting === "ask") {
-          refuse("It needs a yes before each call, and approval is not built yet.")
-          continue
-        }
         const forms = fault(definition)
         if (typeof forms === "string") {
           refuse(forms)
           continue
         }
         const one = definition as Definition
+        // `ask`, or a marked server's mark of the tool: a yes before each
+        // call. `_meta` is an object here, or undefined (`fault`).
+        const approval = setting === "ask" ||
+          (server.marked === true && one._meta !== undefined && Object.hasOwn(one._meta, MARK) && one._meta[MARK] !== false)
         // The shown schemas (H1): nothing reads the server's schemas again.
         const declaration: Declaration = {
           name: server.name + "." + toCodemodeIdentifier(name),
@@ -1327,7 +1339,8 @@ const checked = (
             tool: name,
             meta: one._meta,
             form: { input: forms.input.form, output: forms.output?.form },
-            run: runOf(client, server.name, name, declaration, forms, limits)
+            run: runOf(client, server.name, name, declaration, forms, limits),
+            ...(approval ? { approval: true } : {})
           },
           own,
           size,

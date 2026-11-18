@@ -52,7 +52,7 @@ import { TestClock } from "effect/testing"
 import * as fs from "node:fs"
 import { newFile, options, rows, withChats } from "../tests/help.ts"
 import { schema } from "./schema.ts"
-import { Chats, type Kind, type LaunchInput, NoChat, type Pick, type Reading, Store } from "@everchat/core/store"
+import { Chats, type Kind, type LaunchInput, NoChat, type Pick, type Reading, Store, WAIT } from "@everchat/core/store"
 
 type StoreService = typeof Store.Service
 
@@ -131,7 +131,7 @@ const LIVE_PID_A2 = process.pid + 100_002
 const LIVE_PID_A3 = process.pid + 100_003
 const ALIVE = (pid: number) => pid === LIVE_PID || pid === LIVE_PID_A2 || pid === LIVE_PID_A3
 
-const KINDS: ReadonlyArray<Kind> = ["user", "asst", "tool", "echo", "work", "note"]
+const KINDS: ReadonlyArray<Kind> = ["user", "asst", "tool", "echo", "work", "note", "late"]
 
 // Runs `effect` with `Chats` over `file`, its scope closed inside the test
 // clock: the launch's end has the clock's time too. The processes of the
@@ -277,10 +277,14 @@ const tried = <A>(what: string, effect: Effect.Effect<A, unknown>, otherwise: A)
 
 // The rows of one side. Each turn: an image, a turn with two items (three
 // for a side with more turns than A, so that a turn of A's number has more
-// items in such a chat), a program and a function it calls, a message of
+// items in such a chat), a program and two functions it calls, the second
+// of which waits for an answer (its approval, `pendCall`), a message of
 // pages (the first with images, and the sender's key `key-<turn>`: the same
 // keys in every chat, and keys from `key-3` on that A's chat has not) and
-// two more messages,
+// two more messages, the approval's state by the turn's number (1
+// pending, 2 no, 3 yes, 4 running, 5 done and told with the turn's first
+// message: so another chat has rows of A's numbers in A's states, and rows
+// that A has not in the other states),
 // two rows of usage and a diagnostic, and three events, each in the
 // transaction of what it reports: the turn's start, its program's call,
 // and its messages accepted. Then one more turn: its start, a reply and
@@ -333,9 +337,11 @@ const fill = (store: StoreService, side: Side) =>
           yield* store.addEvent({ type: "call", turn, call })
           return call
         })),
-        2 * t - 1
+        3 * t - 2
       )
-      const child = yield* tried(at("startCall", t), store.startCall({ turn, parent: program, fn: "read", input: `${tag} read ${t}` }), 2 * t)
+      const child = yield* tried(at("startCall", t), store.startCall({ turn, parent: program, fn: "read", input: `${tag} read ${t}` }), 3 * t - 1)
+      const pended = yield* tried(at("startCall", t), store.startCall({ turn, parent: program, fn: "send", input: `${tag} send ${t}` }), 3 * t)
+      const approval = yield* tried(at("pendCall", t), store.pendCall(pended, (n) => `${tag} waits as approval ${n}`), t)
       yield* tried(
         at("append", t),
         store.transaction(Effect.gen(function*() {
@@ -354,6 +360,15 @@ const fill = (store: StoreService, side: Side) =>
         })),
         undefined
       )
+      if (t >= 2) {
+        const yes = t !== 2
+        yield* tried(at("answerApproval", t), store.answerApproval(approval, { yes, who: `${tag} person ${t}`, text: yes ? null : `${tag} no ${t}` }), { _tag: "none" })
+      }
+      if (t >= 4) yield* tried(at("startApproval", t), store.startApproval(approval), Option.none())
+      if (t >= 5) {
+        yield* tried(at("endApproval", t), store.endApproval(approval, { status: "done", output: `${tag} sent ${t}` }), Option.none())
+        yield* tried(at("tellApproval", t), store.tellApproval(approval, firstMsg), undefined)
+      }
       yield* tried(
         at("addUsage", t),
         store.addUsage({ served: "turn", turn, pick, request: `${tag} request ${t}`, input: 10 * t, cacheRead: t, cacheWrite: t, output: t }),
@@ -515,6 +530,11 @@ const READS: { readonly [K in keyof Reading]: (reads: Reading) => Calls } = {
   turnItems: (r) => range(1, 4).map((n) => r.turnItems(n)),
   calls: (r) => range(1, 4).map((n) => r.calls(n)),
   call: (r) => range(1, 7).map((n) => r.call(n)),
+  approval: (r) => range(1, 4).map((n) => r.approval(n)),
+  approvalOf: (r) => range(1, 10).map((n) => r.approvalOf(n)),
+  approvals: (r) => [r.approvals(), r.approvals(["pending"]), r.approvals(["pending", "no"]), r.approvals(["done"]), r.approvals([])],
+  approvalsOf: (r) => range(1, 8).map((n) => r.approvalsOf(n)),
+  untoldApprovals: (r) => [r.untoldApprovals()],
   usage: (r) => [
     r.usage(),
     r.usage({ turn: 1 }),
@@ -572,9 +592,21 @@ const onlyOf = (file: string, other: string) => {
     if (got === null || got === undefined) throw new Error(`the other chat has no ${table}.${column} that A has not`)
     return got
   }
+  // The highest approval of the other chat in `status` whose number A has
+  // not; else its highest approval whose number A has not.
+  const approvalIn = (status: string) =>
+    rows<{ n: number | null }>(
+      file,
+      `select max(n) as n from everchat_approval where chat = ${b} and status = '${status}' and n not in (select n from everchat_approval where chat = ${a})`
+    )[0]?.n ?? top("everchat_approval", "n")
   return {
     turn: top("everchat_turn", "n"),
     call: top("everchat_call", "n"),
+    program: top("everchat_call", "n", "and parent is null"),
+    running: top("everchat_call", "n", "and parent is not null and status = 'running'"),
+    approval: top("everchat_approval", "n"),
+    yes: approvalIn("yes"),
+    runningApproval: approvalIn("running"),
     msg: top("everchat_msg", "i"),
     image: top("everchat_image", "n"),
     head: top("everchat_head", "n"),
@@ -612,6 +644,14 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
   "endTurn": { member: "endTurn", want: "nothing", run: (s, b) => s.endTurn(b.turn, "done", "by A") },
   "endCall": { member: "endCall", want: "nothing", run: (s, b) => s.endCall(b.call, { status: "done", output: "by A" }) },
   "setCallPgid": { member: "setCallPgid", want: "nothing", run: (s, b) => s.setCallPgid(b.call, 4242) },
+  "approval": { member: "approval", want: "nothing", run: (s, b) => s.approval(b.approval) },
+  "approvalOf": { member: "approvalOf", want: "nothing", run: (s, b) => s.approvalOf(b.call) },
+  "approvalsOf": { member: "approvalsOf", want: "nothing", run: (s, b) => s.approvalsOf(b.program) },
+  "pendCall": { member: "pendCall", want: "fails", run: (s, b) => s.pendCall(b.running, (n) => `by A ${n}`) },
+  "answerApproval": { member: "answerApproval", want: "nothing", run: (s, b) => s.answerApproval(b.approval, { yes: true, who: "A" }) },
+  "startApproval": { member: "startApproval", want: "nothing", run: (s, b) => s.startApproval(b.yes) },
+  "endApproval": { member: "endApproval", want: "nothing", run: (s, b) => s.endApproval(b.runningApproval, { status: "done", output: "by A" }) },
+  "tellApproval": { member: "tellApproval", want: "fails", run: (s, b) => s.tellApproval(b.approval, 0) },
   "addTurnItem": { member: "addTurnItem", want: "fails", run: (s, b) => s.addTurnItem(b.turn, "back", "by A") },
   "startCall with a turn": { member: "startCall", want: "fails", run: (s, b) => s.startCall({ turn: b.turn, vendorId: "by A", fn: "run", input: "by A" }) },
   "startCall with a parent": { member: "startCall", want: "fails", run: (s, b) => s.startCall({ turn: 1, parent: b.call, fn: "read", input: "by A" }) },
@@ -639,7 +679,8 @@ const ROWS: Record<string, { readonly member: keyof StoreService; readonly want:
 }
 
 const nothing = (value: unknown) =>
-  value === undefined || (Array.isArray(value) && value.length === 0) || (Option.isOption(value) && Option.isNone(value))
+  value === undefined || (Array.isArray(value) && value.length === 0) || (Option.isOption(value) && Option.isNone(value)) ||
+  (typeof value === "object" && value !== null && JSON.stringify(value) === "{\"_tag\":\"none\"}")
 
 // The other chats: B's (of another tenant), and A's second and third (of
 // A's tenant, made before A's chat and after it).
@@ -736,10 +777,66 @@ const WRITES: { readonly [K in Write]: (s: StoreService) => Calls } = {
     s.startCall({ turn: 2, parent: 1, fn: "read", input: "a new function" })
   ],
   endCall: (s) => [s.endCall(1, { status: "done", output: "by A" }), s.endCall(2, { status: "cut", output: "by A", shown: 1 })],
-  setCallPgid: (s) => [s.setCallPgid(3, 4242), s.setCallPgid(4, 4343)],
+  setCallPgid: (s) => [s.setCallPgid(4, 4242), s.setCallPgid(5, 4343)],
+  // A's running functions (2, 5); a program (1); a call that waits (3); a
+  // number that only the other chats have (8).
+  pendCall: (s) => [
+    s.pendCall(2, (n) => `A waits as approval ${n}`),
+    s.pendCall(5, (n) => `A waits as approval ${n}`),
+    s.pendCall(1, (n) => `a program ${n}`),
+    s.pendCall(3, (n) => `again ${n}`),
+    s.pendCall(8, (n) => `not A's ${n}`)
+  ],
+  // A's approvals: 1 pending, 2 no and not told; the other chats have rows
+  // of these numbers in these states, and rows that A has not (3 yes, 4
+  // running, 5 done).
+  answerApproval: (s) => [
+    s.answerApproval(1, { yes: true, who: "A's person", text: "yes by A" }),
+    s.answerApproval(1, { yes: false, who: "A's person" }),
+    s.answerApproval(2, { yes: true, who: "A's person" }),
+    s.answerApproval(3, { yes: true, who: "A's person" })
+  ],
+  expireApprovals: (s) => [
+    s.expireApprovals(),
+    Effect.andThen(TestClock.setTime(WAIT), s.expireApprovals()),
+    Effect.andThen(TestClock.setTime(WAIT + 1), s.expireApprovals()),
+    s.expireApprovals()
+  ],
+  startApproval: (s) => [
+    s.startApproval(1),
+    s.startApproval(2),
+    Effect.andThen(s.answerApproval(1, { yes: true, who: "A's person" }), s.startApproval(1)),
+    s.startApproval(1),
+    s.startApproval(3)
+  ],
+  endApproval: (s) => [
+    s.endApproval(1, { status: "done", output: "by A" }),
+    Effect.gen(function*() {
+      yield* s.answerApproval(1, { yes: true, who: "A's person" })
+      yield* s.startApproval(1)
+      return yield* s.endApproval(1, { status: "failed", output: "by A" })
+    }),
+    s.endApproval(1, { status: "done", output: "again" }),
+    s.endApproval(4, { status: "done", output: "by A" })
+  ],
+  cutApprovals: (s) => [
+    s.cutApprovals("by A"),
+    Effect.gen(function*() {
+      yield* s.answerApproval(1, { yes: true, who: "A's person" })
+      yield* s.startApproval(1)
+      return yield* s.cutApprovals("by A")
+    })
+  ],
+  tellApproval: (s) => [
+    s.tellApproval(2, 0),
+    s.tellApproval(2, 1),
+    s.tellApproval(1, 0),
+    s.tellApproval(3, 0),
+    s.tellApproval(5, 0)
+  ],
   addEvent: (s) => [
     s.addEvent({ type: "start", turn: 1 }),
-    s.addEvent({ type: "call", turn: 2, call: 3 }),
+    s.addEvent({ type: "call", turn: 2, call: 4 }),
     s.addEvent({ type: "message", msg: 4, msgLast: 4 }),
     s.addEvent({ type: "accepted", msg: 0, msgLast: 5 }),
     s.transaction(Effect.andThen(s.endTurn(2, "done"), s.addEvent({ type: "end", turn: 2 }))),
@@ -967,6 +1064,11 @@ for (const { column, key, parent, table } of shape.references) {
         // A copy of a message has no sender's key: the index (chat,
         // sender_key) holds the one of the row that it copies.
         if (table === "everchat_msg") row["sender_key"] = null
+        // A copy of an approval names a call of A that has none (the
+        // key (chat, call)), but in the case of the call itself.
+        if (table === "everchat_approval" && column !== "call") {
+          row["call"] = values(`select min(n) as v from everchat_call where chat = ${a} and n not in (select call from everchat_approval where chat = ${a})`)[0]
+        }
         const names = Object.keys(row)
         db.run(`insert into ${table} (${names.join(", ")}) values (${names.map(() => "?").join(", ")})`, names.map((name) => row[name]) as Array<never>)
       }
@@ -980,6 +1082,9 @@ for (const { column, key, parent, table } of shape.references) {
 
 test("the database refuses: the schema has each reference inside a chat that the store writes", () => {
   expect(shape.references.map((ref) => `${ref.table}.${ref.column}`).sort()).toEqual([
+    "everchat_approval.call",
+    "everchat_approval.msg",
+    "everchat_approval.turn",
     "everchat_call.launch",
     "everchat_call.parent",
     "everchat_call.turn",

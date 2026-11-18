@@ -16,8 +16,10 @@ import { type Pace, QUIET } from "@everchat/core/pace"
 import type { Event, Reply, Request, WireError } from "@everchat/core/request"
 import { Shell } from "../src/shell.ts"
 import { storeLayer } from "@everchat/sqlite/bun"
-import { Store, type StoreError } from "@everchat/core/store"
-import { HELP, SHOWN, Terminal } from "../src/terminal.ts"
+import { type Answered, type Approval, type ApprovalAnswer, Store, type StoreError } from "@everchat/core/store"
+import { Approvals } from "@everchat/core/approval"
+import { COMMANDS, expires, HELP, SHOWN, Terminal, usage, WHO } from "../src/terminal.ts"
+import { visible, waits as waitsNote } from "@everchat/core/functions"
 import { threadLayer } from "@everchat/codemode/thread"
 import { type TurnEvent, Turns } from "@everchat/core/turn"
 import { compactor, newFile, options, PICK as PICKED, reply, rows, wireError } from "./help.ts"
@@ -43,13 +45,30 @@ const whole = (got: Reply): Stream.Stream<Event, WireError> =>
 // A wire whose model says one text to every request.
 const talker = (text = "Hello to you.") => wireOf((asked) => whole(says(asked, text)))
 
-// One launch of the whole program, with the screen `screen`.
+// A fake `Approvals`: `rows` are the approvals that wait; `asked` keeps
+// each answer that it was given; `result` says what became of it (by
+// default: no such approval).
+const fakeApprovals = (rows: Array<Approval> = [], result: (n: number, answer: ApprovalAnswer) => Answered = () => ({ _tag: "none" })) => {
+  const asked: Array<{ n: number; answer: ApprovalAnswer }> = []
+  const layer = Layer.succeed(
+    Approvals,
+    Approvals.of({
+      waiting: Effect.sync(() => [...rows]),
+      answer: (n, answer) => Effect.sync(() => (asked.push({ n, answer }), result(n, answer)))
+    })
+  )
+  return { rows, asked, layer }
+}
+
+// One launch of the whole program, with the screen `screen`, and the fake
+// approvals `approvals`.
 const launch = <A, E>(
   file: string,
   wire: { layer: Layer.Layer<OpenAI> },
   screen: Screen,
   effect: Effect.Effect<A, E, Terminal | Turns | Store | Memory>,
-  pace?: Pace
+  pace?: Pace,
+  approvals: ReturnType<typeof fakeApprovals> = fakeApprovals()
 ) => {
   const cwd = path.dirname(file)
   // The logger is under every layer, and merged: see diagnostics.ts.
@@ -61,7 +80,7 @@ const launch = <A, E>(
   const sandbox = threadLayer().pipe(Layer.provide(functions), Layer.provide(store))
   const asking = Ask.layer.pipe(Layer.provide(Layer.merge(Cache.layer, wire.layer)))
   const turns = Turns.layer({ head: head(DECLARATIONS) }).pipe(Layer.provideMerge(memory), Layer.provide(Layer.mergeAll(asking, sandbox, limits)))
-  const terminal = Terminal.layer({ tty: screen, cwd, pace }).pipe(Layer.provideMerge(turns))
+  const terminal = Terminal.layer({ tty: screen, cwd, pace }).pipe(Layer.provideMerge(turns), Layer.provide(approvals.layer))
   return Effect.runPromise(effect.pipe(Effect.provide(terminal), Effect.provideService(AskDelay, () => Effect.succeed(0))))
 }
 
@@ -535,6 +554,8 @@ const fakeTurns = (
       return Turns.of({
         say: () => Effect.die("not used"),
         stop: () => Effect.void,
+        note: () => Effect.die("not used"),
+        ready: Effect.void,
         idle: Effect.void,
         busy: Effect.succeed(false),
         worked: Effect.succeed(0),
@@ -551,9 +572,15 @@ const fakeTurns = (
   return { made, layer }
 }
 
-const withFake = <A, E>(file: string, screen: Screen, fake: ReturnType<typeof fakeTurns>, effect: Effect.Effect<A, E, Terminal | Turns | Store>) => {
+const withFake = <A, E>(
+  file: string,
+  screen: Screen,
+  fake: ReturnType<typeof fakeTurns>,
+  effect: Effect.Effect<A, E, Terminal | Turns | Store>,
+  approvals: ReturnType<typeof fakeApprovals> = fakeApprovals()
+) => {
   const store = Diagnostics.layer.pipe(Layer.provideMerge(storeLayer(file, options())))
-  return Effect.runPromise(effect.pipe(Effect.provide(Terminal.layer({ tty: screen }).pipe(Layer.provideMerge(fake.layer), Layer.provideMerge(store)))))
+  return Effect.runPromise(effect.pipe(Effect.provide(Terminal.layer({ tty: screen }).pipe(Layer.provideMerge(fake.layer), Layer.provide(approvals.layer), Layer.provideMerge(store)))))
 }
 
 test("no message is shown twice or left out, whenever its event comes: before the subscription, just after it, or never", async () => {
@@ -675,4 +702,316 @@ test("a launch that finds a cut turn shows it at work, and then its reply", asyn
     yield* sees(second, "I did not.", IDLE)
   }))
   expect(turns(file)).toEqual([{ id: 1, status: "done" }])
+})
+
+// Approvals
+// ---------
+
+// When the approvals of these tests were made.
+const MADE = Date.UTC(2026, 10, 17, 12, 0, 0)
+
+// An approval that waits, with `over` over it.
+const approval = (id: number, over: Partial<Approval> = {}): Approval => ({
+  id,
+  turn: 1,
+  call: id + 1,
+  fn: "acme.send",
+  input: "[{\"to\":\"ann\"}]",
+  status: "pending",
+  who: null,
+  answer: null,
+  answered: null,
+  output: null,
+  ended: null,
+  msg: null,
+  created: MADE,
+  updated: MADE,
+  ...over
+})
+
+// The screen's rows of what the terminal told, joined with their indent
+// taken off: a text that wraps over rows is whole again.
+const unwrapped = (rows: ReadonlyArray<string>) => rows.map((row) => row.replace(/^ {2}/, "")).join("")
+
+// A turn loop that does nothing.
+const quiet = () => fakeTurns(() => Effect.void)
+
+test("/help lists /approvals, /approve and /deny", () => {
+  expect(COMMANDS.map((one) => one.name)).toEqual(["help", "stop", "diagnostics", "approvals", "approve", "deny", "quit"])
+  for (const name of ["approvals", "approve", "deny"]) {
+    expect(HELP).toContain("  /" + name.padEnd(13))
+  }
+  // Each row of /help fits the 80 columns of the slash command's test, with the indent.
+  expect(Math.max(...HELP.split("\n").map((row) => row.length))).toBeLessThanOrEqual(78)
+})
+
+test("/approvals with none, then with two: each with its number, its function, its arguments on one line (a long one cut) and when it expires", async () => {
+  const file = newFile()
+  const screen = new Screen(200, 30)
+  const approvals = fakeApprovals()
+  const long = "[\"" + "0123456789".repeat(30) + "\"]"
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approvals")
+    yield* sees(screen, "No call waits for approval.")
+    approvals.rows.push(approval(1), approval(2, { fn: "acme.post", input: long }))
+    send(screen, "/approvals")
+    const text = yield* sees(screen, "Calls that wait for approval")
+    expect(text).toContain("  Calls that wait for approval (/approve n, /deny n):\n" +
+      "    1  acme.send  [{\"to\":\"ann\"}]  expires " + expires(approval(1)) + "\n" +
+      "    2  acme.post  " + long.slice(0, 100) + "… (" + long.length + " characters: /approvals <n>)  expires " + expires(approval(2)))
+    // Seven days after it was made.
+    expect(expires(approval(1))).toBe(new Date(MADE + 7 * 24 * 3600 * 1000).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" }))
+  }), approvals)
+  expect(approvals.asked).toEqual([])
+})
+
+test("/approvals 2 shows one approval whole: every character of arguments of 5,000 characters, on as many rows as they need", async () => {
+  const file = newFile()
+  const screen = new Screen(100, 30)
+  const input = "[\"" + Array.from({ length: 4996 }, (_, k) => String.fromCharCode(97 + (k % 26))).join("") + "\"]"
+  expect(input.length).toBe(5000)
+  const approvals = fakeApprovals([approval(1), approval(2, { input, turn: 3 })])
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approvals 2")
+    yield* sees(screen, "Approval 2: acme.send, in turn 3")
+    const rows = yield* Effect.promise(() => screen.all())
+    const start = rows.findIndex((row) => row.includes("Its arguments, whole (5000 characters):"))
+    expect(start).toBeGreaterThan(0)
+    const told = rows.slice(start + 1, rows.findIndex((row, k) => k > start && row === ""))
+    expect(told.length).toBeGreaterThan(50)
+    expect(unwrapped(told)).toBe(input)
+    send(screen, "/approvals 7")
+    yield* sees(screen, "No approval 7 waits.")
+    send(screen, "/approvals two")
+    yield* sees(screen, "Give the number of an approval: /approvals 2")
+  }), approvals)
+  expect(approvals.asked).toEqual([])
+})
+
+// What the fake service gives for each number: 2 is answered as asked; 3
+// is none; 4 was answered no before; 5 expired.
+const results = (n: number, answer: ApprovalAnswer): Answered =>
+  n === 2
+    ? { _tag: "answered", approval: approval(2, { status: answer.yes ? "yes" : "no", who: answer.who, answer: answer.text ?? null, answered: MADE }) }
+    : n === 3
+    ? { _tag: "none" }
+    : n === 4
+    ? { _tag: "closed", approval: approval(4, { status: "no", who: WHO, answer: "not \u001b[2Jthis one", answered: MADE }) }
+    : { _tag: "expired", approval: approval(5, { status: "expired", answered: MADE }) }
+
+test("/approve 2 looks fine and /deny 2 no: the service gets the number, yes or no, who and the text; each of the five results has its line", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 40)
+  const approvals = fakeApprovals([approval(2)], results)
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approve 2 looks fine")
+    yield* sees(screen, "Approval 2: yes. The call runs now; its result starts a turn.")
+    send(screen, "/deny 2 no")
+    yield* sees(screen, "Approval 2: no. The call does not run; the chat is told.")
+    send(screen, "/approve 3")
+    yield* sees(screen, "No approval 3.")
+    send(screen, "/approve 4")
+    yield* sees(screen, "Approval 4 was answered already: no, by the person in the terminal (\"not \\x1b[2Jthis one\").")
+    send(screen, "/deny 5   ")
+    yield* sees(screen, "Approval 5 expired: it waited more than 7 days, and the call does not run.")
+  }), approvals)
+  expect(WHO).toBe("the person in the terminal")
+  expect(approvals.asked).toEqual([
+    { n: 2, answer: { yes: true, who: WHO, text: "looks fine" } },
+    { n: 2, answer: { yes: false, who: WHO, text: "no" } },
+    { n: 3, answer: { yes: true, who: WHO, text: null } },
+    { n: 4, answer: { yes: true, who: WHO, text: null } },
+    { n: 5, answer: { yes: false, who: WHO, text: null } }
+  ])
+})
+
+test("/approve, /approve x, /approve 0, /approve 2.5 and /deny -1 give the usage, and the service is not asked", async () => {
+  const file = newFile()
+  const screen = new Screen(120, 40)
+  const approvals = fakeApprovals([approval(2)], results)
+  const count = (text: string, part: string) => text.split(part).length - 1
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    for (const sent of ["/approve", "/approve x", "/approve 0", "/approve 2.5"]) {
+      send(screen, sent)
+    }
+    yield* until(screen, "four usages", (text) => count(text, usage("approve")) === 4)
+    send(screen, "/deny -1 no")
+    yield* sees(screen, usage("deny"))
+  }), approvals)
+  expect(usage("approve")).toBe("Give the number of an approval: /approve 2 [text]. /approvals lists them.")
+  expect(approvals.asked).toEqual([])
+})
+
+test("an answer while a turn runs: the service is asked, and its line shown, before the turn ends", async () => {
+  const file = newFile()
+  const screen = new Screen(100, 30)
+  const held = gate()
+  const wire = wireOf((asked) => Stream.concat(waits(held), whole(says(asked, "Done."))))
+  const approvals = fakeApprovals([approval(2)], results)
+  await launch(file, wire, screen, Effect.gen(function*() {
+    yield* idle(screen)
+    send(screen, "hello")
+    yield* sees(screen, "turn 1 · works")
+    send(screen, "/approve 2 yes please")
+    yield* sees(screen, "Approval 2: yes. The call runs now; its result starts a turn.")
+    expect(approvals.asked).toEqual([{ n: 2, answer: { yes: true, who: WHO, text: "yes please" } }])
+    expect(turns(file)).toEqual([{ id: 1, status: "running" }])
+    yield* open(held)
+    yield* sees(screen, "Done.", IDLE)
+  }), undefined, approvals)
+  expect(turns(file)).toEqual([{ id: 1, status: "done" }])
+})
+
+test("a model's text in an approval is shown with each control character as an escape: ESC [2J, U+009B and a line end; no such character reaches the screen", async () => {
+  const file = newFile()
+  const screen = new Screen(160, 40)
+  const input = "[\"\u001b[2Jgone\",\"\u009b31mred\",\"a\nb\",\"\u007f\"]"
+  const approvals = fakeApprovals([approval(1, { fn: "acme.se\u001b[8mnd", input })], results)
+  const shown = "[\"\\x1b[2Jgone\",\"\\x9b31mred\",\"a\\x0ab\",\"\\x7f\"]"
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approvals")
+    yield* sees(screen, "1  acme.se\\x1b[8mnd  " + shown + "  expires")
+    send(screen, "/approvals 1")
+    yield* sees(screen, "Approval 1: acme.se\\x1b[8mnd, in turn 1", "(" + input.length + " characters):\n  " + shown)
+    send(screen, "/approve 4")
+    const text = yield* sees(screen, "(\"not \\x1b[2Jthis one\")")
+    for (const one of ["\u001b", "\u009b", "\u007f"]) {
+      expect(text).not.toContain(one)
+    }
+    // The list, the whole, and the answer: nothing was cleared above them.
+    expect(text).toContain("idle")
+  }), approvals)
+})
+
+// The code points that draw as nothing or change the order on the screen
+// (terminal.ts, `visible`), and the escape of each.
+const HIDDEN_ONE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]$/u
+const escapeOf = (code: number) => (code < 0x100 ? "\\x" + code.toString(16).padStart(2, "0") : "\\u{" + code.toString(16) + "}")
+
+// Each of them in an approval's text: the bidi controls U+202E and U+2066,
+// the zero-width U+200B and U+200D, U+2028, U+FEFF, the soft hyphen, the
+// variation selectors U+FE0F and U+E0100, the tag U+E0041, the filler
+// U+3164, the private U+E000, the unassigned U+0378 and a surrogate with
+// no pair.
+const UNSEEN = [0x202e, 0x2066, 0x200b, 0x200d, 0x2028, 0xfeff, 0xad, 0xfe0f, 0xe0041, 0xe0100, 0x3164, 0xe000, 0x378, 0xd800]
+
+test("an approval's text with characters that draw as nothing or change the order (bidi, zero-width, U+2028, U+FEFF, the soft hyphen, variation selectors, a tag, a filler, private, unassigned, a lone surrogate): none reaches the screen, each is there as its escape", async () => {
+  const file = newFile()
+  // Wide enough for the list's row of escapes on one row.
+  const screen = new Screen(400, 40)
+  const hidden = UNSEEN.map((code) => String.fromCodePoint(code)).join("")
+  const shown = UNSEEN.map(escapeOf).join("")
+  expect(shown).toBe("\\u{202e}\\u{2066}\\u{200b}\\u{200d}\\u{2028}\\u{feff}\\xad\\u{fe0f}\\u{e0041}\\u{e0100}\\u{3164}\\u{e000}\\u{378}\\u{d800}")
+  const input = "[\"Lunch at noon?" + hidden + "\"]"
+  const approvals = fakeApprovals([approval(1, { fn: "acme.se" + hidden + "nd", input })], (n) => ({
+    _tag: "closed",
+    approval: approval(n, { status: "yes", who: WHO + hidden, answer: "fine" + hidden, answered: MADE })
+  }))
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    // Each wait is for a part that no escape changes; then the assertions.
+    send(screen, "/approvals")
+    yield* sees(screen, "Calls that wait for approval")
+    send(screen, "/approvals 1")
+    yield* sees(screen, "Approval 1: acme.se")
+    send(screen, "/approve 1")
+    const text = yield* sees(screen, "Approval 1 was answered already: yes, by ")
+    // No such character reached the screen.
+    expect([...text].filter((one) => UNSEEN.includes(one.codePointAt(0)!)).map((one) => one.codePointAt(0)!.toString(16))).toEqual([])
+    expect([...text].filter((one) => HIDDEN_ONE.test(one) && one !== "\n").map((one) => one.codePointAt(0)!.toString(16))).toEqual([])
+    // Each is there as its escape: in the list, whole, and in the answer.
+    expect(text).toContain("1  acme.se" + shown + "nd  [\"Lunch at noon?" + shown + "\"]  expires")
+    expect(text).toContain("Approval 1: acme.se" + shown + "nd, in turn 1")
+    expect(text).toContain("(" + input.length + " characters):\n  [\"Lunch at noon?" + shown + "\"]")
+    expect(text).toContain("Approval 1 was answered already: yes, by " + WHO + shown + " (\"fine" + shown + "\").")
+  }), approvals)
+})
+
+test("an approval's text with é, 日本語, a Hebrew word, an emoji of one code point and U+00A0 is shown as it is", async () => {
+  const file = newFile()
+  const screen = new Screen(200, 30)
+  const said = "café 日本語 שלום 😀 ok"
+  expect(visible(said)).toBe(said)
+  const approvals = fakeApprovals([approval(1, { input: "[\"" + said + "\"]" })])
+  await withFake(file, screen, quiet(), Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    send(screen, "/approvals 1")
+    yield* sees(screen, "\n  [\"" + said + "\"]")
+  }), approvals)
+})
+
+test("visible over every code point from U+0000 to U+10FFFF: each of the set is its escape, every other is as it is, and what it gives has none of the set", () => {
+  let escaped = 0
+  for (let code = 0; code <= 0x10ffff; code++) {
+    const one = String.fromCodePoint(code)
+    const got = visible(one)
+    const want = HIDDEN_ONE.test(one) ? escapeOf(code) : one
+    if (got !== want) {
+      expect({ code: code.toString(16), got }).toEqual({ code: code.toString(16), got: want })
+    }
+    for (const part of got) {
+      if (HIDDEN_ONE.test(part)) {
+        expect({ code: code.toString(16), part: part.codePointAt(0)!.toString(16) }).toEqual({ code: code.toString(16), part: "none of the set" })
+      }
+    }
+    if (got !== one) escaped++
+  }
+  // The set holds the C0, DEL and C1 (65), the surrogates (2,048), the
+  // private planes, the tags and much more: not a few.
+  expect(escaped).toBeGreaterThan(65 + 2048 + 6400)
+})
+
+test("the note of a waiting call whose arguments have U+E0041 and U+009B, as the terminal draws it after the program: both are there as their escapes, and neither reaches the screen", async () => {
+  const file = newFile()
+  const screen = new Screen(200, 30)
+  const fake = quiet()
+  // The note that the turn loop logs after the program (core, `waits`).
+  const note = waitsNote(approval(1, { input: "[\"ok\u{e0041}\u{e0042}\",\"\u009b31mred\"]" }))
+  await withFake(file, screen, fake, Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    const pages = yield* (yield* Store).append([
+      { kind: "tool", text: "await acme.send('ok')" },
+      { kind: "echo", text: "{\"pending\":1}" },
+      { kind: "note", text: note }
+    ])
+    for (const [k, page] of pages.entries()) {
+      yield* fake.made.publish({ type: "message", n: k + 1, message: page })
+    }
+    const text = yield* sees(screen, "· Approval 1 waits for a person's yes or no: acme.send(")
+    expect([...text].filter((one) => one === "\u{e0041}" || one === "\u{e0042}" || one === "\u009b").map((one) => one.codePointAt(0)!.toString(16))).toEqual([])
+    expect(text).toContain("· Approval 1 waits for a person's yes or no: acme.send(\"ok\\u{e0041}\\u{e0042}\",\"\\x9b31mred\"). The call did not run.")
+  }))
+})
+
+test("at a turn's end, one line when calls wait: 1 approval waits, 2 approvals wait, and none with 0", async () => {
+  const file = newFile()
+  const screen = new Screen(80, 30)
+  const fake = quiet()
+  const approvals = fakeApprovals()
+  await withFake(file, screen, fake, Effect.gen(function*() {
+    yield* sees(screen, "idle")
+    // Each turn: its start is on the status row, then its end is drawn
+    // (after the count of the approvals that wait).
+    const turn = (id: number, status: "done" | "failed") =>
+      Effect.gen(function*() {
+        yield* fake.made.publish({ type: "start", n: id * 2 - 1, turn: id })
+        yield* sees(screen, "turn " + id + " · works")
+        yield* fake.made.publish({ type: "end", n: id * 2, turn: id, status, why: status === "failed" ? "it broke" : null })
+        return yield* until(screen, "idle", (text) => text.endsWith(IDLE))
+      })
+    yield* turn(1, "done")
+    approvals.rows.push(approval(1))
+    yield* turn(2, "done")
+    approvals.rows.push(approval(2))
+    const text = yield* turn(3, "failed")
+    // The first end, with none waiting, gave no line: one line for each of the two others.
+    expect(text.split("approval waits:").length - 1).toBe(1)
+    expect(text.split("approvals wait:").length - 1).toBe(1)
+    expect(text).toContain("  1 approval waits: /approvals\n\n  2 approvals wait: /approvals")
+  }), approvals)
 })
