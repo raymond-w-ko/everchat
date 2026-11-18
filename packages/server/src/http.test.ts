@@ -941,13 +941,16 @@ test("over a connection: a GET whose stream runs at the deadline is interrupted,
     }))
 })
 
-test("a stream answer that started and is not pulled at the deadline (its client reads no more) is stopped there, and its place goes back", async () => {
+test("a stream answer that started and is not pulled at the deadline (its client reads no more) is stopped there, its place goes back, and it has the deadline's line of the log one time", async () => {
   const gate = gateOf()
   await run(Effect.gen(function*() {
     let made = 0
+    const from = lines.length
     const response = yield* call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
       Effect.succeed(HttpServerResponse.stream(Stream.fromEffectRepeat(Effect.sync(() => new TextEncoder().encode(String(made++)))), { contentType: "text/plain" })))
-    const reader = HttpServerResponse.toWeb(response).body!.getReader()
+    // The stream runs with the case's logger, so that a line written at its
+    // end is seen too.
+    const reader = HttpServerResponse.toWeb(response, { context: yield* Effect.context<never>() }).body!.getReader()
     expect((yield* Effect.promise(() => reader.read())).done).toBe(false)
     yield* settle
     // The client reads no more: the stream waits for a pull.
@@ -970,6 +973,9 @@ test("a stream answer that started and is not pulled at the deadline (its client
     })
     expect(rest).toBe("failed")
     expect(made).toBe(before)
+    // One line of the deadline, of a stream it closed: none at its end too.
+    yield* settle
+    expect(deadlineLines(from).map((line) => line.annotations)).toEqual([{ route: "R2", status: 200, fault: "deadline", closed: true }])
   }))
 })
 
@@ -1031,7 +1037,7 @@ test("a stream answer's deadline counts from the request's head, not from the ha
 // line of the log exactly one time, whoever ends first. Here the cut ends the
 // stream at once (it waits on its pull, interruptibly), so its end stops the
 // deadline's timer at once too.
-test("a pulled stream answer that the deadline's cut ends at once has the deadline's line of the log one time, there before its place goes back", async () => {
+test("a pulled stream answer that the deadline's cut ends at once has the deadline's line of the log one time", async () => {
   const gate = gateOf()
   await run(Effect.gen(function*() {
     let started = false
@@ -1065,15 +1071,17 @@ test("a pulled stream answer that the deadline's cut ends at once has the deadli
     }, 5_000)).toBe(true)
     expect([gate.inFlight(), state.read, ended]).toEqual([0, "failed", true])
     expect(deadlineLines(from).map((line) => line.annotations)).toEqual([{ route: "R2", status: 200, fault: "deadline", closed: true }])
-    // The line was there when the place had gone back.
+    // The line was there at the first look (every 5 ms) after the place had
+    // gone back; whether it came before the place went back is not ruled.
     expect(state.linesAtEnd).toBe(1)
   }))
 })
 
-test("a stream answer that nothing starts gives its place back at the deadline, and fails if it starts later: no work of it runs", async () => {
+test("a stream answer that nothing starts gives its place back at the deadline, with the deadline's line of the log one time, and fails if it starts later: no work of it runs, and no line more", async () => {
   const gate = gateOf()
   let ran = false
   await run(Effect.gen(function*() {
+    const from = lines.length
     const response = yield* call(gate, request("/v1/chats/" + A1, { headers: authorized() }), A1, () =>
       Effect.succeed(HttpServerResponse.stream(Stream.fromEffect(Effect.sync(() => {
         ran = true
@@ -1086,11 +1094,18 @@ test("a stream answer that nothing starts gives its place back at the deadline, 
     yield* TestClock.adjust(1)
     yield* settle
     expect(gate.inFlight()).toBe(0)
-    // Started after its deadline, the stream fails at once.
-    const read = yield* Effect.promise(() => HttpServerResponse.toWeb(response).text().then(() => "read", () => "failed"))
+    // One line of the deadline, with no `closed`: nothing started.
+    const one = [{ route: "R2", status: 200, fault: "deadline" }]
+    expect(deadlineLines(from).map((line) => line.annotations)).toEqual(one)
+    // Started after its deadline, the stream fails at once. It runs with the
+    // case's logger, so that a line written at its end is seen too.
+    const context = yield* Effect.context<never>()
+    const read = yield* Effect.promise(() => HttpServerResponse.toWeb(response, { context }).text().then(() => "read", () => "failed"))
     expect(read).toBe("failed")
     expect(ran).toBe(false)
     expect(gate.inFlight()).toBe(0)
+    yield* settle
+    expect(deadlineLines(from).map((line) => line.annotations)).toEqual(one)
   }))
 })
 
