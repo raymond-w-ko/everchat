@@ -1395,6 +1395,71 @@ test("a step with no call at the ceiling, with a person's message waiting: the w
   assert.deepStrictEqual(messages(file), ["0 wake -", "1 tool 1", "2 echo 1", "3 user -", "4 asst 1", "5 asst 2"])
 })
 
+// A store whose first read of the waiting messages of the person (the
+// kinds `user` and `work`: the steer's read in `after`, which comes right
+// after the write of a step's `back` item) never ends: `held` is done when
+// it waits. The launch's close cuts it, so the launch ends with the turn's
+// last item `back` and nothing after it written.
+const heldSteer = () => {
+  const held = Deferred.makeUnsafe<void>()
+  const state = { armed: true }
+  const layer = Layer.effect(
+    Store,
+    Effect.gen(function*() {
+      const real = yield* Store
+      return Store.of({
+        ...real,
+        messagesAfter: (after, kinds) =>
+          state.armed && kinds.join() === "user,work"
+            ? Effect.andThen(Effect.sync(() => (state.armed = false)), Effect.andThen(Deferred.succeed(held, undefined), Effect.never))
+            : real.messagesAfter(after, kinds)
+      })
+    })
+  )
+  return { held, layer }
+}
+
+test("a restart of a wake turn whose last item is back (the results in, the next reply not kept): at the ceiling of steps or of tokens it stops with no request; one under it goes on with one request, then stops", async () => {
+  const cases = [
+    { ceiling: { steps: 1, tokens: 1_000_000 }, requests: 0 },
+    { ceiling: { steps: 100, tokens: 100 }, requests: 0 },
+    { ceiling: { steps: 2, tokens: 1_000_000 }, requests: 1 },
+    { ceiling: { steps: 100, tokens: 101 }, requests: 1 }
+  ]
+  for (const { ceiling, requests } of cases) {
+    const file = newFile()
+    const first = fakeSource()
+    const once = busy(use(25, 25, 25, 25))
+    const at = requests === 0
+    // Launch 1: one step of 100 tokens whose program ends; the launch ends
+    // after its `back` item. At the ceiling it ends in the steer's read,
+    // before the loop's test of the ceiling (`reached`) could end the turn;
+    // one under it, while the next request waits.
+    const steer = heldSteer()
+    const asking = Deferred.makeUnsafe<void>()
+    await withSource(file, once, ran, first, Effect.gen(function*() {
+      const turns = yield* Turns
+      first.state.pending = { kind: "wake", text: FIRED, ceiling }
+      yield* turns.ready
+      yield* Deferred.await(at ? steer.held : asking)
+    }), at ? { store: steer.layer } : { ask: (n) => (n === 2 ? Effect.andThen(Deferred.succeed(asking, undefined), Effect.never) : Effect.void) })
+    const label = JSON.stringify(ceiling)
+    // One under it, the second request is held before it reaches the wire.
+    assert.equal(once.sent.length, 1, label)
+    assert.deepStrictEqual(kinds(file, 1), ["user", "turn", "back"], label)
+    assert.deepStrictEqual(ceilings(file), [{ id: 1, status: "running", why: null, ...ceiling }], label)
+    assert.deepStrictEqual(rows(file, "select status from everchat_call"), [{ status: "done" }], label)
+    assert.deepStrictEqual(notes(file), [], label)
+    // Launch 2: the turn goes on from its rows, its last item `back`.
+    const again = busy(use(25, 25, 25, 25), 8, "r")
+    await withSource(file, again, ran, fakeSource(), Turns.use((turns) => turns.idle))
+    assert.equal(again.sent.length, requests, label)
+    assert.deepStrictEqual(ceilings(file), [{ id: 1, status: "stopped", why: CEILING, ...ceiling }], label)
+    assert.deepStrictEqual(notes(file), [{ text: CEILING, turn: 1 }], label)
+    assert.deepStrictEqual(kinds(file, 1), at ? ["user", "turn", "back"] : ["user", "turn", "back", "turn", "back"], label)
+  }
+})
+
 test("a restart of a wake turn at its ceiling whose last step's results are not all in, with a person's message waiting: the results are kept, no steer, the turn ends stopped, and the message starts its own turn", async () => {
   const file = newFile()
   const sandbox = gatedSandbox()
@@ -1479,6 +1544,37 @@ test("an offer's ceiling of 0, below 0, a fraction, or one field alone is a defe
     assert.deepStrictEqual(source.state.wrote, [])
     assert.equal(wire.sent.length, 0)
   }
+})
+
+test("an offer's ceiling of 2 ** 53 steps or tokens, a whole number past the safe ones, is a defect of the source: nothing is written; Number.MAX_SAFE_INTEGER for both is taken, and kept on the turn's row", async () => {
+  for (const ceiling of [{ steps: 2 ** 53, tokens: 5 }, { steps: 5, tokens: 2 ** 53 }]) {
+    const file = newFile()
+    const source = fakeSource()
+    const wire = fakeWire((asked) => says(asked, "never"))
+    await withSource(file, wire, noPrograms, source, Effect.gen(function*() {
+      const turns = yield* Turns
+      source.state.pending = { kind: "wake", text: FIRED, ceiling }
+      const ready = yield* Effect.exit(turns.ready)
+      assert.equal(Exit.isFailure(ready) && Cause.hasDies(ready.cause), true, JSON.stringify(ceiling))
+    }))
+    assert.deepStrictEqual(messages(file), [], JSON.stringify(ceiling))
+    assert.deepStrictEqual(turnRows(file), [], JSON.stringify(ceiling))
+    assert.deepStrictEqual(source.state.wrote, [], JSON.stringify(ceiling))
+    assert.equal(wire.sent.length, 0, JSON.stringify(ceiling))
+  }
+  const file = newFile()
+  const source = fakeSource()
+  const wire = fakeWire((asked) => says(asked, "Done."))
+  const most = { steps: Number.MAX_SAFE_INTEGER, tokens: Number.MAX_SAFE_INTEGER }
+  await withSource(file, wire, noPrograms, source, Effect.gen(function*() {
+    const turns = yield* Turns
+    source.state.pending = { kind: "wake", text: FIRED, ceiling: most }
+    yield* turns.ready
+    yield* turns.idle
+  }))
+  assert.equal(wire.sent.length, 1)
+  assert.deepStrictEqual(ceilings(file), [{ id: 1, status: "done", why: null, ...most }])
+  assert.equal(source.state.wrote.length, 1)
 })
 
 // The wake-ups' notes at a program's close (turn.ts, `ended`)
